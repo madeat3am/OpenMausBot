@@ -5,7 +5,7 @@ human in the loop until there's something real to look at.
 
 ## Ingredients (all shipped)
 
-- a **webhook** delivering feedback into a bot's thread (Slack/форм/anything
+- a **webhook** delivering feedback into a bot's thread (Slack/a form/anything
   that can POST) — the webhook receiver runs on 127.0.0.1:8800
 - a **verification skill** for your app — ask any bot:
   `/create-verification-skill for <your app>` (it generates the skill, the
