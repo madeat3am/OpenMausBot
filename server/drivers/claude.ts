@@ -188,11 +188,14 @@ const DWEB_PROXY_PATH = SPAWNED_PROXIES.dweb;
 // makes it behave as plain node for the spawned MCP proxies (harmless in dev)
 const NODE_ENV_FLAG = { ELECTRON_RUN_AS_NODE: "1" };
 
-function removePrivateTempDir(filePath: string | null | undefined): void {
-  if (!filePath) return;
+function removePrivateTempDir(filePath: string | null | undefined): boolean {
+  if (!filePath) return true;
   try {
-    rmSync(dirname(filePath), { recursive: true, force: true });
-  } catch {}
+    rmSync(dirname(filePath), { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // ── permission broker (ported from agentcal drivers/claude.js) ─────────
@@ -946,8 +949,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
           session.mcpConfigPath = null;
         }
         if (session.systemPromptPath) {
-          removePrivateTempDir(session.systemPromptPath);
-          session.systemPromptPath = null;
+          if (removePrivateTempDir(session.systemPromptPath)) session.systemPromptPath = null;
         }
         active.delete(threadId);
         session.turn = null;
