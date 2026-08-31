@@ -118,6 +118,20 @@ The SPI in [`server/contracts.ts`](server/contracts.ts) is deliberately small. A
    failed spawn as a failed turn — never a hang, never a crash.
 5. Bring a contract test following the fake-CLI pattern (scripted fake process + `recordEvents`).
 
+## Agent-facing CLIs and proxies
+
+Anything an agent drives (MCP proxies, control CLIs, scripts/ helpers)
+follows the same rules the permission/routine errors already do:
+
+- **Errors teach.** Say what to do instead, with a copyable example — never
+  a bare enum or stack trace.
+- **`--dry-run` on anything destructive**, and the dry-run must actually
+  skip the side effect (verify by observing, not by trusting the name).
+- **Machine-readable output** (JSON) by default; humans get `--help`.
+- **Subcommands over flags-for-everything** — disclose gradually.
+- **Deep modules**: few commands that each do a whole job beat many that
+  each do a sliver.
+
 ## MCP tool schemas
 
 Tool `inputSchema`s travel through every engine's own MCP-to-provider conversion before a model
