@@ -24,11 +24,12 @@ function die(message, hint) {
 async function api(method, path, body) {
   let res;
   try {
-    res = await fetch(`${BASE}${path}`, {
-      method,
-      headers: body ? { "content-type": "application/json" } : undefined,
-      body: body ? JSON.stringify(body) : undefined,
-    });
+    const init = { method };
+    if (body !== undefined) {
+      init.headers = { "content-type": "application/json" };
+      init.body = JSON.stringify(body);
+    }
+    res = await fetch(`${BASE}${path}`, init);
   } catch {
     die(`no OpenMausBot server answering at ${BASE}`,
       "start one with `pnpm dev:server` (or set OMB_URL); for an isolated instance use OMB_DATA_DIR + OMB_PORT");
