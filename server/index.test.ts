@@ -2754,8 +2754,8 @@ describe("harness HTTP API", () => {
       expect((await api("POST", `/api/groups/${room.id}/messages`, {
         text: "/create-verification-skill for my mobile app",
       })).status).toBe(202);
-      let seen = await readJsonFileWhenReady<{ argv: string[] }>(fakeClaudeDump);
-      let system = seen.argv[seen.argv.indexOf("--append-system-prompt") + 1] ?? "";
+      let seen = await readJsonFileWhenReady<{ systemPrompt?: string }>(fakeClaudeDump);
+      let system = seen.systemPrompt ?? "";
       expect(system).toContain('<openmaus-skill id="create-verification-skill"');
       expect(system).toContain('<openmaus-skill id="phone-harness"');
       expect((await api("POST", `/api/groups/${room.id}/interrupt`, {})).status).toBe(200);
@@ -2768,8 +2768,8 @@ describe("harness HTTP API", () => {
       expect((await api("POST", `/api/groups/${room.id}/messages`, {
         text: "now give me a short status update",
       })).status).toBe(202);
-      seen = await readJsonFileWhenReady<{ argv: string[] }>(fakeClaudeDump);
-      system = seen.argv[seen.argv.indexOf("--append-system-prompt") + 1] ?? "";
+      seen = await readJsonFileWhenReady<{ systemPrompt?: string }>(fakeClaudeDump);
+      system = seen.systemPrompt ?? "";
       expect(system).not.toContain('<openmaus-skill id="create-verification-skill"');
       expect(system).toContain('<openmaus-skill id="phone-harness"');
     } finally {
