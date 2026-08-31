@@ -108,6 +108,7 @@ import { RETRY_MAX_ATTEMPTS } from "./drivers/retry.ts";
 import {
   GROUP_GOAL_MAX_TURNS,
   groupGoalAssignmentKey,
+  groupGoalCompletionTurnId,
   groupGoalCoordinatorInstructions,
   groupGoalWorkerInstructions,
   parseGroupGoalDecision,
@@ -1621,6 +1622,9 @@ bus.subscribe((event: RuntimeEvent) => {
   const coordinatorTurnsForThread = groupGoalCoordinatorTurns.get(event.threadId);
   const ambiguousCoordinatorText = !event.turnId && (coordinatorTurnsForThread?.size ?? 0) > 1;
   const goalCoordinatorTurn = groupGoalCoordinatorTurnForEvent(event);
+  const completedTurnId = event.type === "turn.completed"
+    ? groupGoalCompletionTurnId(event.turnId, goalCoordinatorTurn?.turnId)
+    : event.turnId;
   if (goalCoordinatorTurn?.discard && retiredProviderTurns.has(event.turnId)) {
     removeGroupGoalCoordinatorTurn(event.threadId, goalCoordinatorTurn);
     return;
@@ -1670,7 +1674,7 @@ bus.subscribe((event: RuntimeEvent) => {
   };
 
   if (coordinatorVisibleText) {
-    pushMessage({ role: "bot", kind: "text", text: coordinatorVisibleText, turnId: event.turnId });
+    pushMessage({ role: "bot", kind: "text", text: coordinatorVisibleText, turnId: completedTurnId });
     lastReply.set(event.threadId, coordinatorVisibleText);
   }
 
@@ -1959,7 +1963,7 @@ bus.subscribe((event: RuntimeEvent) => {
       turnUsage.set(event.threadId, { input: event.input, output: event.output, cachedInput: event.cachedInput });
       break;
     case "turn.completed": {
-      if (event.turnId) store.markTerminalAssistantMessage(event.threadId, event.turnId);
+      if (completedTurnId) store.markTerminalAssistantMessage(event.threadId, completedTurnId);
       const reply = lastReply.get(event.threadId) ?? "";
       lastReply.delete(event.threadId);
       const lastReported = turnUsage.get(event.threadId);
