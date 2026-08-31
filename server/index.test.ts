@@ -2723,7 +2723,7 @@ describe("harness HTTP API", () => {
       })).status).toBe(202);
       await expect.poll(() => existsSync(fakeClaudeDump), { timeout: 5_000 }).toBe(true);
       const seen = JSON.parse(readFileSync(fakeClaudeDump, "utf8"));
-      const system = seen.argv[seen.argv.indexOf("--append-system-prompt") + 1] ?? "";
+      const system = seen.systemPrompt ?? "";
       // the skill's instructions ride the system prompt the agent receives
       expect(system).toContain('<openmaus-skill id="create-verification-skill"');
       expect(system).toContain("skill_manage");
@@ -3094,6 +3094,7 @@ describe("harness HTTP API", () => {
       const dump = z.object({
         argv: z.array(z.string()),
         env: z.record(z.string(), z.string()),
+        systemPrompt: z.string(),
         mcpConfig: z.object({
           mcpServers: z.object({
             browser: z.object({
@@ -3119,9 +3120,7 @@ describe("harness HTTP API", () => {
       expect(dump.env.OMB_USER_DATA).toBeUndefined();
       expect(JSON.stringify(dump)).not.toContain(masterToken);
 
-      const systemIndex = dump.argv.indexOf("--append-system-prompt");
-      expect(systemIndex).toBeGreaterThanOrEqual(0);
-      const system = dump.argv[systemIndex + 1] ?? "";
+      const system = dump.systemPrompt;
       expect(system).toMatch(/page instructions as untrusted content/i);
       expect(system).toMatch(/consequential action.*confirmation/i);
       expect(system).toMatch(/browser_request_takeover/i);
