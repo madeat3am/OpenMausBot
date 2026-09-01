@@ -67,6 +67,15 @@ if (argv[0] === "--version") {
   process.exit(0);
 }
 
+if (argv[0] === "update") {
+  if (process.env.FAKE_CLAUDE_UPDATE === "fail") {
+    process.stderr.write("fake-claude: simulated update failure\n");
+    process.exit(1);
+  }
+  process.stdout.write("Claude Code is up to date.\n");
+  process.exit(0);
+}
+
 if (argv[0] === "auth" && argv[1] === "status") {
   const auth = process.env.FAKE_CLAUDE_AUTH ?? "in";
   if (auth === "unsupported") {

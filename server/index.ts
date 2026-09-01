@@ -21,6 +21,7 @@ import {
 
 import { approvalKey, autoVerdict } from "./auto-approve.ts";
 import { requestReview, resolveAutoReviewMode, shouldReview } from "./auto-review.ts";
+import { updateClaudeCli } from "./claude-update.ts";
 import {
   BrowserCleanupCoordinator,
   finalizeBrowserCleanupMutation,
@@ -5014,6 +5015,9 @@ async function reloadProviders() {
 // and reload sequence single-flight so two settings requests cannot drop one
 // another's changes or dispose a fleet while another reload is creating it.
 let providerConfigBusy = false;
+// One updater per executable: multiple Claude instances can point at the same
+// install, and running two self-updates against it would race its files.
+const claudeUpdatesInFlight = new Set<string>();
 
 // ── HTTP plumbing ─────────────────────────────────────────────────────
 function json(res: ServerResponse, status: number, body: unknown) {
@@ -8106,6 +8110,45 @@ const server = createServer(async (req, res) => {
       // turn this endpoint into an inherited-secret reader.
       const probe = await testCliBinary(cli, driver);
       return json(res, 200, probe);
+    }
+
+    // ── instance-scoped Claude Code update ──
+    // No command or path comes from the request: the registry supplies the
+    // executable already configured for this Claude instance. The JSON gate
+    // keeps a hostile page from triggering a local process with a simple
+    // cross-origin form request.
+    const claudeUpdate = /^\/api\/instances\/([\w.-]+)\/claude-update$/.exec(path);
+    if (method === "POST" && claudeUpdate) {
+      if (!String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
+        return json(res, 415, { error: "content-type must be application/json" });
+      }
+      await readBody(req);
+      const target = registry.cliTarget(claudeUpdate[1]);
+      if (!target) return json(res, 404, { error: "no such provider instance" });
+      if (target.driverKind !== "claudeAgent") {
+        return json(res, 400, { error: "only Claude Code instances can be updated here" });
+      }
+      if (!target.cli) return json(res, 409, { error: "this Claude instance has no configured executable" });
+      if (claudeUpdatesInFlight.has(target.cli)) {
+        return json(res, 409, { error: "this Claude installation is already updating" });
+      }
+      const active = store.bots.some((bot) =>
+        bot.busy && registry.cliTarget(bot.modelSelection.instanceId)?.cli === target.cli
+      );
+      if (active) {
+        return json(res, 409, { error: "wait for running Claude tasks to finish before updating" });
+      }
+
+      claudeUpdatesInFlight.add(target.cli);
+      try {
+        const result = await updateClaudeCli(target.cli, cliProbeEnvironment());
+        resetPathCache();
+        return json(res, 200, { ok: true, version: result.version });
+      } catch (error) {
+        return json(res, 500, { error: error instanceof Error ? error.message : String(error) });
+      } finally {
+        claudeUpdatesInFlight.delete(target.cli);
+      }
     }
 
     // ── per-instance CLI path override (custom builds / versioned bins) ──

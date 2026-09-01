@@ -49,6 +49,20 @@ describe("ProviderRegistry", () => {
     expect(described.untouched.access).toBe("subscription");
   });
 
+  it("resolves maintenance commands to the configured CLI or driver default", async () => {
+    const fake = makeFakeDriver();
+    fake.driver.defaultConfig = () => ({ cli: "fakebin" });
+    const registry = new ProviderRegistry([fake.driver]);
+    await registry.load({
+      defaulted: { driver: "fake" },
+      overridden: { driver: "fake", config: { cli: "/opt/fake/custom-bin" } },
+    });
+
+    expect(registry.cliTarget("defaulted")).toEqual({ driverKind: "fake", cli: "fakebin" });
+    expect(registry.cliTarget("overridden")).toEqual({ driverKind: "fake", cli: "/opt/fake/custom-bin" });
+    expect(registry.cliTarget("missing")).toBeNull();
+  });
+
   it("publishes custom-only access from driver metadata", async () => {
     const fake = makeFakeDriver();
     Object.assign(fake.driver.metadata, { access: "custom" });
@@ -68,6 +82,7 @@ describe("ProviderRegistry", () => {
     expect(described.snapshot.reason).toContain("from-the-future");
     expect(described.displayName).toBe("Tomorrow");
     expect(described.models.options).toHaveLength(0);
+    expect(registry.cliTarget("mystery")).toEqual({ driverKind: "from-the-future", cli: null });
   });
 
   it("downgrades a config-decode failure to a shadow with the error as reason", async () => {

@@ -5384,6 +5384,21 @@ describe("instance CLI override API", () => {
     expect(res.body.install).toBeUndefined();
   });
 
+  it("updates only the configured Claude instance and verifies its version", async () => {
+    const res = await api("POST", "/api/instances/claude/claude-update", {});
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true, version: "2.1.232 (Claude Code)" });
+
+    expect((await api("POST", "/api/instances/ghost/claude-update", {})).status).toBe(400);
+    expect((await api("POST", "/api/instances/missing/claude-update", {})).status).toBe(404);
+  });
+
+  it("requires JSON before launching the Claude updater", async () => {
+    const res = await fetch(`${BASE}/api/instances/claude/claude-update`, { method: "POST" });
+    expect(res.status).toBe(415);
+    expect(await res.json()).toEqual({ error: "content-type must be application/json" });
+  });
+
   it("rejects overlapping provider configuration writes", async () => {
     const slowConfigWrite = api("PUT", "/api/config", { box: { token: "box_slow" } });
     await new Promise((resolve) => setTimeout(resolve, 30));
