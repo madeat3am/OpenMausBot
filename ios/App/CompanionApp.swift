@@ -37,6 +37,7 @@ struct CompanionApp: App {
                     }
                 }
         }
+        .defaultSize(CompanionLayout.defaultWindowSize)
     }
 }
 
@@ -99,6 +100,7 @@ struct RootView: View {
                 )
             }
         }
+        .background(Color(uiColor: .systemBackground).ignoresSafeArea())
         .onChange(of: session.pairingInvite) { _, invite in
             guard invite != nil else { return }
             hasSeenWelcome = true
