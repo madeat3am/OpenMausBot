@@ -499,6 +499,24 @@ describe("pending queued chip", () => {
     expect(landed.pendingQueued).toEqual({});
   });
 
+  it("starts mascot work motion when the queued line is released into the transcript", () => {
+    const withBot = reducer(initialState, { type: "botPatched", bot });
+    const landed = reducer(withBot, {
+      type: "messageAdded",
+      threadId: "t1",
+      message: {
+        id: "landed",
+        at: 2,
+        role: "user",
+        kind: "text",
+        text: "now run this",
+        queueId: "q-landed",
+      },
+    });
+
+    expect(landed.mascotMotion).toMatchObject({ botId: "b1", kind: "working" });
+  });
+
   it("keeps a Shift+Enter multiline message as one entry", () => {
     const withBot = reducer(initialState, { type: "botPatched", bot });
     const queued = reducer(withBot, {

@@ -129,6 +129,28 @@ describe("CodexDriver turns (fake app-server)", () => {
     expect(threadStart.params).toMatchObject({ model: "gpt-5.6-sol", modelProvider: "openai" });
   });
 
+  it("normalizes native image generation bytes without exposing the provider path", async () => {
+    process.env.FAKE_CODEX_MODE = "image";
+    await create();
+    await instance.adapter.sendTurn({
+      threadId: "t-image",
+      text: "make an image",
+      model: "gpt-5.6-sol",
+    });
+    await recorder.until((event) => event.type === "turn.completed");
+
+    const image = recorder.events.find(
+      (event) => event.type === "item.completed" && event.itemType === "assistant_image",
+    );
+    expect(image).toMatchObject({
+      itemType: "assistant_image",
+      itemId: "img1",
+      alt: "a tiny green mouse",
+    });
+    expect(image && "data" in image ? image.data : "").toMatch(/^iVBOR/);
+    expect(JSON.stringify(image)).not.toContain("provider-owned-path");
+  });
+
   it("keeps the full command when a Windows interpreter prefix is long", async () => {
     await create({ mode: "windows-command" });
     await instance.adapter.sendTurn({ threadId: "t-windows-command", text: "read notes" });

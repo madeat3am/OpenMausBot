@@ -35,6 +35,7 @@ import { PendingApprovalActions, PendingApprovalPanel, pendingApprovals } from "
 import { useDesktopCapabilities } from "./DesktopCapabilities";
 import { ReplyQuote } from "./ReplyQuote";
 import { ComposerInjectNow, composerCanInjectNow } from "./ComposerInjectNow";
+import { QueuedComposerMessages } from "./ComposerQueuedMessages";
 
 /** The active @mention query at the caret: the text between an `@` that
  * starts a word and the caret. null = no mention being typed. */
@@ -337,6 +338,7 @@ export function Composer({
   // 1:1 chats. Keeping a channel follow-up in this component used to lose its
   // auto-send intent whenever navigation unmounted the composer.
   const pendingCount = (state.pendingQueued[threadId] ?? []).length;
+  const queuedMessages = state.pendingQueued[threadId] ?? [];
   const canInject = composerCanInjectNow(busy, locked, pendingCount);
   const interruptTurn = () => {
     if (group) dispatch({ type: "interruptGroup", groupId: group.id });
@@ -589,6 +591,13 @@ export function Composer({
             />
           </div>
         )}
+        <QueuedComposerMessages
+          items={queuedMessages}
+          onCancel={(queueId) => {
+            if (group) dispatch({ type: "cancelGroupQueued", groupId: group.id, threadId, queueId });
+            else if (bot) dispatch({ type: "cancelQueued", botId: bot.id, queueId });
+          }}
+        />
         <ComposerAttachments
           items={attachments}
           onAdd={addAttachments}
@@ -760,7 +769,7 @@ export function Composer({
           <div className="flex items-center gap-1">
           {/* Inject is stop-then-steer made visible. The square stop would
               drain the same queue, so it yields while a send is waiting.
-              Cancelling the ghost/chip brings Stop back. */}
+              Cancelling the queued composer card brings Stop back. */}
           {canInject && <ComposerInjectNow onInject={interruptTurn} />}
           {busy && !locked && !canInject && (
           <button

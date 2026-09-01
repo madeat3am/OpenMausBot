@@ -87,6 +87,8 @@ export interface Message {
   role: "bot" | "user";
   kind: "text" | "options" | "activity" | "screen" | "connector" | "secret" | "routine.run" | "goal.run";
   text?: string;
+  /** Provider-generated files attached to this assistant response. */
+  attachments?: Array<{ kind: "image"; path: string; mime: string }>;
   card?: OptionCardData;
   connector?: ConnectorCardData;
   secret?: SecretRequestCardData;
@@ -982,7 +984,9 @@ export function reducer(state: AppState, action: Action): AppState {
         return { ...b, messages, activeLeafId: adoptsLeaf ? action.message.id : b.activeLeafId };
       });
       const motion =
-        action.message.kind === "options"
+        action.message.role === "user" && action.message.kind === "text" && Boolean(action.message.queueId)
+          ? "working"
+          : action.message.kind === "options"
           ? "thinking"
           : action.message.kind === "activity"
             ? action.message.tool?.ok === false

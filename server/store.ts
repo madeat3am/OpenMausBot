@@ -97,6 +97,10 @@ export interface Message {
   role: "bot" | "user";
   kind: "text" | "options" | "activity" | "screen" | "connector" | "secret" | "routine.run" | "goal.run";
   text?: string;
+  /** Durable provider output stored by the harness. Paths always point into
+   * OpenMausBot's private attachment directory; renderers receive only the
+   * existing allowlisted /api/attachments URL. */
+  attachments?: Array<{ kind: "image"; path: string; mime: string }>;
   card?: OptionCardData;
   connector?: ConnectorCardData;
   secret?: SecretRequestCardData;
