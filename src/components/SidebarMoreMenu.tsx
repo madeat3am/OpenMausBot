@@ -2,8 +2,10 @@
 //
 // Team map, Teach a skill, Tasks & routines and Connected apps are places you
 // visit occasionally; they were costing four permanent rows at the bottom of a
-// list whose whole job is showing bots. They now live in a menu that opens on
-// hover from a chevron beside your name.
+// list whose whole job is showing bots. They now live behind a slim bar that
+// sits directly above the profile row and opens on hover — the pull-up handle
+// shape, so the arrow reads as "there is more above" rather than as a button
+// whose purpose you have to guess.
 //
 // Hover alone would make them unreachable by keyboard and fragile with a
 // trackpad, so: hovering opens it, a click pins it, Escape and an outside
@@ -105,14 +107,14 @@ export function SidebarMoreMenu({ items, compact = false }: { items: MoreMenuIte
           }
         }}
         className={cn(
-          "relative flex items-center justify-center rounded-md text-ink-secondary hover:bg-raised hover:text-ink",
-          compact ? "size-8" : "size-10",
-          open && "bg-raised text-ink",
+          "relative flex w-full items-center justify-center rounded-xl py-1.5 text-ink-secondary transition-colors hover:bg-raised hover:text-ink",
+          compact ? "py-1" : "py-1.5",
+          open ? "bg-raised text-ink" : "bg-raised/40",
         )}
       >
-        <ChevronUp size={18} className={cn("transition-transform", open && "rotate-180")} />
+        <ChevronUp size={16} className={cn("transition-transform", open && "rotate-180")} />
         {attention && !open && (
-          <span className="absolute right-1.5 top-1.5 size-2 rounded-full border border-panel bg-danger" />
+          <span className="absolute right-3 top-1/2 size-2 -translate-y-1/2 rounded-full bg-danger" />
         )}
       </button>
 
@@ -121,7 +123,7 @@ export function SidebarMoreMenu({ items, compact = false }: { items: MoreMenuIte
           id={menuId}
           role="menu"
           aria-label="More"
-          className="animate-pop-in absolute bottom-full left-1/2 z-40 mb-1 w-[196px] -translate-x-1/2 overflow-hidden rounded-xl border border-hairline/50 bg-card py-1.5 shadow-2xl shadow-black/50"
+          className="animate-pop-in absolute bottom-full left-0 right-0 z-40 mb-1 overflow-hidden rounded-xl border border-hairline/50 bg-card py-1.5 shadow-2xl shadow-black/50"
         >
           {items.map((item) => (
             <button

@@ -1727,6 +1727,47 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
             onOpen={() => dispatch(phoneSettingsAction())}
           />
         )}
+          {density !== "icons" && (
+          <SidebarMoreMenu
+            items={[
+              {
+                key: "team-map",
+                label: "Team map",
+                icon: <Network size={18} />,
+                active: state.activeView === "team-map",
+                onSelect: () => dispatch({ type: "showTeamMap" }),
+              },
+              ...(skillRecorderEnabled(state.config)
+                ? [
+                    {
+                      key: "skill-recorder",
+                      label: "Teach a skill",
+                      icon: <Sparkles size={18} />,
+                      active: state.activeView === "skill-recorder",
+                      onSelect: () => dispatch({ type: "showSkillRecorder" }),
+                    },
+                  ]
+                : []),
+              {
+                key: "routines",
+                label: "Tasks & routines",
+                icon: <CalendarDays size={18} />,
+                active: state.activeView === "routines",
+                // folded away, this dot would otherwise vanish with the row
+                attention: state.routineRuns.some(
+                  (run) => ["failed", "missed"].includes(run.status) && !run.seenAt,
+                ),
+                onSelect: () => dispatch({ type: "showRoutines" }),
+              },
+              {
+                key: "plugins",
+                label: "Connected apps",
+                icon: <Puzzle size={18} />,
+                onSelect: () => dispatch({ type: "togglePlugins", open: true }),
+              },
+            ]}
+          />
+        )}
         <div className={cn("flex items-center", density === "icons" && "justify-center")}>
           <button
             onClick={() => dispatch({ type: "toggleAppSettings" })}
@@ -1743,47 +1784,6 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
             <SidebarPhoneButton
               density={density}
               onOpen={() => dispatch(phoneSettingsAction())}
-            />
-          )}
-          {density !== "icons" && (
-            <SidebarMoreMenu
-              items={[
-                {
-                  key: "team-map",
-                  label: "Team map",
-                  icon: <Network size={18} />,
-                  active: state.activeView === "team-map",
-                  onSelect: () => dispatch({ type: "showTeamMap" }),
-                },
-                ...(skillRecorderEnabled(state.config)
-                  ? [
-                      {
-                        key: "skill-recorder",
-                        label: "Teach a skill",
-                        icon: <Sparkles size={18} />,
-                        active: state.activeView === "skill-recorder",
-                        onSelect: () => dispatch({ type: "showSkillRecorder" }),
-                      },
-                    ]
-                  : []),
-                {
-                  key: "routines",
-                  label: "Tasks & routines",
-                  icon: <CalendarDays size={18} />,
-                  active: state.activeView === "routines",
-                  // folded away, this dot would otherwise vanish with the row
-                  attention: state.routineRuns.some(
-                    (run) => ["failed", "missed"].includes(run.status) && !run.seenAt,
-                  ),
-                  onSelect: () => dispatch({ type: "showRoutines" }),
-                },
-                {
-                  key: "plugins",
-                  label: "Connected apps",
-                  icon: <Puzzle size={18} />,
-                  onSelect: () => dispatch({ type: "togglePlugins", open: true }),
-                },
-              ]}
             />
           )}
           {density !== "icons" && <UpdateButton />}
