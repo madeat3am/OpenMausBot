@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import {
   Cloud,
   Loader2,
@@ -14,6 +15,7 @@ import {
   loadCompanionBridgeState,
   shouldHydrateCompanionEmail,
   type CompanionState,
+  type PhoneSetupController,
   usePhoneSetupController,
 } from "./PhoneSetupFlow";
 import { companionPairingMode } from "../lib/phone-setup";
@@ -30,6 +32,72 @@ export {
 export interface CompanionPanelStatus {
   label: string;
   good: boolean;
+}
+
+export interface TailscalePairingStatus {
+  kind: "unchecked" | "unavailable" | "magicdns" | "ready" | "error";
+  title: string;
+  detail: string;
+}
+
+export function deriveTailscalePairingStatus(
+  state: Pick<CompanionState, "enabled" | "tailscale" | "tailnetName" | "error">,
+  routeAvailable: boolean,
+): TailscalePairingStatus {
+  if (state.error) {
+    return {
+      kind: "error",
+      title: "Phone access needs attention",
+      detail: state.error,
+    };
+  }
+  if (routeAvailable && state.tailnetName) {
+    return {
+      kind: "ready",
+      title: `Ready on ${state.tailnetName}`,
+      detail: "Keep Tailscale connected on this computer and your phone while they pair.",
+    };
+  }
+  if (state.tailscale) {
+    return {
+      kind: "magicdns",
+      title: "Tailscale found — MagicDNS is still needed",
+      detail: "Turn on MagicDNS in Tailscale, then check again so the iPhone gets a secure tailnet name.",
+    };
+  }
+  if (state.enabled) {
+    return {
+      kind: "unavailable",
+      title: "Tailscale is not connected yet",
+      detail: "Open Tailscale on both devices, sign in to the same tailnet, then check again.",
+    };
+  }
+  return {
+    kind: "unchecked",
+    title: "Already use Tailscale?",
+    detail: "Connect both devices to the same tailnet. Checking turns on Phone access so your phone can reach this computer.",
+  };
+}
+
+export function pairingSurfaceCopy(
+  route: Pick<PhoneSetupController, "localFallback" | "tailscaleFallback">,
+): { title: string; subtitle: string } {
+  if (route.tailscaleFallback) {
+    return {
+      title: "Tailscale pairing",
+      subtitle: "Private pairing through the tailnet shared by this computer and your phone.",
+    };
+  }
+  if (route.localFallback) {
+    return {
+      title: "Direct Wi-Fi pairing",
+      subtitle: "Use only on a trusted network where both devices can see each other.",
+    };
+  }
+  return {
+    title: "Secure HTTPS pairing",
+    subtitle: "Recommended — the simplest setup, and it keeps working when your phone leaves this Wi-Fi.",
+  };
 }
 
 export function deriveCompanionPanelStatus(
@@ -66,6 +134,7 @@ const endpointHost = (url: string): string => {
 export function CompanionSection({ profileEmail = "" }: { profileEmail?: string }) {
   const c = usePhoneSetupController(profileEmail);
   const state = c.state;
+  const pairingFlow = useRef<HTMLDivElement>(null);
 
   if (!companionBridge()) {
     return (
@@ -87,6 +156,8 @@ export function CompanionSection({ profileEmail = "" }: { profileEmail?: string 
   const pairedCount = state.devices.length;
   const panelStatus = deriveCompanionPanelStatus(state);
   const accountActionError = companionAccountActionError(c.account, c.accountError);
+  const pairingCopy = pairingSurfaceCopy(c);
+  const tailscaleStatus = deriveTailscalePairingStatus(state, c.tailscaleAvailable);
   const hosted = state.endpoints?.find((endpoint) => endpoint.kind === "hosted");
   const localRoutes = [
     state.tailnetName ? { label: "Tailscale", value: `${state.tailnetName}:${state.port}` } : null,
@@ -101,27 +172,72 @@ export function CompanionSection({ profileEmail = "" }: { profileEmail?: string 
 
   return (
     <div className="flex flex-col gap-4">
-      <Card>
-        {(panelStatus || (pairedCount > 0 && c.hostedReady)) && (
-          <div className="mb-4 flex items-center justify-between gap-3">
-            {panelStatus && (
-              <div
-                className={`flex items-center gap-2 rounded-full px-2.5 py-1 text-[11.5px] ${
-                  panelStatus.good ? "bg-success/10 text-success" : "bg-control text-ink-secondary"
-                }`}
-              >
-                <span className={`size-1.5 rounded-full ${panelStatus.good ? "bg-success" : "bg-ink-secondary/50"}`} />
-                {panelStatus.label}
+      <div ref={pairingFlow} tabIndex={-1} className="scroll-mt-4 focus:outline-none">
+        <Card title={pairingCopy.title} subtitle={pairingCopy.subtitle}>
+          {(panelStatus || (pairedCount > 0 && c.hostedReady)) && (
+            <div className="mb-4 flex items-center justify-between gap-3">
+              {panelStatus && (
+                <div
+                  className={`flex items-center gap-2 rounded-full px-2.5 py-1 text-[11.5px] ${
+                    panelStatus.good ? "bg-success/10 text-success" : "bg-control text-ink-secondary"
+                  }`}
+                >
+                  <span className={`size-1.5 rounded-full ${panelStatus.good ? "bg-success" : "bg-ink-secondary/50"}`} />
+                  {panelStatus.label}
+                </div>
+              )}
+              {pairedCount > 0 && c.hostedReady && (
+                <div className="flex items-center gap-1.5 text-[11.5px] text-ink-secondary">
+                  <ShieldCheck size={13} className="text-accent" /> Works away from home
+                </div>
+              )}
+            </div>
+          )}
+          <PhoneSetupFlowView controller={c} variant="settings" />
+        </Card>
+      </div>
+
+      <Card
+        title="Tailscale pairing"
+        subtitle="Optional — for people who already use Tailscale. Secure HTTPS above remains the recommended setup."
+      >
+        <div className="rounded-xl bg-inset px-3 py-3" aria-live="polite">
+          <div className="flex items-start gap-2.5">
+            <ShieldCheck
+              size={16}
+              className={`mt-0.5 shrink-0 ${tailscaleStatus.kind === "ready" ? "text-success" : "text-ink-secondary"}`}
+            />
+            <div className="min-w-0">
+              <div className="text-[13px] font-medium text-ink">{tailscaleStatus.title}</div>
+              <div className="mt-0.5 text-[11.5px] leading-relaxed text-ink-secondary">
+                {tailscaleStatus.detail}
               </div>
-            )}
-            {pairedCount > 0 && c.hostedReady && (
-              <div className="flex items-center gap-1.5 text-[11.5px] text-ink-secondary">
-                <ShieldCheck size={13} className="text-accent" /> Works away from home
-              </div>
-            )}
+            </div>
           </div>
+        </div>
+        {tailscaleStatus.kind === "ready" ? (
+          <button
+            disabled={c.busy || c.accountBusy}
+            onClick={() => {
+              c.useTailscale();
+              window.requestAnimationFrame(() => {
+                pairingFlow.current?.scrollIntoView({ block: "start" });
+                pairingFlow.current?.focus({ preventScroll: true });
+              });
+            }}
+            className="mt-3 rounded-lg border border-hairline/40 px-3 py-1.5 text-[12px] text-ink hover:bg-control disabled:opacity-40"
+          >
+            Pair over Tailscale
+          </button>
+        ) : (
+          <button
+            disabled={c.busy || c.accountBusy}
+            onClick={c.refreshTailscale}
+            className="mt-3 rounded-lg border border-hairline/40 px-3 py-1.5 text-[12px] text-ink hover:bg-control disabled:opacity-40"
+          >
+            {c.busy ? "Checking…" : state.enabled ? "Check again" : "Turn on phone access & check"}
+          </button>
         )}
-        <PhoneSetupFlowView controller={c} variant="settings" />
       </Card>
 
       <Card
@@ -260,26 +376,6 @@ export function CompanionSection({ profileEmail = "" }: { profileEmail?: string 
           </div>
 
           <div className="border-t border-hairline/30 pt-4">
-            {c.tailscaleAvailable && (
-              <div className="mb-4 border-b border-hairline/30 pb-4">
-                <div className="flex items-start gap-2.5">
-                  <ShieldCheck size={15} className="mt-0.5 shrink-0 text-accent" />
-                  <div>
-                    <div className="text-[13px] text-ink">Tailscale pairing</div>
-                    <div className="mt-0.5 text-[11.5px] leading-relaxed text-ink-secondary">
-                      Keep pairing on your private tailnet, even when a secure hosted route is available.
-                    </div>
-                  </div>
-                </div>
-                <button
-                  disabled={c.busy || c.accountBusy}
-                  onClick={c.useTailscale}
-                  className="mt-3 rounded-lg border border-hairline/40 px-3 py-1.5 text-[12px] text-ink hover:bg-control disabled:opacity-40"
-                >
-                  Pair over Tailscale
-                </button>
-              </div>
-            )}
             <div className="flex items-start gap-2.5">
               <Wifi size={15} className="mt-0.5 shrink-0 text-ink-secondary" />
               <div>
@@ -298,11 +394,6 @@ export function CompanionSection({ profileEmail = "" }: { profileEmail?: string 
             </button>
           </div>
 
-          {state.enabled && !hosted && state.tailscale && !state.tailnetName && (
-            <div className="rounded-lg bg-warning/10 px-3 py-2 text-[11.5px] leading-relaxed text-ink-secondary">
-              Tailscale is connected, but its device name could not be read. Check MagicDNS in Tailscale or use the secure account above.
-            </div>
-          )}
           {state.enabled && !hosted && !state.tailscale && (
             <div className="rounded-lg bg-inset px-3 py-2 text-[11.5px] leading-relaxed text-ink-secondary">
               Without secure phone access or Tailscale, this computer is reachable only on a compatible local network.

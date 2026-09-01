@@ -75,9 +75,11 @@ export function tailscaleAddress(addresses: string[] = lanAddresses()): string |
  * one of the private ranges that exemption covers. A `ts.net` hostname can
  * be exempted by name, which an address cannot.
  *
- * Read once when the listener comes up and cached — asking Tailscale is a
- * subprocess, and nothing here is worth spawning one per request. */
+ * Read when the listener comes up and cached — asking Tailscale is a
+ * subprocess, so normal state reads stay cheap. An explicit setup action can
+ * refresh this cache when Tailscale changes later. */
 let cachedTailnetName: string | null = null;
+let activeTailnetRefresh: Promise<void> | null = null;
 
 /** The cached MagicDNS name, or null until `refreshTailnetName` finds one. */
 export function tailnetName(): string | null {
@@ -120,7 +122,7 @@ const searchPath = (): string =>
  * has MagicDNS on is worse than no message, and there was no way to tell
  * which of these paths had been tried. `onAttempt` is how the caller can say.
  */
-export async function refreshTailnetName(
+async function refreshTailnetNameOnce(
   onAttempt?: (cli: string, outcome: string) => void,
 ): Promise<void> {
   // A budget for the whole loop, not per probe. Seven candidates at five
@@ -179,4 +181,18 @@ export async function refreshTailnetName(
     }
   }
   cachedTailnetName = null;
+}
+
+/** Coalesce startup and user-triggered probes so a slower failure cannot
+ * overwrite a successful MagicDNS result from another concurrent probe. */
+export function refreshTailnetName(
+  onAttempt?: (cli: string, outcome: string) => void,
+): Promise<void> {
+  if (activeTailnetRefresh) return activeTailnetRefresh;
+  let refresh: Promise<void>;
+  refresh = refreshTailnetNameOnce(onAttempt).finally(() => {
+    if (activeTailnetRefresh === refresh) activeTailnetRefresh = null;
+  });
+  activeTailnetRefresh = refresh;
+  return refresh;
 }

@@ -11,7 +11,9 @@ import {
   companionAccountActionError,
   companionPairingMode,
   deriveCompanionPanelStatus,
+  deriveTailscalePairingStatus,
   loadCompanionBridgeState,
+  pairingSurfaceCopy,
   shouldHydrateCompanionEmail,
 } from "./CompanionSection";
 
@@ -191,5 +193,48 @@ describe("companion pairing availability", () => {
       companionPairingMode({ available: false, status: "signed-out" }, localCompanion(true)),
     ).toBe("local-only");
     expect(companionPairingMode(account("error"), localCompanion(true))).toBe("local-only");
+  });
+});
+
+describe("Tailscale pairing onboarding", () => {
+  it("keeps HTTPS as the recommended default surface", () => {
+    expect(pairingSurfaceCopy({ localFallback: false, tailscaleFallback: false })).toEqual({
+      title: "Secure HTTPS pairing",
+      subtitle: "Recommended — the simplest setup, and it keeps working when your phone leaves this Wi-Fi.",
+    });
+    expect(pairingSurfaceCopy({ localFallback: false, tailscaleFallback: true }).title).toBe(
+      "Tailscale pairing",
+    );
+  });
+
+  it("explains every step between unchecked and ready", () => {
+    expect(deriveTailscalePairingStatus({ enabled: false }, false)).toMatchObject({
+      kind: "unchecked",
+      detail: expect.stringContaining("turns on Phone access"),
+    });
+    expect(deriveTailscalePairingStatus({ enabled: true }, false).kind).toBe("unavailable");
+    expect(deriveTailscalePairingStatus({
+      enabled: true,
+      tailscale: "100.99.1.2",
+    }, false).kind).toBe("magicdns");
+    expect(deriveTailscalePairingStatus({
+      enabled: true,
+      tailscale: "100.99.1.2",
+      tailnetName: "mac.tail1234.ts.net",
+    }, true)).toMatchObject({
+      kind: "ready",
+      title: "Ready on mac.tail1234.ts.net",
+    });
+  });
+
+  it("surfaces sidecar failures instead of pretending Tailscale is merely absent", () => {
+    expect(deriveTailscalePairingStatus({
+      enabled: true,
+      error: "the companion is not responding",
+    }, false)).toEqual({
+      kind: "error",
+      title: "Phone access needs attention",
+      detail: "the companion is not responding",
+    });
   });
 });

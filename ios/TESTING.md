@@ -84,7 +84,8 @@ pnpm dev                  # 127.0.0.1:5199
 pnpm dev:desktop          # Electron starts the harness
 ```
 
-In the app: **Settings → Companion**. Turn it on. You should see either
+In the app: **Settings → Phone → Advanced & troubleshooting**. Turn on
+**Phone access**. You should see either
 
 - *"Your phone will find this computer as …"* — Bonjour is advertising, or
 - *"Listening on 192.168.x.x:8810 — enter that on your phone."* — it is not.
@@ -175,8 +176,8 @@ paid account is required to run on your own phone.
 
 On the phone, in order:
 
-1. **Pair.** In OpenMausBot → Settings → Companion, choose **Set up a
-   phone**. Scan the QR code with the phone's Camera, open OpenMausMobile,
+1. **Pair.** In OpenMausBot → Settings → Phone, choose **Pair a phone**.
+   Scan the QR code with the phone's Camera, open OpenMausMobile,
    confirm that the computer and six-digit code are filled in, then tap
    **Connect**. The computer should also appear by name for the manual path:
    tap it and type the same code.
@@ -232,7 +233,7 @@ On the phone, in order:
    and the result should remain editable before sending. The first attempt
    requests Microphone and Speech Recognition access. Locking or
    backgrounding the phone mid-sentence must release the mic.
-8. **Revoke.** Remove the device in Settings → Companion on the computer. The
+8. **Revoke.** Remove the device in Settings → Phone on the computer. The
    phone should land on "This phone was unpaired" rather than silently failing.
 
 ---
@@ -255,12 +256,14 @@ so this is also how the phone reaches the Mac over cellular.
 2. **On the phone:** install Tailscale from the App Store, sign in to the *same*
    account, and turn the VPN on.
 3. **In OpenMausBot → Settings → Phone:** with Phone access on, the panel now
-   prints the tailnet name — something like `macbook.tail1234.ts.net:8810`, with
-   the LAN address listed separately underneath. If it still only shows a
-   `192.168.x.x` address, the sidecar could not find the Tailscale CLI — it
-   asks once at startup, so turn the Companion toggle off and on again (or
-   restart `pnpm companion` if running it by hand) after Tailscale is up.
-4. **In the desktop setup alternatives, choose Pair over Tailscale.** Scan its
+   shows a separate **Tailscale pairing** card. Choose **Turn on phone access &
+   check** (or **Check again** when Phone access is already on); it should
+   report a tailnet name such as `macbook.tail1234.ts.net`. If it
+   finds Tailscale without a name, verify that MagicDNS is on and choose
+   **Check again**. This check refreshes a running sidecar, so restarting the
+   desktop app or dropping existing phone connections is not required.
+4. **Choose Pair over Tailscale.** The settings panel should move back to the
+   top pairing surface and label it **Tailscale pairing**. Scan its
    dedicated QR, which carries that MagicDNS name, or pair by typing the name.
    Discovery does not help here — Bonjour is multicast and a tailnet does not
    carry it — so the Tailscale QR/manual address is the path, and it is the one

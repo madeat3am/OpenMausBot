@@ -114,10 +114,10 @@ export function rememberCompanionKeepAwake(keepAwake) {
 /** Ask the sidecar's own control server, which is the same API the standalone
  * page uses. Short timeout: this is loopback, and a spinner in Settings that
  * never resolves is worse than an error. */
-async function control(method, urlPath, body) {
+async function control(method, urlPath, body, { timeoutMs = 4_000 } = {}) {
   const options = {
     method,
-    signal: AbortSignal.timeout(4000),
+    signal: AbortSignal.timeout(timeoutMs),
   };
   if (body !== undefined) {
     options.body = JSON.stringify(body);
@@ -386,6 +386,30 @@ export async function companionState() {
       connectedDeviceIds: [],
       pairing: null,
       error: "the companion is not responding",
+    };
+  }
+}
+
+/** Re-read Tailscale without restarting the sidecar or dropping connected
+ * phones. Tailscale may be installed, signed in, or enabled after OpenMausBot
+ * starts, so startup-only detection makes an otherwise healthy route look
+ * permanently unavailable. */
+export async function companionRefreshTailscale() {
+  if (!proc) return companionState();
+  try {
+    // The CLI hunt is itself bounded to five seconds. Give the loopback call
+    // enough room to receive that bounded answer instead of aborting first.
+    const state = await control("POST", "/tailscale/refresh", undefined, { timeoutMs: 6_000 });
+    return {
+      enabled: true,
+      keepAwake: companionKeepAwakeAtRest(),
+      ...state,
+    };
+  } catch {
+    const state = await companionState();
+    return {
+      ...state,
+      error: state.error ?? "Tailscale could not be checked.",
     };
   }
 }

@@ -360,6 +360,7 @@ import {
   companionEnabledAtRest,
   companionOriginTarget,
   companionPairing,
+  companionRefreshTailscale,
   companionCloudDesktopAccess,
   companionRevoke,
   companionRunning,
@@ -617,6 +618,14 @@ async function stopDesktopCompanion({ remember = true } = {}) {
   await managedCompanionConnector?.stop();
   await stopCompanion();
   return desktopCompanionState();
+}
+
+async function refreshDesktopCompanionTailscale() {
+  if (!companionRunning()) {
+    const started = await startDesktopCompanion({ waitForHosted: false });
+    if (!started.enabled || started.error) return started;
+  }
+  return decorateDesktopCompanionState(await companionRefreshTailscale());
 }
 
 setCompanionLifecycleListener(({ expected, pid }) => {
@@ -1791,6 +1800,7 @@ ipcMain.handle("companion:keep-awake", async (_event, enabled) => {
   rememberCompanionKeepAwake(Boolean(enabled));
   return desktopCompanionState();
 });
+ipcMain.handle("companion:refresh-tailscale", () => refreshDesktopCompanionTailscale());
 ipcMain.handle("companion:pairing", (_event, open, expectedToken) =>
   companionPairing(Boolean(open), expectedToken).then(decorateDesktopCompanionState),
 );

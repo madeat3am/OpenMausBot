@@ -91,7 +91,7 @@ switch — running it *is* the opt-in, so there is no toggle to forget.
 
 That is the standalone way to run it, and it is what to reach for when the
 harness is running on its own — a headless box, or `pnpm dev:server` in a
-terminal. **The normal desktop workflow is Settings → Companion**, which
+terminal. **The normal desktop workflow is Settings → Phone**, which
 starts and stops this same sidecar as a child process and offers pairing and
 revocation inline; the loopback page above is the same API rendered for
 people not running the desktop app. Either way the sidecar only listens while

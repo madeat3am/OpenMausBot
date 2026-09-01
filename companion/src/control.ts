@@ -35,6 +35,9 @@ export interface ControlOptions {
   connectedDeviceIds?: () => string[];
   /** Terminate every authenticated event stream owned by a revoked device. */
   disconnectDevice?: (deviceId: string) => void;
+  /** Re-read Tailscale after the sidecar has started. People commonly install,
+   * sign in, or enable Tailscale while OpenMausBot is already running. */
+  refreshTailscale?: () => Promise<void>;
 }
 
 /** The host out of a `Host` header, port removed.
@@ -259,6 +262,13 @@ export function createControlServer(options: ControlOptions): Server {
       return res.end(html);
     }
     if (method === "GET" && path === "/state") return json(res, 200, companionState(options));
+    if (method === "POST" && path === "/tailscale/refresh" && options.refreshTailscale) {
+      void options.refreshTailscale().then(
+        () => json(res, 200, companionState(options)),
+        () => json(res, 500, { error: "could not refresh Tailscale" }),
+      );
+      return;
+    }
     if (method === "POST" && path === "/pairing") {
       const window = options.devices.openPairing();
       // Keep the freshly issued credentials at the top level as well as in

@@ -15,6 +15,8 @@ let port = 0;
 let devices: DeviceRegistry;
 let connectedDeviceIds: string[] = [];
 let disconnectedDeviceIds: string[] = [];
+let tailscaleRefreshes = 0;
+let completedTailscaleRefreshes = 0;
 
 const ask = async (
   method: string,
@@ -46,6 +48,11 @@ beforeAll(async () => {
     disconnectDevice: (deviceId) => {
       disconnectedDeviceIds.push(deviceId);
       connectedDeviceIds = connectedDeviceIds.filter((connectedId) => connectedId !== deviceId);
+    },
+    refreshTailscale: async () => {
+      tailscaleRefreshes += 1;
+      await Promise.resolve();
+      completedTailscaleRefreshes += 1;
     },
   });
   port = await new Promise<number>((resolve) =>
@@ -135,6 +142,22 @@ describe("origins the control server will change state for", () => {
     // desktop path. A CSRF check aimed at it would break the toggle.
     expect((await ask("POST", "/pairing")).status).toBe(201);
     await ask("DELETE", "/pairing");
+  });
+
+  it("refreshes Tailscale before returning state without opening pairing", async () => {
+    const before = tailscaleRefreshes;
+    const refreshed = await ask("POST", "/tailscale/refresh");
+
+    expect(refreshed.status).toBe(200);
+    expect(tailscaleRefreshes).toBe(before + 1);
+    expect(completedTailscaleRefreshes).toBe(tailscaleRefreshes);
+    expect(refreshed.body.pairing).toBeNull();
+  });
+
+  it("refuses a Tailscale refresh from a foreign page", async () => {
+    const before = tailscaleRefreshes;
+    expect((await ask("POST", "/tailscale/refresh", { origin: "https://evil.example" })).status).toBe(403);
+    expect(tailscaleRefreshes).toBe(before);
   });
 
   it("does not let a stale conditional close cancel a replacement code", async () => {
