@@ -130,6 +130,12 @@ import {
   queueSteeredMessage,
 } from "./steer-queue.ts";
 import {
+  cancelChannelMessage,
+  drainChannelMessages,
+  queuedChannelMessage,
+  queueChannelMessage,
+} from "./channel-queue.ts";
+import {
   acceptedSendMatch,
   parseSendId,
   sendFingerprint,
@@ -977,6 +983,10 @@ function finishGroupTurnOperation(groupId: string, operation: GroupTurnOperation
   if (operations?.size === 0) groupTurnOperations.delete(groupId);
   const group = store.group(groupId);
   if (group) broadcast({ kind: "group", group: publicGroupState(group) });
+  // A follow-up sent while this operation was running belongs to the
+  // harness, not whichever composer happened to be mounted. Hand the next
+  // one to the ordinary channel runner as soon as the channel is truly idle.
+  drainQueuedChannelSends();
 }
 
 function finishGroupGoalRun(
@@ -4059,6 +4069,7 @@ function startGroupTurn(
   replyTo?: Message,
   sendId?: string,
   channelMode: "chat" | "goal" = "chat",
+  queueId?: string,
 ) {
   const group = store.group(groupId);
   if (!group) throw Object.assign(new Error("no such group"), { status: 404 });
@@ -4075,6 +4086,7 @@ function startGroupTurn(
     replyToId: replyTo?.id,
     sendId,
     channelMode,
+    queueId,
   });
   if (!group.dm) store.titleGroupTaskFromFirstMessage(group.id, text, threadId);
 
@@ -4183,6 +4195,37 @@ function startGroupTurn(
   const tracked = next.finally(() => finishGroupTurnOperation(groupId, operation));
   groupQueues.set(groupId, tracked.catch(() => {}));
   return message;
+}
+
+function drainQueuedChannelSends(): void {
+  drainChannelMessages(
+    (groupId) => {
+      const group = store.group(groupId);
+      return group ? groupIsWorking(group) : false;
+    },
+    ({ groupId, threadId, text, replyToId, sendId, mode, id }) => {
+      const group = store.group(groupId);
+      const ownsThread = group?.dm
+        ? group.threadId === threadId
+        : Boolean(group && store.groupTaskByThread(group.id, threadId));
+      if (!group || !ownsThread) return;
+      try {
+        startGroupTurn(groupId, text, resolveReplyTarget(threadId, replyToId), sendId, mode, id);
+      } catch (error) {
+        store.appendMessage(threadId, {
+          role: "bot",
+          kind: "activity",
+          tool: {
+            name: `error: queued channel message could not start — ${(error instanceof Error ? error.message : String(error)).slice(0, 120)}`,
+            ok: false,
+          },
+        });
+      }
+      // A message with no eligible responder creates no operation. Continue
+      // draining instead of leaving later user messages behind it forever.
+      queueMicrotask(drainQueuedChannelSends);
+    },
+  );
 }
 
 function sameCalendarRoster(group: GroupRecord, botIds: readonly string[]): boolean {
@@ -6745,6 +6788,17 @@ const server = createServer(async (req, res) => {
             if (accepted.kind === "match") {
               return { ok: true as const, threadId, message: accepted.message };
             }
+            const queued = queuedChannelMessage(group.id, threadId, sendId);
+            if (queued) {
+              if (
+                queued.text !== text ||
+                queued.replyToId !== replyTo?.id ||
+                queued.mode !== channelMode
+              ) {
+                throw Object.assign(new Error("sendId already belongs to another message"), { status: 409 });
+              }
+              return { ok: true as const, queued: true as const, queueId: queued.id, threadId };
+            }
           }
           const current = store.group(group.id);
           if (!current) throw Object.assign(new Error("no such group"), { status: 404 });
@@ -6753,11 +6807,28 @@ const server = createServer(async (req, res) => {
               status: 409,
             });
           }
+          if (groupIsWorking(current)) {
+            const queued = queueChannelMessage(current.id, threadId, text, {
+              replyToId: replyTo?.id,
+              sendId,
+              mode: channelMode,
+            });
+            return { ok: true as const, queued: true as const, queueId: queued.id, threadId };
+          }
           const message = startGroupTurn(current.id, text, replyTo, sendId, channelMode);
           return { ok: true as const, threadId, message };
         },
       );
       return json(res, 202, receipt);
+    }
+    m = path.match(/^\/api\/groups\/([\w-]+)\/queue\/([\w-]+)$/);
+    if (m && method === "DELETE") {
+      const group = store.group(m[1]);
+      if (!group) return json(res, 404, { error: "no such group" });
+      if (!cancelChannelMessage(group.id, m[2])) {
+        return json(res, 404, { error: "no such queued message" });
+      }
+      return json(res, 200, { ok: true });
     }
     m = path.match(/^\/api\/groups\/([\w-]+)\/interrupt$/);
     if (m && method === "POST") {
