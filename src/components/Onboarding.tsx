@@ -7,6 +7,7 @@ import { EngineSetup } from "./EngineSetup";
 import { ProviderMark } from "./ProviderIcons";
 import { PhoneSetupFlow } from "./PhoneSetupFlow";
 import type { InstanceInfo } from "@/state/store";
+import { brand } from "../lib/brand";
 
 // First-run onboarding: who you are (email), what's installed (live engine
 // checks from the harness), what the app may use (TCC), then an optional
@@ -194,8 +195,12 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
       >
         {step === 0 && (
           <div className="flex flex-col items-center">
-            <MausAvatar color="green" state="happy" size={72} />
-            <h1 className="mt-4 text-[20px] font-semibold text-ink">Welcome to OpenMausBot</h1>
+            {brand().logo ? (
+              <img src={brand().logo} alt="" width={72} height={72} className="h-[72px] w-[72px] object-contain" />
+            ) : (
+              <MausAvatar color="green" state="happy" size={72} />
+            )}
+            <h1 className="mt-4 text-[20px] font-semibold text-ink">Welcome to {brand().name}</h1>
             <p className="mt-1.5 text-center text-[14px] leading-relaxed text-ink-secondary">
               Bots that do real work on their own computer. Tell us who you are
               and we&rsquo;ll let you know when big things ship.

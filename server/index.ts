@@ -266,6 +266,7 @@ import {
   sessionCookieName,
 } from "./request-auth.ts";
 import { formatPairingCode, SESSION_TTL_MS, SessionRegistry, type Scope } from "./sessions.ts";
+import { describeBrand, loadBrand } from "./brand.ts";
 
 const PORT = Number(process.env.OMB_PORT || process.env.OGB_PORT || 8799);
 const WEBHOOK_PORT = Number(process.env.OMB_WEBHOOK_PORT || PORT + 1);
@@ -8888,6 +8889,10 @@ const server = createServer(async (req, res) => {
     if (method === "GET" && path === "/api/edition") {
       return json(res, 200, editionStatus());
     }
+    // The brand for this deployment (server/brand.ts): read per request so edits show on reload.
+    if (method === "GET" && path === "/api/brand") {
+      return json(res, 200, loadBrand());
+    }
 
     // ── inspector: a thread's runtime events + native protocol tee ──
     // Both logs already exist on disk; this only reads them back. Threads
@@ -9686,6 +9691,7 @@ calendarCalls.start();
 
 // Resolve the edition before accepting requests so /api/edition is never a guess.
 console.log(describeEdition(await loadEnterpriseLayer()));
+console.log(describeBrand(loadBrand()));
 
 server.listen(PORT, "127.0.0.1", () => {
   console.log(`openmausbot server on http://127.0.0.1:${PORT}`);

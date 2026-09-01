@@ -2,12 +2,15 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
 import { readSessionState, takePairingCodeFromLocation } from "./lib/session";
+import { bootstrapBrand } from "./lib/brand";
 import { applySkin, readSkin } from "./lib/skins";
 import { PairPage } from "./pair/PairPage";
 import "./styles.css";
 
 // Before the first paint, not inside a component: stamping the skin during
-// render would show one frame of the default palette first.
+// render would show one frame of the default palette first. The brand (window
+// title, accent) is fetched the same way so a white-labelled deployment never
+// flashes the default name; it waits at most a moment and falls back silently.
 applySkin(readSkin());
 
 /** A pairing link lands on /pair. A remote browser without a session lands
@@ -21,6 +24,6 @@ async function chooseRoot(): Promise<React.ReactNode> {
   return <App />;
 }
 
-void chooseRoot().then((root) => {
+void Promise.all([bootstrapBrand(), chooseRoot()]).then(([, root]) => {
   createRoot(document.getElementById("root")!).render(<StrictMode>{root}</StrictMode>);
 });

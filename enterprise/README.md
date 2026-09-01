@@ -30,7 +30,7 @@ open-source edition and the notice says what to fix.
 
 | id | grants |
 |---|---|
-| `whitelabel` | product name, logo and colours from `brand.json` (next PR) |
+| `whitelabel` | product name, tagline, accent colour, logo and support link from `brand.json` (below) |
 | `sso` | identity-header trust behind an OIDC proxy |
 | `admin` | the admin panel routes |
 | `budgets` | per-bot and per-section spend limits |
@@ -58,3 +58,31 @@ working until they expire.
   would be shown? It lives here, behind an entitlement.
 - Customer-specific brand, skills, packages, connectors? The customer's own
   repo: data and config, never a fork.
+
+## White-label (`whitelabel`)
+
+Put a `brand.json` in the server's data dir (`OMB_DATA_DIR`, the `/data`
+volume in Docker) or point `OMB_BRAND_FILE` at one:
+
+```json
+{
+  "name": "Reliable Platform",
+  "tagline": "Back office, on autopilot",
+  "accent": "#1D4ED8",
+  "logo": "data:image/svg+xml;base64,…",
+  "supportUrl": "https://help.example.com"
+}
+```
+
+Only `name` is required. `logo` is an inline `data:image/…` URI or an
+`https://` URL; `accent` is a 6-digit hex colour, and the text colour on it
+is derived for contrast. The server reads the file on every `GET /api/brand`,
+so edits show on the next reload; the app fetches it before the first paint,
+so the window never flashes the default name. An unlicensed server, or a
+file with a mistake, keeps the default brand and says why in `/api/brand`
+and the startup log.
+
+What `brand.json` cannot change, because it is baked at packaging time: the
+desktop app's bundle and menu-bar name, installer names, the macOS
+permission prompts, the iOS app's name, and the helper apps' paths. A fully
+rebranded desktop build is a per-customer packaging job, not config.

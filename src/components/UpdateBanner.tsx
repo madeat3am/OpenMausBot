@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import { ArrowDownToLine, Loader2, PackageOpen, RefreshCw, Sparkles, X } from "lucide-react";
 import { useUpdaterState } from "@/lib/updater";
 import { cn } from "@/lib/cn";
+import { brand } from "../lib/brand";
 
 // The one action button in the card. Disabled drops the accent fill for the
 // flat raised grey — the "I heard you" the click needs while the main process
@@ -53,7 +54,7 @@ export function UpdateBanner() {
 
   const title =
     s.status === "available"
-      ? `OpenMausBot ${s.version} is available`
+      ? `${brand().name} ${s.version} is available`
       : s.status === "downloading"
         ? `Downloading ${s.version ?? "update"}…`
         : s.status === "downloaded"
@@ -80,7 +81,7 @@ export function UpdateBanner() {
           : installing
             ? handoff
               ? "Copying the command…"
-              : "OpenMausBot will reopen in a moment."
+              : `${brand().name} will reopen in a moment.`
             : s.status === "handed-off"
               ? s.terminalOpened
                 ? "Command copied — paste it in the terminal that opened."
