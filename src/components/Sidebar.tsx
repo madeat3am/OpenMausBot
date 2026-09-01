@@ -77,6 +77,7 @@ import {
 } from "@/lib/sidebar-layout";
 import { sidebarSectionAttention } from "@/lib/sidebar-attention";
 import { phoneSettingsAction, SidebarPhoneButton } from "./SidebarPhoneButton";
+import { SidebarMoreMenu } from "./SidebarMoreMenu";
 import { SidebarSectionHeader } from "./SidebarSectionHeader";
 
 /** "Milind Soni" → "MS", "milind" → "M", "you@x.dev" → "Y", unset → "?" */
@@ -1663,59 +1664,63 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
 
       {/* Footer */}
       <div className={cn("pb-3 pt-2", density === "icons" ? "px-2" : "px-3")}>
+        {density === "icons" && (
+          <>
         <button
-          onClick={() => dispatch({ type: "showTeamMap" })}
-          aria-label={density === "icons" ? "Team map" : undefined}
-          title={density === "icons" ? "Team map" : undefined}
-          className={cn(
-            "flex min-h-10 w-full items-center rounded-xl py-2 text-left transition-colors",
-            density === "icons" ? "justify-center px-2" : "gap-3 px-3",
-            state.activeView === "team-map" ? "bg-raised text-ink" : "text-ink hover:bg-raised/50",
-          )}
-        >
-          <Network size={20} className={state.activeView === "team-map" ? "text-accent" : "text-ink-secondary"} />
-          <span className={cn("flex-1 text-[14px]", density === "icons" && "hidden")}>Team map</span>
-        </button>
-        {skillRecorderEnabled(state.config) && (
-          <button
-            onClick={() => dispatch({ type: "showSkillRecorder" })}
-            aria-label={density === "icons" ? "Teach a skill" : undefined}
-            title={density === "icons" ? "Teach a skill" : undefined}
+            onClick={() => dispatch({ type: "showTeamMap" })}
+            aria-label={density === "icons" ? "Team map" : undefined}
+            title={density === "icons" ? "Team map" : undefined}
             className={cn(
               "flex min-h-10 w-full items-center rounded-xl py-2 text-left transition-colors",
               density === "icons" ? "justify-center px-2" : "gap-3 px-3",
-              state.activeView === "skill-recorder" ? "bg-raised text-ink" : "text-ink hover:bg-raised/50",
+              state.activeView === "team-map" ? "bg-raised text-ink" : "text-ink hover:bg-raised/50",
             )}
           >
-            <Sparkles size={20} className={state.activeView === "skill-recorder" ? "text-accent" : "text-ink-secondary"} />
-            <span className={cn("flex-1 text-[14px]", density === "icons" && "hidden")}>Teach a skill</span>
+            <Network size={20} className={state.activeView === "team-map" ? "text-accent" : "text-ink-secondary"} />
+            <span className={cn("flex-1 text-[14px]", density === "icons" && "hidden")}>Team map</span>
           </button>
+          {skillRecorderEnabled(state.config) && (
+            <button
+              onClick={() => dispatch({ type: "showSkillRecorder" })}
+              aria-label={density === "icons" ? "Teach a skill" : undefined}
+              title={density === "icons" ? "Teach a skill" : undefined}
+              className={cn(
+                "flex min-h-10 w-full items-center rounded-xl py-2 text-left transition-colors",
+                density === "icons" ? "justify-center px-2" : "gap-3 px-3",
+                state.activeView === "skill-recorder" ? "bg-raised text-ink" : "text-ink hover:bg-raised/50",
+              )}
+            >
+              <Sparkles size={20} className={state.activeView === "skill-recorder" ? "text-accent" : "text-ink-secondary"} />
+              <span className={cn("flex-1 text-[14px]", density === "icons" && "hidden")}>Teach a skill</span>
+            </button>
+          )}
+          <button
+            onClick={() => dispatch({ type: "showRoutines" })}
+            aria-label={density === "icons" ? "Calendar" : undefined}
+            title={density === "icons" ? "Calendar" : undefined}
+            className={cn(
+              "flex min-h-10 w-full items-center rounded-xl py-2 text-left transition-colors",
+              density === "icons" ? "justify-center px-2" : "gap-3 px-3",
+              state.activeView === "routines" ? "bg-raised text-ink" : "text-ink hover:bg-raised/50",
+            )}
+          >
+            <CalendarDays size={20} className={state.activeView === "routines" ? "text-accent" : "text-ink-secondary"} />
+            <span className={cn("flex-1 text-[14px]", density === "icons" && "hidden")}>Calendar</span>
+            {state.routineRuns.some((run) => ["failed", "missed"].includes(run.status) && !run.seenAt) && (
+              <span className="size-2 rounded-full bg-danger" />
+            )}
+          </button>
+          <button
+            onClick={() => dispatch({ type: "togglePlugins", open: true })}
+            className={cn("flex min-h-10 w-full items-center rounded-xl py-2 text-left hover:bg-raised/50", density === "icons" ? "justify-center px-2" : "gap-3 px-3")}
+            aria-label={density === "icons" ? "Connected apps" : undefined}
+            title={density === "icons" ? "Connected apps" : undefined}
+          >
+            <Puzzle size={20} className="text-ink-secondary" />
+            <span className={cn("text-[14px] text-ink", density === "icons" && "hidden")}>Connected apps</span>
+          </button>
+          </>
         )}
-        <button
-          onClick={() => dispatch({ type: "showRoutines" })}
-          aria-label={density === "icons" ? "Calendar" : undefined}
-          title={density === "icons" ? "Calendar" : undefined}
-          className={cn(
-            "flex min-h-10 w-full items-center rounded-xl py-2 text-left transition-colors",
-            density === "icons" ? "justify-center px-2" : "gap-3 px-3",
-            state.activeView === "routines" ? "bg-raised text-ink" : "text-ink hover:bg-raised/50",
-          )}
-        >
-          <CalendarDays size={20} className={state.activeView === "routines" ? "text-accent" : "text-ink-secondary"} />
-          <span className={cn("flex-1 text-[14px]", density === "icons" && "hidden")}>Calendar</span>
-          {state.routineRuns.some((run) => ["failed", "missed"].includes(run.status) && !run.seenAt) && (
-            <span className="size-2 rounded-full bg-danger" />
-          )}
-        </button>
-        <button
-          onClick={() => dispatch({ type: "togglePlugins", open: true })}
-          className={cn("flex min-h-10 w-full items-center rounded-xl py-2 text-left hover:bg-raised/50", density === "icons" ? "justify-center px-2" : "gap-3 px-3")}
-          aria-label={density === "icons" ? "Connected apps" : undefined}
-          title={density === "icons" ? "Connected apps" : undefined}
-        >
-          <Puzzle size={20} className="text-ink-secondary" />
-          <span className={cn("text-[14px] text-ink", density === "icons" && "hidden")}>Connected apps</span>
-        </button>
         {density === "icons" && (
           <SidebarPhoneButton
             density={density}
@@ -1738,6 +1743,47 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
             <SidebarPhoneButton
               density={density}
               onOpen={() => dispatch(phoneSettingsAction())}
+            />
+          )}
+          {density !== "icons" && (
+            <SidebarMoreMenu
+              items={[
+                {
+                  key: "team-map",
+                  label: "Team map",
+                  icon: <Network size={18} />,
+                  active: state.activeView === "team-map",
+                  onSelect: () => dispatch({ type: "showTeamMap" }),
+                },
+                ...(skillRecorderEnabled(state.config)
+                  ? [
+                      {
+                        key: "skill-recorder",
+                        label: "Teach a skill",
+                        icon: <Sparkles size={18} />,
+                        active: state.activeView === "skill-recorder",
+                        onSelect: () => dispatch({ type: "showSkillRecorder" }),
+                      },
+                    ]
+                  : []),
+                {
+                  key: "routines",
+                  label: "Tasks & routines",
+                  icon: <CalendarDays size={18} />,
+                  active: state.activeView === "routines",
+                  // folded away, this dot would otherwise vanish with the row
+                  attention: state.routineRuns.some(
+                    (run) => ["failed", "missed"].includes(run.status) && !run.seenAt,
+                  ),
+                  onSelect: () => dispatch({ type: "showRoutines" }),
+                },
+                {
+                  key: "plugins",
+                  label: "Connected apps",
+                  icon: <Puzzle size={18} />,
+                  onSelect: () => dispatch({ type: "togglePlugins", open: true }),
+                },
+              ]}
             />
           )}
           {density !== "icons" && <UpdateButton />}
