@@ -9,7 +9,7 @@ import { createServer, request, type Server } from "node:http";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -204,7 +204,50 @@ beforeAll(async () => {
         createdAt: 2,
         pinnedCwd: null,
       },
+      {
+        id: "test-linked-file-room",
+        threadId: "test-linked-file-room-thread",
+        name: "Linked file room",
+        memberIds: ["test-bot-a"],
+        defaultResponder: { kind: "member", botId: "test-bot-a" },
+        bulletin: "",
+        unread: false,
+        createdAt: 5,
+        dm: true,
+        pinnedCwd: null,
+      },
     ]),
+  );
+
+  const linkedWorkspace = join(home, ".openmausbot", "workspaces", "test-bot-a");
+  const linkedFile = join(linkedWorkspace, "phone report.md");
+  mkdirSync(linkedWorkspace, { recursive: true });
+  writeFileSync(linkedFile, "# Phone-ready report\n");
+  writeFileSync(
+    join(home, ".openmausbot", "messages-test-linked-file-room-thread.json"),
+    JSON.stringify({
+      activeLeafId: "prose-file-message",
+      messages: [
+        {
+          id: "linked-file-message",
+          at: 5,
+          parentId: null,
+          role: "bot",
+          kind: "text",
+          text: `[Open the report](<${pathToFileURL(linkedFile).href}>)`,
+          from: { botId: "test-bot-a", name: "Test bot A", color: "purple" },
+        },
+        {
+          id: "prose-file-message",
+          at: 6,
+          parentId: "linked-file-message",
+          role: "bot",
+          kind: "text",
+          text: `I saved another copy at ${linkedFile}.`,
+          from: { botId: "test-bot-a", name: "Test bot A", color: "purple" },
+        },
+      ],
+    }),
   );
 
   // A room transcript carrying an approval that outlived its turn: the card
@@ -5154,6 +5197,44 @@ describe("message pages", () => {
     const full = await seedRoom(1);
     const res = await fetch(`${BASE}/api/threads/${full.threadId}/messages/${full.messages[0].id}/image`);
     expect(res.status).toBe(404);
+  });
+
+  it("downloads only a file linked by the exact stored bot message", async () => {
+    const threadId = "test-linked-file-room-thread";
+    const linkedFile = join(home, ".openmausbot", "workspaces", "test-bot-a", "phone report.md");
+    const response = await fetch(
+      `${BASE}/api/threads/${threadId}/messages/linked-file-message/file`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        // Native URL handling decodes the `%20` carried by the stored href.
+        body: JSON.stringify({ path: linkedFile }),
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("# Phone-ready report\n");
+    expect(response.headers.get("content-type")).toContain("text/markdown");
+    expect(response.headers.get("content-disposition")).toContain("phone%20report.md");
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+
+    // Merely mentioning the exact same path in prose does not grant a file
+    // capability. It must be an actual Markdown/autolink/attachment target.
+    expect((await api(
+      "POST",
+      `/api/threads/${threadId}/messages/prose-file-message/file`,
+      { path: linkedFile },
+    )).status).toBe(403);
+    expect((await api(
+      "POST",
+      `/api/threads/${threadId}/messages/linked-file-message/file`,
+      { path: join(home, ".openmausbot", "workspaces", "test-bot-a", "other.md") },
+    )).status).toBe(403);
+    expect((await fetch(`${BASE}/api/threads/${threadId}/messages/no-such-message/file`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path: linkedFile }),
+    })).status).toBe(404);
   });
 
   it("404s an image on a conversation that does not exist, without inventing one", async () => {

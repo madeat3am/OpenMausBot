@@ -44,7 +44,7 @@ enum ShareItemLoadingError: LocalizedError {
         case .nothingSupported:
             return "There isn't any text, link, image, or supported document to send."
         case .tooManyItems:
-            return "Send up to 4 items at a time."
+            return "Send up to \(AttachmentPolicy.maximumItems) items at a time."
         case .tooMuchText:
             return "That text is too large to share. Send a shorter selection."
         case let .tooLarge(name, limit):
@@ -58,23 +58,7 @@ enum ShareItemLoadingError: LocalizedError {
 }
 
 enum ShareItemLoader {
-    static let maximumItems = 4
     private static let maximumTextCharacters = 100_000
-    private static let maximumTotalAttachmentBytes = 50 * 1_024 * 1_024
-    private static let imageMimes = Set(["image/png", "image/jpeg", "image/gif", "image/webp"])
-    private static let documentMimes = Set([
-        "text/plain", "text/markdown", "text/csv", "text/tab-separated-values",
-        "application/json", "application/pdf", "application/rtf", "text/rtf",
-        "application/msword",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "application/vnd.ms-excel",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "application/vnd.ms-powerpoint",
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        "application/vnd.oasis.opendocument.text",
-        "application/vnd.oasis.opendocument.spreadsheet",
-        "application/vnd.oasis.opendocument.presentation",
-    ])
 
     static func load(from context: NSExtensionContext) async throws -> LoadedShareItems {
         let extensionItems = context.inputItems.compactMap { $0 as? NSExtensionItem }
@@ -87,7 +71,9 @@ enum ShareItemLoader {
         guard !providers.isEmpty || !attributedTexts.isEmpty else {
             throw ShareItemLoadingError.nothingSupported
         }
-        guard providers.count <= maximumItems else { throw ShareItemLoadingError.tooManyItems }
+        guard providers.count <= AttachmentPolicy.maximumItems else {
+            throw ShareItemLoadingError.tooManyItems
+        }
         OpenMausSharedInbox.removeDirectories(olderThan: 0)
         guard let container = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: OpenMausSharedConfiguration.appGroupIdentifier
@@ -120,8 +106,11 @@ enum ShareItemLoader {
                 if let type = registeredType(in: provider, conformingTo: .image) {
                     let attachment = try await loadImage(provider, type: type, into: inbox)
                     attachmentBytes += attachment.bytes
-                    guard attachmentBytes <= maximumTotalAttachmentBytes else {
-                        throw ShareItemLoadingError.tooLarge("Those files together", 50)
+                    guard attachmentBytes <= AttachmentPolicy.maximumTotalBytes else {
+                        throw ShareItemLoadingError.tooLarge(
+                            "Those files together",
+                            AttachmentPolicy.maximumTotalBytes / (1_024 * 1_024)
+                        )
                     }
                     attachments.append(attachment)
                 } else if let representation = registeredDocumentRepresentation(in: provider) {
@@ -131,15 +120,21 @@ enum ShareItemLoader {
                         into: inbox
                     )
                     attachmentBytes += attachment.bytes
-                    guard attachmentBytes <= maximumTotalAttachmentBytes else {
-                        throw ShareItemLoadingError.tooLarge("Those files together", 50)
+                    guard attachmentBytes <= AttachmentPolicy.maximumTotalBytes else {
+                        throw ShareItemLoadingError.tooLarge(
+                            "Those files together",
+                            AttachmentPolicy.maximumTotalBytes / (1_024 * 1_024)
+                        )
                     }
                     attachments.append(attachment)
                 } else if let type = registeredType(in: provider, conformingTo: .fileURL) {
                     let attachment = try await loadFileURL(provider, type: type, into: inbox)
                     attachmentBytes += attachment.bytes
-                    guard attachmentBytes <= maximumTotalAttachmentBytes else {
-                        throw ShareItemLoadingError.tooLarge("Those files together", 50)
+                    guard attachmentBytes <= AttachmentPolicy.maximumTotalBytes else {
+                        throw ShareItemLoadingError.tooLarge(
+                            "Those files together",
+                            AttachmentPolicy.maximumTotalBytes / (1_024 * 1_024)
+                        )
                     }
                     attachments.append(attachment)
                 } else if let type = registeredType(in: provider, conformingTo: .url),
@@ -198,7 +193,7 @@ enum ShareItemLoader {
                   !type.conforms(to: .url),
                   !type.conforms(to: .plainText),
                   let mime = type.preferredMIMEType?.lowercased(),
-                  documentMimes.contains(mime)
+                  AttachmentPolicy.documentMIMETypes.contains(mime)
             else { continue }
             return DocumentRepresentation(identifier: identifier, mime: mime, type: type)
         }
@@ -210,7 +205,7 @@ enum ShareItemLoader {
         guard let suggestedName = provider.suggestedName,
               let inferred = UTType(filenameExtension: (suggestedName as NSString).pathExtension),
               let mime = inferred.preferredMIMEType?.lowercased(),
-              documentMimes.contains(mime),
+              AttachmentPolicy.documentMIMETypes.contains(mime),
               let identifier = provider.registeredTypeIdentifiers.first(where: { identifier in
                   guard let type = UTType(identifier) else { return false }
                   return type.conforms(to: .data)
@@ -265,9 +260,15 @@ enum ShareItemLoader {
         type: String,
         into inbox: URL
     ) async throws -> LocalShareAttachment {
-        let copied = try await copyFileRepresentation(provider, type: type, into: inbox, limit: 25)
+        let copied = try await copyFileRepresentation(
+            provider,
+            type: type,
+            into: inbox,
+            maximumBytes: AttachmentPolicy.maximumFileBytes
+        )
         let claimedMime = UTType(type)?.preferredMIMEType?.lowercased() ?? "application/octet-stream"
-        if imageMimes.contains(claimedMime), copied.bytes <= CompanionClient.maximumImageUploadBytes {
+        if AttachmentPolicy.imageMIMETypes.contains(claimedMime),
+           copied.bytes <= AttachmentPolicy.maximumImageBytes {
             return LocalShareAttachment(
                 id: UUID(), url: copied.url, name: copied.name,
                 mime: claimedMime, bytes: copied.bytes, kind: .image
@@ -275,9 +276,12 @@ enum ShareItemLoader {
         }
 
         guard let jpeg = downsampledJPEG(from: copied.url),
-              jpeg.count <= CompanionClient.maximumImageUploadBytes
+              jpeg.count <= AttachmentPolicy.maximumImageBytes
         else {
-            throw ShareItemLoadingError.tooLarge(copied.name, 10)
+            throw ShareItemLoadingError.tooLarge(
+                copied.name,
+                AttachmentPolicy.maximumImageBytes / (1_024 * 1_024)
+            )
         }
         let converted = inbox.appendingPathComponent("\(UUID().uuidString)-image.jpg")
         try jpeg.write(to: converted, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
@@ -298,7 +302,7 @@ enum ShareItemLoader {
             type: representation.identifier,
             suggestedType: representation.type,
             into: inbox,
-            limit: 25
+            maximumBytes: AttachmentPolicy.maximumFileBytes
         )
         return LocalShareAttachment(
             id: UUID(), url: copied.url, name: copied.name,
@@ -326,14 +330,14 @@ enum ShareItemLoader {
                     let inferred = UTType(filenameExtension: source.pathExtension)
                     let mime = inferred?.preferredMIMEType?.lowercased() ?? "application/octet-stream"
                     let name = safeName(suggestedName ?? source.lastPathComponent, type: inferred)
-                    guard documentMimes.contains(mime) else {
+                    guard AttachmentPolicy.documentMIMETypes.contains(mime) else {
                         throw ShareItemLoadingError.unsupportedDocument(name)
                     }
                     let copied = try copyRegularFile(
                         source,
                         name: name,
                         into: inbox,
-                        limit: 25
+                        maximumBytes: AttachmentPolicy.maximumFileBytes
                     )
                     continuation.resume(returning: LocalShareAttachment(
                         id: UUID(), url: copied.url, name: name,
@@ -351,7 +355,7 @@ enum ShareItemLoader {
         type: String,
         suggestedType: UTType? = nil,
         into inbox: URL,
-        limit: Int
+        maximumBytes: Int
     ) async throws -> (url: URL, name: String, bytes: Int) {
         let suggestedName = provider.suggestedName
         return try await withCheckedThrowingContinuation {
@@ -372,7 +376,12 @@ enum ShareItemLoader {
                         suggestedName ?? source.lastPathComponent,
                         type: suggestedType ?? UTType(type)
                     )
-                    let copied = try copyRegularFile(source, name: name, into: inbox, limit: limit)
+                    let copied = try copyRegularFile(
+                        source,
+                        name: name,
+                        into: inbox,
+                        maximumBytes: maximumBytes
+                    )
                     continuation.resume(returning: (copied.url, name, copied.bytes))
                 } catch {
                     continuation.resume(throwing: error)
@@ -385,7 +394,7 @@ enum ShareItemLoader {
         _ source: URL,
         name: String,
         into inbox: URL,
-        limit: Int
+        maximumBytes: Int
     ) throws -> (url: URL, bytes: Int) {
         let attributes = try FileManager.default.attributesOfItem(atPath: source.path)
         guard attributes[.type] as? FileAttributeType == .typeRegular else {
@@ -393,9 +402,8 @@ enum ShareItemLoader {
         }
         let advertisedBytes = (attributes[.size] as? NSNumber)?.intValue ?? 0
         guard advertisedBytes > 0 else { throw ShareItemLoadingError.unreadable(name) }
-        let maximumBytes = limit * 1_024 * 1_024
         guard advertisedBytes <= maximumBytes else {
-            throw ShareItemLoadingError.tooLarge(name, limit)
+            throw ShareItemLoadingError.tooLarge(name, maximumBytes / (1_024 * 1_024))
         }
         let destination = inbox.appendingPathComponent("\(UUID().uuidString)-\(name)")
         // Provider URLs stop being valid when their callbacks return.
@@ -421,7 +429,10 @@ enum ShareItemLoader {
         do {
             while let chunk = try sourceHandle.read(upToCount: 64 * 1_024), !chunk.isEmpty {
                 guard copiedBytes + chunk.count <= maximumBytes else {
-                    throw ShareItemLoadingError.tooLarge(name, limit)
+                    throw ShareItemLoadingError.tooLarge(
+                        name,
+                        maximumBytes / (1_024 * 1_024)
+                    )
                 }
                 try destinationHandle.write(contentsOf: chunk)
                 copiedBytes += chunk.count

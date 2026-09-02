@@ -463,8 +463,9 @@ private struct InstanceCapabilityResponse: Decodable {
 }
 
 public struct CompanionClient: Sendable {
-    public static let maximumImageUploadBytes = 10 * 1_024 * 1_024
-    public static let maximumFileUploadBytes = 25 * 1_024 * 1_024
+    public static let maximumImageUploadBytes = AttachmentPolicy.maximumImageBytes
+    public static let maximumFileUploadBytes = AttachmentPolicy.maximumFileBytes
+    public static let maximumFileDownloadBytes = AttachmentPolicy.maximumFileBytes
 
     public let connection: Connection
     private let token: String?
@@ -807,6 +808,71 @@ public struct CompanionClient: Sendable {
         return data
     }
 
+    /// Fetch an app-owned file mentioned by one transcript message. The path
+    /// still names the file on the paired computer, so it is sent in an
+    /// authenticated JSON body rather than placed in the URL. The server
+    /// verifies both message provenance and its attachment roots.
+    public func downloadFile(
+        threadId: String,
+        messageId: String,
+        path rawPath: String
+    ) async throws -> DownloadedFile {
+        guard Self.validRouteID(threadId), Self.validRouteID(messageId),
+              case let .desktopFile(path) = LocalMessageLink.resolve(rawPath)
+        else { throw APIError.badURL }
+        let request = try makeRequest(
+            "POST",
+            "/api/threads/\(threadId)/messages/\(messageId)/file",
+            body: ["path": path]
+        )
+        let (data, response) = try await perform(request)
+        try Self.check(response, data)
+        guard let http = response as? HTTPURLResponse else {
+            throw APIError.transport("The computer sent something this app couldn't read.")
+        }
+        if http.expectedContentLength > Self.maximumFileDownloadBytes ||
+            data.count > Self.maximumFileDownloadBytes {
+            throw APIError.transport("That file is larger than 25 MB.")
+        }
+        let disposition = http.value(forHTTPHeaderField: "Content-Disposition")
+        let filename = Self.downloadFilename(from: disposition, fallbackPath: path)
+        let rawContentType = http.value(forHTTPHeaderField: "Content-Type") ?? ""
+        let contentType = AttachmentPolicy.validMIME(rawContentType)
+            ? AttachmentPolicy.normalizedMIME(rawContentType)
+            : "application/octet-stream"
+        return DownloadedFile(data: data, filename: filename, contentType: contentType)
+    }
+
+    private static func downloadFilename(from disposition: String?, fallbackPath: String) -> String {
+        let parameters = disposition?.split(separator: ";").map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        } ?? []
+        let encoded = parameters.first(where: { $0.lowercased().hasPrefix("filename*=") })
+            .map { String($0.dropFirst("filename*=".count)) }
+        let ordinary = parameters.first(where: { $0.lowercased().hasPrefix("filename=") })
+            .map { String($0.dropFirst("filename=".count)) }
+        let decodedEncoded = encoded.flatMap { value -> String? in
+            let unquoted = value.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            let payload = unquoted.split(separator: "'", maxSplits: 2, omittingEmptySubsequences: false)
+            let encodedValue = payload.count == 3 ? String(payload[2]) : unquoted
+            return encodedValue.removingPercentEncoding
+        }
+        let candidate = decodedEncoded
+            ?? ordinary?.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            ?? fallbackPath.components(separatedBy: CharacterSet(charactersIn: "/\\"))
+                .last(where: { !$0.isEmpty })
+            ?? "file"
+        let basename = candidate.components(separatedBy: CharacterSet(charactersIn: "/\\"))
+            .last(where: { !$0.isEmpty }) ?? "file"
+        let cleaned = basename.unicodeScalars.map { scalar -> String in
+            let code = scalar.value
+            let isBidiControl = (0x202A...0x202E).contains(code) || (0x2066...0x2069).contains(code)
+            return CharacterSet.controlCharacters.contains(scalar) || isBidiControl ? " " : String(scalar)
+        }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
+        let shortened = String(cleaned.prefix(180))
+        return shortened.isEmpty || shortened == "." || shortened == ".." ? "file" : shortened
+    }
+
     /// Fetch an app-owned avatar with the paired-device bearer token. Custom
     /// avatars never go through `AsyncImage`, which cannot attach that token.
     public func avatar(path: String) async throws -> Data {
@@ -870,10 +936,9 @@ public struct CompanionClient: Sendable {
         mime: String,
         uploadId: String? = nil
     ) async throws -> String {
-        let allowed = ["image/png", "image/jpeg", "image/gif", "image/webp"]
         let normalizedMime = mime.lowercased()
         guard Self.validUploadID(uploadId) else { throw APIError.badURL }
-        guard allowed.contains(normalizedMime),
+        guard AttachmentPolicy.imageMIMETypes.contains(normalizedMime),
               data.count <= Self.maximumImageUploadBytes
         else {
             throw APIError.transport("Choose a PNG, JPEG, GIF, or WebP image up to 10 MB.")

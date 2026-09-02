@@ -33,6 +33,7 @@ import * as checkpoints from "./checkpoints.ts";
 import { appendDecision, readDecisions } from "./decision-log.ts";
 import { validateBotCwd } from "./bot-cwd.ts";
 import {
+  ATTACHMENTS_DIR,
   attachmentExists,
   extensionForMime,
   FILE_MAX_BYTES,
@@ -44,6 +45,12 @@ import {
   type SavedAttachment,
   validateAttachmentUploadId,
 } from "./attachments.ts";
+import {
+  messageFileDisposition,
+  messageFileRoots,
+  messageReferencesFile,
+  openMessageFile,
+} from "./message-file.ts";
 import {
   avatarGenerationRequestSchema,
   avatarGenerationStateMatches,
@@ -167,6 +174,7 @@ import {
   listMemoryTopics,
   isMemoryTopicName,
   memorySystemPrompt,
+  workspaceDir,
 } from "./workspace.ts";
 import {
   readMemoryFile,
@@ -6045,6 +6053,75 @@ const server = createServer(async (req, res) => {
         "cache-control": "private, max-age=31536000, immutable",
       });
       return res.end(bytes);
+    }
+
+    // Download one local file only when this exact stored bot message links
+    // to it. The message supplies both the capability (the requested path
+    // must be an actual rendered Markdown link target, allowing only
+    // URL-decoding differences) and the bot identity used to derive the
+    // narrow set of roots; this is deliberately not a general path reader.
+    m = path.match(/^\/api\/threads\/([\w-]+)\/messages\/([\w-]+)\/file$/);
+    if (m && method === "POST") {
+      if (!String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
+        return json(res, 415, { error: "content-type must be application/json" });
+      }
+      const threadId = m[1]!;
+      const directBot = store.botByThread(threadId);
+      const group = directBot ? undefined : store.groupByThread(threadId);
+      if (!directBot && !group) return json(res, 404, { error: "no such conversation" });
+
+      const message = store.messagesFor(threadId).find((candidate) => candidate.id === m![2]);
+      if (!message) return json(res, 404, { error: "no such message" });
+      const body = await readBody(req);
+      const href = typeof body.path === "string" ? body.path : "";
+      if (!href) return json(res, 400, { error: "path is required" });
+      if (message.role !== "bot" || message.kind !== "text" || !message.text || !messageReferencesFile(message.text, href)) {
+        return json(res, 403, { error: "that bot message does not link to this file" });
+      }
+
+      const senderId = directBot?.id ?? message.from?.botId;
+      if (!senderId || (group && !group.memberIds.includes(senderId))) {
+        return json(res, 403, { error: "the file's bot author could not be verified" });
+      }
+      let pinnedCwd: string | null | undefined;
+      let configuredCwd: string | undefined;
+      if (directBot) {
+        pinnedCwd = store.taskByThread(directBot.id, threadId)?.cwd;
+        configuredCwd = directBot.cwd;
+      } else if (group) {
+        const task = store.groupTaskByThread(group.id, threadId);
+        pinnedCwd = task ? task.pinnedCwd : group.threadId === threadId ? group.pinnedCwd : undefined;
+        configuredCwd = group.cwd;
+      }
+
+      const roots = messageFileRoots({
+        senderWorkspace: workspaceDir(senderId),
+        attachments: ATTACHMENTS_DIR,
+        pinnedCwd,
+        configuredCwd,
+      });
+
+      const file = await openMessageFile(href, roots);
+      res.writeHead(200, {
+        "content-type": file.mime,
+        "content-length": String(file.bytes),
+        "content-disposition": messageFileDisposition(file.name),
+        "cache-control": "private, no-store",
+        "cdn-cache-control": "no-store",
+        "cloudflare-cdn-cache-control": "no-store",
+        pragma: "no-cache",
+        vary: "Authorization",
+        "x-content-type-options": "nosniff",
+      });
+      if (file.bytes === 0) {
+        await file.handle.close();
+        return res.end();
+      }
+      const stream = file.handle.createReadStream({ start: 0, end: file.bytes - 1, autoClose: true });
+      stream.on("error", () => res.destroy());
+      res.on("close", () => stream.destroy());
+      stream.pipe(res);
+      return;
     }
 
     // ── image attachments ────────────────────────────────────────────────

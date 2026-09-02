@@ -19,6 +19,17 @@ struct MarkdownText: View {
     /// layout — a caret bolted on outside would put it on its own line the
     /// moment the reply ends in a list item.
     var caret: Bool = false
+    var openLink: ((URL) -> OpenURLAction.Result)?
+
+    init(
+        source: String,
+        caret: Bool = false,
+        openLink: ((URL) -> OpenURLAction.Result)? = nil
+    ) {
+        self.source = source
+        self.caret = caret
+        self.openLink = openLink
+    }
 
     var body: some View {
         let blocks = Markdown.blocks(source)
@@ -27,6 +38,9 @@ struct MarkdownText: View {
                 view(for: item.element, tail: caret && item.offset == blocks.count - 1)
             }
         }
+        .environment(\.openURL, OpenURLAction { url in
+            openLink?(url) ?? .systemAction(url)
+        })
     }
 
     @ViewBuilder

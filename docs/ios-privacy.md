@@ -33,17 +33,24 @@ account. A user may separately sign in on the desktop to enable the optional
 - Connector tokens stay in the desktop operating system's encrypted credential
   store. Pairing and device tokens are not stored in the hosted control-plane
   database.
-- When a user explicitly chooses OpenMausBot from another app's Share sheet,
-  the selected text, link, image, or supported document is sent to the bot or
-  room the user confirms. Images and documents are stored in the attachments
-  directory on the user's computer with generated names and owner-only file
-  permissions. Individual images are limited to 10 MiB, documents to 25 MiB,
-  and the computer refuses new uploads after 512 MiB of attachments rather than
-  silently deleting files referenced by older conversations. Temporary iPhone
-  copies are removed after a completed send or cancellation. If iOS terminates
-  the extension mid-transfer, the next Share sheet session removes the abandoned
-  copy immediately; an OpenMausMobile foreground launch removes it once it is at
-  least 60 minutes old.
+- When a user explicitly chooses OpenMausBot from another app's Share sheet, or
+  uses the attachment button in a chat, the selected text, link, image, or
+  supported document is sent to the bot or room the user confirms. Images and
+  documents are stored in the attachments directory on the user's computer with
+  generated names and owner-only file permissions. Individual images are
+  limited to 10 MiB, documents to 25 MiB, and one message to four items and
+  50 MiB total. The computer refuses new uploads after 512 MiB of attachments
+  rather than silently deleting files referenced by older conversations.
+  In-chat selections remain in memory until the message succeeds or the draft
+  is discarded. Temporary Share-extension copies are removed after a completed
+  send or cancellation. If iOS terminates the extension mid-transfer, the next
+  Share sheet session removes the abandoned copy immediately; an OpenMausMobile
+  foreground launch removes it once it is at least 60 minutes old.
+- Opening a file link sent by a bot requests that exact file from the paired
+  computer over the selected authenticated companion connection. The app keeps
+  a temporary local preview only while it is open, then removes it. Ordinary
+  web links continue to open in the system browser. The hosted control plane
+  does not store either the source file or its preview.
 - The app contains no advertising or analytics SDKs, does not track users
   across other companies' apps or websites, and does not sell personal data.
 

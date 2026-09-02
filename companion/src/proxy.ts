@@ -19,7 +19,7 @@ import {
   MAX_COMPANION_ENDPOINTS,
   type CompanionEndpoint,
 } from "./endpoints.ts";
-import { denyReason, isCloudDesktopJoin } from "./routes.ts";
+import { denyReason, isCloudDesktopJoin, isMessageFileDownload } from "./routes.ts";
 import { createSseScrubber, isJson, scrub } from "./wire.ts";
 
 /** What the forwarding handler needs from the process around it. */
@@ -460,7 +460,11 @@ export function createProxyHandler(options: ProxyOptions) {
         const encoding = String(harness.headers["content-encoding"] ?? "")
           .trim()
           .toLowerCase();
-        if (!isJson(String(contentType ?? "")) || (encoding && encoding !== "identity")) {
+        if (
+          isMessageFileDownload(method, path)
+          || !isJson(String(contentType ?? ""))
+          || (encoding && encoding !== "identity")
+        ) {
           // images and anything else: byte-for-byte, no parsing.
           //
           // Encoded bodies come through here too. Scrubbing one would mean

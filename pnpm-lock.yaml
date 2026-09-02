@@ -17,6 +17,9 @@ importers:
       lucide-react:
         specifier: ^0.539.0
         version: 0.539.0(react@19.2.8)
+      mdast-util-from-markdown:
+        specifier: ^2.0.3
+        version: 2.0.3
       posthog-js:
         specifier: ^1.415.6
         version: 1.415.6

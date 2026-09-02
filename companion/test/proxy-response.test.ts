@@ -40,11 +40,16 @@ const close = (server: Server | undefined): Promise<void> =>
 const device = async (
   path = "/api/bots",
   method = "GET",
+  body?: string,
 ): Promise<{ status: number; text: string; headers: Headers }> => {
-  const res = await fetch(`http://127.0.0.1:${sidecarPort}${path}`, {
-    method,
-    headers: { authorization: `Bearer ${TOKEN}` },
-  });
+  const headers = {
+    authorization: `Bearer ${TOKEN}`,
+    ...(body === undefined ? {} : { "content-type": "application/json" }),
+  };
+  const init: RequestInit = body === undefined
+    ? { method, headers }
+    : { method: "POST", headers, body };
+  const res = await fetch(`http://127.0.0.1:${sidecarPort}${path}`, init);
   return { status: res.status, text: await res.text(), headers: res.headers };
 };
 
@@ -199,5 +204,26 @@ describe("preparing a harness response for a device", () => {
     expect(response.text).toBe("image-bytes");
     expect(response.headers.get("cache-control")).toBe("private, no-store");
     expect(response.headers.get("cdn-cache-control")).toBe("no-store");
+  });
+
+  it("passes an application/json message file through byte-for-byte", async () => {
+    const bytes = '{\n  "resumeCursors": { "this-is-file-content": true },\n  "n": 1\n}\n';
+    respond = (res) => {
+      res.writeHead(200, {
+        "content-type": "application/json",
+        "content-disposition": 'attachment; filename="report.json"',
+      });
+      res.end(bytes);
+    };
+
+    const response = await device(
+      "/api/threads/thread-1/messages/message-1/file",
+      "POST",
+      JSON.stringify({ path: "report.json" }),
+    );
+    expect(response.status).toBe(200);
+    expect(response.text).toBe(bytes);
+    expect(response.headers.get("content-disposition")).toContain("report.json");
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
   });
 });
