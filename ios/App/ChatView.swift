@@ -43,6 +43,7 @@ struct ChatView: View {
     @State private var fileOpenError: String?
     @State private var filePreview: FilePreviewItem?
     @State private var fileDownloadTask: Task<Void, Never>?
+    @State private var acceptsNextHardwareLineBreak = false
     @FocusState private var composerFocused: Bool
     @StateObject private var dictation = SpeechDictation()
     /// The opening beat: the island grows with the bot's face in it, then
@@ -658,6 +659,29 @@ struct ChatView: View {
             && !preparingAttachments && !sendingMessage
     }
 
+    /// A vertically growing SwiftUI TextField treats the software keyboard's
+    /// Return key as a newline even when the key is labelled “Send”. Intercept
+    /// that proposed edit before it reaches the draft. Hardware Shift-Return
+    /// opts into one real line break through `acceptsNextHardwareLineBreak`.
+    private var composerDraft: Binding<String> {
+        Binding(
+            get: { draft },
+            set: { proposed in
+                if acceptsNextHardwareLineBreak {
+                    acceptsNextHardwareLineBreak = false
+                    draft = proposed
+                } else if ComposerKeyboard.shouldSubmit(
+                    previousText: draft,
+                    proposedText: proposed
+                ) {
+                    submit()
+                } else {
+                    draft = proposed
+                }
+            }
+        )
+    }
+
     private var hasPendingApproval: Bool {
         messages.contains { $0.card?.isPending == true }
     }
@@ -1038,7 +1062,7 @@ struct ChatView: View {
 
                         TextField(
                             sendingMessage ? "Sending…" : dictation.isListening ? "Listening…" : "Ask \(current.name)",
-                            text: $draft,
+                            text: composerDraft,
                             axis: .vertical
                         )
                             .lineLimit(1...5)
@@ -1058,7 +1082,11 @@ struct ChatView: View {
                                 }
                             }
                             .onKeyPress(.return, phases: .down) { press in
-                                guard !press.modifiers.contains(.shift) else { return .ignored }
+                                if press.modifiers.contains(.shift) {
+                                    acceptsNextHardwareLineBreak = true
+                                    return .ignored
+                                }
+                                acceptsNextHardwareLineBreak = false
                                 submit()
                                 return .handled
                             }
