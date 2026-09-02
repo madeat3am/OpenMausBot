@@ -130,6 +130,16 @@ export class ProviderRegistry {
     return [...this.byId.values()].flatMap((e) => (e.live ? [e.live] : []));
   }
 
+  /** Refresh one provider's live model catalog on an explicit user action.
+   * Ordinary descriptions stay snapshot-only so opening or focusing the app
+   * can never wait on a provider CLI or network request. */
+  async refreshModels(instanceId: InstanceId): Promise<boolean> {
+    const instance = this.get(instanceId);
+    if (!instance) return false;
+    await instance.refreshModels?.();
+    return true;
+  }
+
   /** instance snapshots for the model picker: id, driver, models, health */
   async describe() {
     // Multiple instances may share a driver. Scan each default binary once
@@ -168,7 +178,6 @@ export class ProviderRegistry {
         const inst = entry.live;
         let snapshot: ProviderSnapshot;
         try {
-          await inst.refreshModels?.();
           snapshot = await inst.snapshot();
         } catch (e) {
           snapshot = { state: "unavailable", reason: e instanceof Error ? e.message : String(e) };

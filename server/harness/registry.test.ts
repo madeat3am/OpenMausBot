@@ -149,7 +149,7 @@ describe("ProviderRegistry", () => {
     expect((await registry.describe())[0].capabilities.approvalReview).toBe(true);
   });
 
-  it("refreshes a live model catalog before returning each description", async () => {
+  it("only refreshes a live model catalog when explicitly requested", async () => {
     const fake = makeFakeDriver();
     const registry = new ProviderRegistry([fake.driver]);
     await registry.load({ a: { driver: "fake" }, b: { driver: "fake" } });
@@ -168,14 +168,17 @@ describe("ProviderRegistry", () => {
       });
     }
 
-    const first = Object.fromEntries((await registry.describe()).map((row) => [row.instanceId, row.models]));
-    expect(first.a.default).toBe("a-1");
-    expect(first.b.default).toBe("b-1");
+    const initial = Object.fromEntries((await registry.describe()).map((row) => [row.instanceId, row.models]));
+    expect(initial.a.default).toBe("");
+    expect(initial.b.default).toBe("");
+    expect(refreshes).toEqual({ a: 0, b: 0 });
 
-    const second = Object.fromEntries((await registry.describe()).map((row) => [row.instanceId, row.models]));
-    expect(second.a.default).toBe("a-2");
-    expect(second.b.default).toBe("b-2");
-    expect(refreshes).toEqual({ a: 2, b: 2 });
+    expect(await registry.refreshModels("a")).toBe(true);
+    const refreshed = Object.fromEntries((await registry.describe()).map((row) => [row.instanceId, row.models]));
+    expect(refreshed.a.default).toBe("a-1");
+    expect(refreshed.b.default).toBe("");
+    expect(refreshes).toEqual({ a: 1, b: 0 });
+    expect(await registry.refreshModels("missing")).toBe(false);
   });
 
   it("disposeAll disposes every live instance and empties the registry", async () => {

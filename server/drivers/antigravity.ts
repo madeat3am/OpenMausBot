@@ -44,16 +44,25 @@ import { appendNative } from "./native.ts";
 
 const DRIVER_KIND = "antigravityAgent";
 export const ANTIGRAVITY_STREAM_INPUT_MIN_VERSION = "1.1.15";
+export const ANTIGRAVITY_MODEL_DISCOVERY_MIN_VERSION = "1.1.24";
 
-export function supportsAntigravityStreamInput(version: string | null): boolean {
+function supportsAntigravityVersion(version: string | null, minimumVersion: string): boolean {
   const match = /^(\d+)\.(\d+)\.(\d+)/.exec(version?.trim() ?? "");
   if (!match) return false;
   const actual = match.slice(1).map(Number);
-  const minimum = ANTIGRAVITY_STREAM_INPUT_MIN_VERSION.split(".").map(Number);
+  const minimum = minimumVersion.split(".").map(Number);
   for (let index = 0; index < minimum.length; index += 1) {
     if (actual[index] !== minimum[index]) return actual[index] > minimum[index];
   }
   return true;
+}
+
+export function supportsAntigravityStreamInput(version: string | null): boolean {
+  return supportsAntigravityVersion(version, ANTIGRAVITY_STREAM_INPUT_MIN_VERSION);
+}
+
+export function supportsAntigravityModelDiscovery(version: string | null): boolean {
+  return supportsAntigravityVersion(version, ANTIGRAVITY_MODEL_DISCOVERY_MIN_VERSION);
 }
 
 export interface AntigravityConfig {
@@ -61,12 +70,15 @@ export interface AntigravityConfig {
   fullAuto: boolean;
 }
 
-// model catalog from `agy models` (agy 1.1.12)
+// Offline fallback for `agy models`; live account discovery is merged above it.
 export const STATIC_ANTIGRAVITY_MODELS: ModelCatalog = {
   default: "gemini-3.1-pro-high",
   options: [
-    { id: "gemini-3.1-pro-high", label: "Gemini 3.1 Pro (High)" },
-    { id: "gemini-3.1-pro-low", label: "Gemini 3.1 Pro (Low)" },
+    // Documented by agy's headless CLI guide. The installed account's live
+    // catalog is merged ahead of this fallback, so newly rolled-out variants
+    // appear without requiring another OpenMausBot release.
+    { id: "gemini-3.8-flash-high", label: "Gemini 3.8 Flash (High)" },
+    { id: "gemini-3.8-flash-medium", label: "Gemini 3.8 Flash (Medium)" },
     // 3.7 ids confirmed against the agy 1.1.12 binary's own model table
     { id: "gemini-3.7-flash-high", label: "Gemini 3.7 Flash (High)" },
     { id: "gemini-3.7-flash-medium", label: "Gemini 3.7 Flash (Medium)" },
@@ -74,6 +86,8 @@ export const STATIC_ANTIGRAVITY_MODELS: ModelCatalog = {
     { id: "gemini-3.6-flash-high", label: "Gemini 3.6 Flash (High)" },
     { id: "gemini-3.6-flash-medium", label: "Gemini 3.6 Flash (Medium)" },
     { id: "gemini-3.6-flash-low", label: "Gemini 3.6 Flash (Low)" },
+    { id: "gemini-3.1-pro-high", label: "Gemini 3.1 Pro (High)" },
+    { id: "gemini-3.1-pro-low", label: "Gemini 3.1 Pro (Low)" },
     { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6 (Thinking)" },
     { id: "claude-opus-4-6-thinking", label: "Claude Opus 4.6 (Thinking)" },
     { id: "gpt-oss-120b-medium", label: "GPT-OSS 120B (Medium)" },
@@ -90,6 +104,245 @@ function antigravityEnvironment(overrides: NodeJS.ProcessEnv = {}): NodeJS.Proce
 }
 
 const AGY_MODEL_ID = /^[a-z0-9][a-z0-9._:/-]*$/i;
+const AGY_LIVE_MODEL_ID = /^[a-z0-9]+(?:[._:/-][a-z0-9]+)+$/i;
+export const ANTIGRAVITY_MODEL_PROBE_TIMEOUT_MS = 5_000;
+const ANTIGRAVITY_MODEL_MAX_OUTPUT = 1024 * 1024;
+
+type AntigravityModelOption = ModelCatalog["options"][number];
+
+export type AntigravityModelProbe =
+  | { status: "available"; options: AntigravityModelOption[] }
+  | { status: "unauthenticated" }
+  | { status: "unavailable" };
+
+interface AntigravityModelCommandResult {
+  error: Error | null;
+  stdout: string;
+  stderr: string;
+}
+
+export type AntigravityModelCommandRunner = (
+  cli: string,
+  args: string[],
+  env: Record<string, string | undefined>,
+  signal: AbortSignal,
+) => Promise<AntigravityModelCommandResult>;
+
+// CSI styling and OSC titles/progress sometimes surround the human-readable
+// output. Strip those terminal controls before applying the documented row
+// grammar instead of treating arbitrary progress text as a model.
+function stripTerminalControls(value: string): string {
+  const escape = String.fromCodePoint(27);
+  const bell = String.fromCodePoint(7);
+  return value
+    .replace(new RegExp(`${escape}\\][^${bell}]*(?:${bell}|${escape}\\\\)`, "gu"), "")
+    .replace(new RegExp(`${escape}\\[[0-?]*[ -/]*[@-~]`, "gu"), "");
+}
+
+/** Parse the rows documented for `agy models`: `<slug><tab|spaces><label>`.
+ * Older releases print progress on stdout and interactive terminals may add
+ * ANSI or carriage-return spinners, all of which are intentionally ignored. */
+export function parseAntigravityModelsOutput(stdout: string): AntigravityModelOption[] {
+  const options: AntigravityModelOption[] = [];
+  const seen = new Set<string>();
+  for (const rawLine of stripTerminalControls(stdout).split(/[\r\n]+/u)) {
+    const match = /^\s*([^\s]+)(?:\t+| {2,})(\S(?:.*\S)?)\s*$/u.exec(rawLine);
+    if (!match || !AGY_LIVE_MODEL_ID.test(match[1]) || seen.has(match[1])) continue;
+    seen.add(match[1]);
+    options.push({ id: match[1], label: match[2] });
+  }
+  return options;
+}
+
+function modelOptionsFromUnknown(value: unknown): AntigravityModelOption[] {
+  if (!Array.isArray(value)) return [];
+  const options: AntigravityModelOption[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as { id?: unknown; label?: unknown };
+    if (
+      typeof row.id !== "string" ||
+      !AGY_LIVE_MODEL_ID.test(row.id) ||
+      typeof row.label !== "string" ||
+      !row.label.trim() ||
+      seen.has(row.id)
+    ) continue;
+    seen.add(row.id);
+    options.push({ id: row.id, label: row.label.trim() });
+  }
+  return options;
+}
+
+/** Prefer the current CLI's structured command payload. The text parser is a
+ * compatibility fallback for older releases and for JSON envelopes that only
+ * include the documented response string. */
+export function parseAntigravityModelCommandOutput(stdout: string): AntigravityModelOption[] {
+  const clean = stripTerminalControls(stdout);
+  for (const line of clean.split(/[\r\n]+/u).reverse()) {
+    let payload: unknown;
+    try {
+      payload = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!payload || typeof payload !== "object") continue;
+    const envelope = payload as {
+      response?: unknown;
+      command?: { data?: { models?: unknown } };
+    };
+    const structured = modelOptionsFromUnknown(envelope.command?.data?.models);
+    if (structured.length) return structured;
+    if (typeof envelope.response === "string") {
+      const rows = parseAntigravityModelsOutput(envelope.response);
+      if (rows.length) return rows;
+    }
+  }
+  return parseAntigravityModelsOutput(clean);
+}
+
+/** Only an explicit response asking the user to sign in is evidence of auth
+ * state. A timeout, network error, or changed output format is merely an
+ * unavailable probe and must not make the UI claim the account is signed out. */
+export function isAntigravitySignInRequired(output: string): boolean {
+  const text = stripTerminalControls(output).replace(/\s+/gu, " ").trim();
+  return (
+    /\b(?:please|must|need to)\s+(?:sign|log)\s+in\b/iu.test(text) ||
+    /\bnot\s+(?:signed|logged)\s+in\b/iu.test(text) ||
+    /\b(?:sign[ -]?in|authentication)\s+(?:is\s+)?required\b/iu.test(text)
+  );
+}
+
+/** Run a read-only model command with stdin closed and tree-aware teardown.
+ * `execFile`'s timeout only signals its direct child; configured wrapper CLIs
+ * can otherwise leave agy descendants running after a timeout or reload. */
+export function runAntigravityModelCommand(
+  cli: string,
+  args: string[],
+  env: Record<string, string | undefined>,
+  signal: AbortSignal,
+): Promise<AntigravityModelCommandResult> {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve({ error: new Error("Antigravity model discovery was cancelled"), stdout: "", stderr: "" });
+      return;
+    }
+    let child: ReturnType<typeof spawnCli>;
+    try {
+      child = spawnCli(cli, args, { env, stdio: ["pipe", "pipe", "pipe"] });
+    } catch (error) {
+      resolve({ error: error instanceof Error ? error : new Error(String(error)), stdout: "", stderr: "" });
+      return;
+    }
+
+    let stdout = "";
+    let stderr = "";
+    let stopError: Error | null = null;
+    let settled = false;
+    let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (error: Error | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(cleanupTimer);
+      signal.removeEventListener("abort", onAbort);
+      resolve({ error, stdout, stderr });
+    };
+    const stop = (error: Error) => {
+      if (stopError) return;
+      stopError = error;
+      killCliTree(child);
+      // killCliTree starts a forced `taskkill /T` on Windows. POSIX gets a
+      // graceful group signal, so immediately escalate this bounded helper's
+      // complete detached process group to SIGKILL.
+      if (process.platform !== "win32") {
+        try {
+          if (child.pid) process.kill(-child.pid, "SIGKILL");
+          else child.kill("SIGKILL");
+        } catch {
+          try {
+            child.kill("SIGKILL");
+          } catch {}
+        }
+      }
+      // taskkill normally closes the child promptly. Keep the caller bounded
+      // even when the OS cannot report that close, after teardown was issued.
+      cleanupTimer = setTimeout(() => finish(stopError), 1_000);
+      cleanupTimer.unref?.();
+    };
+    const onAbort = () => stop(new Error("Antigravity model discovery was cancelled"));
+    signal.addEventListener("abort", onAbort, { once: true });
+
+    const append = (stream: "stdout" | "stderr", chunk: string) => {
+      if (settled || stopError) return;
+      if (stream === "stdout") stdout += chunk;
+      else stderr += chunk;
+      if (Buffer.byteLength(stdout) + Buffer.byteLength(stderr) > ANTIGRAVITY_MODEL_MAX_OUTPUT) {
+        stop(new Error("Antigravity model discovery returned too much output"));
+      }
+    };
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => append("stdout", chunk));
+    child.stderr.on("data", (chunk) => append("stderr", chunk));
+    child.on("error", (error) => finish(stopError ?? error));
+    child.on("close", (code, childSignal) => {
+      if (stopError) {
+        finish(stopError);
+        return;
+      }
+      finish(code === 0 ? null : new Error(`agy models exited ${code ?? childSignal ?? "unknown"}`));
+    });
+    try {
+      child.stdin.end();
+    } catch (error) {
+      stop(error instanceof Error ? error : new Error(String(error)));
+    }
+  });
+}
+
+/** Query the exact configured executable so wrapper paths and account-specific
+ * rollouts are reflected in the picker. This function always resolves: model
+ * discovery is optional and cannot make an otherwise usable driver fail. */
+export function probeAntigravityModels(
+  cli: string,
+  env: Record<string, string | undefined>,
+  run: AntigravityModelCommandRunner = runAntigravityModelCommand,
+  externalSignal?: AbortSignal,
+): Promise<AntigravityModelProbe> {
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+  if (externalSignal?.aborted) cancel();
+  else externalSignal?.addEventListener("abort", cancel, { once: true });
+  const timer = setTimeout(cancel, ANTIGRAVITY_MODEL_PROBE_TIMEOUT_MS);
+  timer.unref?.();
+  const execute = (args: string[]) => run(cli, args, env, controller.signal);
+  return (async () => {
+    try {
+      // `--output-format` is a global flag; putting it after `models` is
+      // rejected. A legacy text retry shares this same 5s total deadline.
+      let result = await execute(["--output-format", "json", "models"]);
+      let diagnostic = `${result.stdout}\n${result.stderr}\n${result.error?.message ?? ""}`;
+      if (isAntigravitySignInRequired(diagnostic)) return { status: "unauthenticated" };
+      if (
+        !controller.signal.aborted &&
+        result.error &&
+        /(?:unknown|undefined|unrecognized).*?(?:flag|option)|flags? provided but not defined|unexpected arguments?/iu.test(
+          diagnostic,
+        )
+      ) {
+        result = await execute(["models"]);
+        diagnostic = `${result.stdout}\n${result.stderr}\n${result.error?.message ?? ""}`;
+        if (isAntigravitySignInRequired(diagnostic)) return { status: "unauthenticated" };
+      }
+      if (result.error) return { status: "unavailable" };
+      const options = parseAntigravityModelCommandOutput(result.stdout);
+      return options.length ? { status: "available", options } : { status: "unavailable" };
+    } finally {
+      clearTimeout(timer);
+      externalSignal?.removeEventListener("abort", cancel);
+    }
+  })();
+}
 
 function extrasFromUnknown(value: unknown): Array<{ id: string; label: string }> {
   if (!Array.isArray(value)) return [];
@@ -105,7 +358,7 @@ function extrasFromUnknown(value: unknown): Array<{ id: string; label: string }>
 }
 
 /** Extra ids from ~/.gemini/antigravity-cli/settings.json, if the user added any. */
-export function readAntigravityModelCatalog(env: Record<string, string | undefined> = process.env) {
+function settingsModelExtras(env: Record<string, string | undefined>): AntigravityModelOption[] {
   const home = env.HOME || env.USERPROFILE || homedir();
   let settings: Record<string, unknown> = {};
   try {
@@ -113,7 +366,7 @@ export function readAntigravityModelCatalog(env: Record<string, string | undefin
       readFileSync(join(home, ".gemini", "antigravity-cli", "settings.json"), "utf8"),
     ) as Record<string, unknown>;
   } catch {
-    return STATIC_ANTIGRAVITY_MODELS;
+    return [];
   }
   const extras = [
     ...extrasFromUnknown(settings.availableModels),
@@ -121,14 +374,33 @@ export function readAntigravityModelCatalog(env: Record<string, string | undefin
     ...extrasFromUnknown(settings.extraModels),
   ];
   if (typeof settings.model === "string") extras.push(...extrasFromUnknown([settings.model]));
-  const options = STATIC_ANTIGRAVITY_MODELS.options.map((option) => ({ ...option }));
-  const seen = new Set(options.map((option) => option.id));
-  for (const extra of extras) {
+  return extras;
+}
+
+/** Live official rows lead so agy's current labels/order win; checked-in rows
+ * fill any rollout or offline gaps, then user-configured models come last. */
+export function mergeAntigravityModelCatalog(
+  liveOptions: AntigravityModelOption[],
+  env: Record<string, string | undefined> = process.env,
+): ModelCatalog {
+  const options: AntigravityModelOption[] = [];
+  const seen = new Set<string>();
+  for (const option of [...liveOptions, ...STATIC_ANTIGRAVITY_MODELS.options]) {
+    if (seen.has(option.id)) continue;
+    seen.add(option.id);
+    options.push({ ...option });
+  }
+  for (const extra of settingsModelExtras(env)) {
     if (seen.has(extra.id)) continue;
     seen.add(extra.id);
     options.push({ id: extra.id, label: extra.label, custom: true });
   }
   return { default: STATIC_ANTIGRAVITY_MODELS.default, options };
+}
+
+/** Extra ids from settings merged onto the offline official fallback. */
+export function readAntigravityModelCatalog(env: Record<string, string | undefined> = process.env) {
+  return mergeAntigravityModelCatalog([], env);
 }
 
 // ── computer MCP mount ──────────────────────────────────────────────────
@@ -383,6 +655,7 @@ export const AntigravityDriver: ProviderDriver<AntigravityConfig> = {
       win32: "irm https://antigravity.google/cli/install.ps1 | iex",
     },
     docsUrl: "https://github.com/google-antigravity/antigravity-cli#installation",
+    signInCommand: "agy",
   },
   models: STATIC_ANTIGRAVITY_MODELS,
   decodeConfig,
@@ -392,21 +665,9 @@ export const AntigravityDriver: ProviderDriver<AntigravityConfig> = {
     const { instanceId, config } = input;
     const env = antigravityEnvironment(input.environment);
     const catalogEnv: Record<string, string | undefined> = env;
-    let models = STATIC_ANTIGRAVITY_MODELS;
-    const refreshModels = async () => {
-      try {
-        const resolved = await mergeLocalInject(readAntigravityModelCatalog(catalogEnv), catalogEnv);
-        if (resolved.options.length) models = resolved;
-      } catch {
-        // Keep the last usable catalog when settings.json is unreadable.
-      }
-    };
-    await refreshModels();
-    const listeners = new Set<RuntimeEventListener>();
-    // one active turn per thread; a second send while busy is a caller bug
-    const active = new Map<string, { stop: () => void; turnId: string }>();
-    const pending = new Set<string>();
-    let disposed = false;
+    // Startup is deliberately disk-only. Live discovery can touch the network
+    // and belongs behind the user's explicit Refresh models action.
+    let models = readAntigravityModelCatalog(catalogEnv);
     let verifiedVersion: string | null | undefined;
     const readVersion = () =>
       new Promise<string | null>((resolve) => {
@@ -418,6 +679,63 @@ export const AntigravityDriver: ProviderDriver<AntigravityConfig> = {
       if (verifiedVersion === undefined) verifiedVersion = await readVersion();
       return verifiedVersion;
     };
+    let lastGoodLiveOptions: AntigravityModelOption[] = [];
+    let catalogAuthenticated: boolean | undefined;
+    let disposed = false;
+    let modelRefresh: { controller: AbortController; promise: Promise<void> } | undefined;
+    const refreshModels = (): Promise<void> => {
+      if (disposed) return Promise.resolve();
+      if (modelRefresh) return modelRefresh.promise;
+      const controller = new AbortController();
+      const work = (async () => {
+        // agy 1.1.24 fixed inherited stdio handles that could keep model
+        // discovery alive after its root process exited, particularly on
+        // Windows where that already-exited root can no longer identify the
+        // descendant tree. Older releases keep the static catalog instead.
+        // The ordinary instance snapshot owns CLI/version checks. Do not
+        // start even a version child from this refresh path: an early refresh
+        // or disposal must remain subprocess-free, and old Windows CLIs can
+        // leave inherited pipes behind. The picker is populated after that
+        // snapshot, so a verified 1.1.24+ version is already cached here.
+        if (!supportsAntigravityModelDiscovery(verifiedVersion ?? null)) return;
+        const probe = await probeAntigravityModels(
+          config.cli,
+          catalogEnv,
+          runAntigravityModelCommand,
+          controller.signal,
+        );
+        if (probe.status === "available") {
+          lastGoodLiveOptions = probe.options.map((option) => ({ ...option }));
+          catalogAuthenticated = true;
+        } else if (probe.status === "unauthenticated") {
+          // A real sign-out invalidates account-specific live rows. A network
+          // failure below does not: it continues from the last usable result.
+          lastGoodLiveOptions = [];
+          catalogAuthenticated = false;
+        } else {
+          catalogAuthenticated = undefined;
+        }
+
+        const base = mergeAntigravityModelCatalog(lastGoodLiveOptions, catalogEnv);
+        try {
+          const resolved = await mergeLocalInject(base, catalogEnv);
+          if (resolved.options.length) models = resolved;
+        } catch {
+          // Local model hosts are optional. The live/static/settings catalog
+          // remains useful even when one of those probes is temporarily down.
+          models = base;
+        }
+      })();
+      const promise = work.finally(() => {
+        if (modelRefresh?.promise === promise) modelRefresh = undefined;
+      });
+      modelRefresh = { controller, promise };
+      return promise;
+    };
+    const listeners = new Set<RuntimeEventListener>();
+    // one active turn per thread; a second send while busy is a caller bug
+    const active = new Map<string, { stop: () => void; turnId: string }>();
+    const pending = new Set<string>();
     // every live agy child, tracked independently of `active`: a child can
     // hang AFTER emitting `result` (so it's already removed from `active`), and
     // dispose()/stopAll() must still be able to reap it. Removed on process exit.
@@ -814,10 +1132,14 @@ export const AntigravityDriver: ProviderDriver<AntigravityConfig> = {
           version,
         };
       }
-      // No auth field: agy auth is keyring-backed with no reliable file marker
-      // (~/.gemini/antigravity-cli/ exists after first run even when logged
-      // out), so any file heuristic would overstate "signed in". Leave undefined.
-      return { state: "available", version };
+      // `agy models` is the only non-interactive account check. It reports
+      // false only for an explicit sign-in response; transient discovery
+      // failures deliberately leave this field unknown instead.
+      return {
+        state: "available",
+        version,
+        ...(catalogAuthenticated === undefined ? {} : { authenticated: catalogAuthenticated }),
+      };
     };
 
     const generateText = async (prompt: string): Promise<string> => {
@@ -953,9 +1275,12 @@ export const AntigravityDriver: ProviderDriver<AntigravityConfig> = {
       generateText,
       dispose: async () => {
         disposed = true;
+        const refresh = modelRefresh;
+        refresh?.controller.abort();
         for (const { stop } of active.values()) stop();
         reapChildren(true); // escalate to SIGKILL — disposal must reap every child
         listeners.clear();
+        await refresh?.promise;
       },
     };
   },

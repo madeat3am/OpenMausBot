@@ -1250,6 +1250,20 @@ describe("harness HTTP API", () => {
       driverKind: "claudeAgent",
       displayName: "Fixture Claude",
     }));
+
+    const simplePost = await fetch(`${BASE}/api/instances/claude/refresh-models`, {
+      method: "POST",
+      headers: { "content-type": "text/plain" },
+      body: "{}",
+    });
+    expect(simplePost.status).toBe(415);
+
+    const missing = await api("POST", "/api/instances/ghost/refresh-models", {});
+    expect(missing.status).toBe(404);
+
+    const refreshed = await api("POST", "/api/instances/claude/refresh-models", {});
+    expect(refreshed.status).toBe(200);
+    expect(refreshed.body.instances).toContainEqual(expect.objectContaining({ instanceId: "claude" }));
   });
 
   it("searches transcripts and exports a conversation", async () => {

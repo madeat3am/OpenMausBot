@@ -9129,6 +9129,23 @@ const server = createServer(async (req, res) => {
       return json(res, 200, { instances: await registry.describe() });
     }
 
+    // Live model discovery can invoke a provider CLI or network endpoint, so
+    // it is never part of startup, focus, or ordinary picker reads. Only the
+    // model picker's explicit Refresh action reaches this route.
+    const instanceModelRefresh = /^\/api\/instances\/([\w.-]+)\/refresh-models$/.exec(path);
+    if (method === "POST" && instanceModelRefresh) {
+      if (!String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
+        return json(res, 415, { error: "content-type must be application/json" });
+      }
+      try {
+        const found = await registry.refreshModels(instanceModelRefresh[1]);
+        if (!found) return json(res, 404, { error: `unknown instance "${instanceModelRefresh[1]}"` });
+        return json(res, 200, { instances: await registry.describe() });
+      } catch (error) {
+        return json(res, 500, { error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+
     // ── CLI binary discovery for the Engines "detected" dropdown ──
     // ?name=claude → absolute paths of every `claude` on the augmented PATH,
     // in PATH order (first = what a bare name runs). Polled when the user

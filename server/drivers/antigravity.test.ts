@@ -18,17 +18,34 @@ import { recordEvents, type EventRecorder } from "../testing/events.ts";
 import {
   ANTIGRAVITY_AGENTS_MCP_KEY,
   ANTIGRAVITY_COMPUTER_MCP_KEY,
+  ANTIGRAVITY_MODEL_DISCOVERY_MIN_VERSION,
+  ANTIGRAVITY_MODEL_PROBE_TIMEOUT_MS,
   AntigravityDriver,
   antigravityAgentsMcpServer,
   antigravityComputerMcpServer,
   antigravityMcpServers,
+  supportsAntigravityModelDiscovery,
   supportsAntigravityStreamInput,
   ensureAntigravityMcpServers,
+  mergeAntigravityModelCatalog,
+  parseAntigravityModelCommandOutput,
+  parseAntigravityModelsOutput,
+  probeAntigravityModels,
   readAntigravityModelCatalog,
   STATIC_ANTIGRAVITY_MODELS,
+  type AntigravityModelCommandRunner,
 } from "./antigravity.ts";
 
 const FAKE_CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "testing", "fake-agy-cli.ts");
+
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 describe("Antigravity stream input compatibility", () => {
   it("requires the release that introduced stream-JSON stdin", () => {
@@ -37,9 +54,24 @@ describe("Antigravity stream input compatibility", () => {
     expect(supportsAntigravityStreamInput("1.2.0-beta.1")).toBe(true);
     expect(supportsAntigravityStreamInput("not-semver")).toBe(false);
   });
+
+  it("only enables live model discovery after agy's inherited-stdio fix", () => {
+    expect(ANTIGRAVITY_MODEL_DISCOVERY_MIN_VERSION).toBe("1.1.24");
+    expect(supportsAntigravityModelDiscovery("1.1.23")).toBe(false);
+    expect(supportsAntigravityModelDiscovery("1.1.24")).toBe(true);
+    expect(supportsAntigravityModelDiscovery("1.2.0-beta.1")).toBe(true);
+    expect(supportsAntigravityModelDiscovery(null)).toBe(false);
+  });
 });
 
 describe("readAntigravityModelCatalog", () => {
+  it("ships the documented Gemini 3.8 fallback variants", () => {
+    const ids = STATIC_ANTIGRAVITY_MODELS.options.map((option) => option.id);
+    expect(ids).toContain("gemini-3.8-flash-high");
+    expect(ids).toContain("gemini-3.8-flash-medium");
+    expect(ids).not.toContain("gemini-3.8-flash-low");
+  });
+
   it("returns the official list when settings are missing", () => {
     expect(readAntigravityModelCatalog({ HOME: join(tmpdir(), "omb-agy-missing-home") })).toEqual(
       STATIC_ANTIGRAVITY_MODELS,
@@ -61,6 +93,118 @@ describe("readAntigravityModelCatalog", () => {
       rmSync(home, { recursive: true, force: true });
     }
   });
+
+  it("parses tabular live output through progress and terminal noise", () => {
+    expect(parseAntigravityModelsOutput([
+      "\u001B[2KFetching available models...\r⠋ Fetching available models...",
+      "gemini-3.8-flash-high\t\u001B[1mGemini 3.8 Flash (High)\u001B[0m",
+      "gemini-3.8-flash-medium   Gemini 3.8 Flash (Medium)",
+      "gemini-3.8-flash-low\tGemini 3.8 Flash (Low)",
+      "gemini-3.8-flash-high\tduplicate label",
+      "Download complete",
+    ].join("\n"))).toEqual([
+      { id: "gemini-3.8-flash-high", label: "Gemini 3.8 Flash (High)" },
+      { id: "gemini-3.8-flash-medium", label: "Gemini 3.8 Flash (Medium)" },
+      { id: "gemini-3.8-flash-low", label: "Gemini 3.8 Flash (Low)" },
+    ]);
+  });
+
+  it("prefers the structured model command payload when available", () => {
+    const envelope = {
+      status: "SUCCESS",
+      response: "stale-model\tStale Model\n",
+      command: {
+        name: "models",
+        data: {
+          models: [
+            { id: "gemini-3.8-flash-high", label: "Gemini 3.8 Flash (High)" },
+            { id: "gemini-3.8-flash-high", label: "duplicate" },
+            { id: "gemini-3.8-flash-low", label: "Gemini 3.8 Flash (Low)" },
+          ],
+        },
+      },
+    };
+    expect(parseAntigravityModelCommandOutput(`Fetching available models...\n${JSON.stringify(envelope)}\n`)).toEqual([
+      { id: "gemini-3.8-flash-high", label: "Gemini 3.8 Flash (High)" },
+      { id: "gemini-3.8-flash-low", label: "Gemini 3.8 Flash (Low)" },
+    ]);
+  });
+
+  it("deduplicates live, fallback, and settings rows by stable id", () => {
+    const home = mkdtempSync(join(tmpdir(), "omb-agy-merged-catalog-"));
+    mkdirSync(join(home, ".gemini", "antigravity-cli"), { recursive: true });
+    writeFileSync(
+      join(home, ".gemini", "antigravity-cli", "settings.json"),
+      JSON.stringify({
+        customModels: [
+          { id: "gemini-3.8-flash-high", displayName: "duplicate" },
+          { id: "team-model", displayName: "Team Model" },
+        ],
+      }),
+    );
+    try {
+      const catalog = mergeAntigravityModelCatalog([
+        { id: "gemini-3.8-flash-high", label: "Live Gemini 3.8 High" },
+        { id: "gemini-3.8-flash-low", label: "Gemini 3.8 Flash (Low)" },
+        { id: "gemini-3.8-flash-high", label: "duplicate live row" },
+      ], { HOME: home });
+      expect(catalog.options.filter((option) => option.id === "gemini-3.8-flash-high")).toEqual([
+        { id: "gemini-3.8-flash-high", label: "Live Gemini 3.8 High" },
+      ]);
+      expect(catalog.options.find((option) => option.id === "gemini-3.8-flash-low")).toEqual({
+        id: "gemini-3.8-flash-low",
+        label: "Gemini 3.8 Flash (Low)",
+      });
+      expect(catalog.options.at(-1)).toEqual({ id: "team-model", label: "Team Model", custom: true });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("distinguishes an explicit sign-in response from transient failures", async () => {
+    const authRunner: AntigravityModelCommandRunner = async (cli, args, _env, signal) => {
+      expect(cli).toBe("custom-agy");
+      expect(args).toEqual(["--output-format", "json", "models"]);
+      expect(signal.aborted).toBe(false);
+      return {
+        error: new Error("exit 1"),
+        stdout: "Fetching available models...\n",
+        stderr: "Please sign in to view available models.",
+      };
+    };
+    await expect(probeAntigravityModels("custom-agy", {}, authRunner)).resolves.toEqual({
+      status: "unauthenticated",
+    });
+
+    const networkRunner: AntigravityModelCommandRunner = async () => ({
+      error: new Error("ETIMEDOUT"),
+      stdout: "",
+      stderr: "request timed out while contacting the model service",
+    });
+    await expect(probeAntigravityModels("custom-agy", {}, networkRunner)).resolves.toEqual({
+      status: "unavailable",
+    });
+  });
+
+  it("falls back to the documented text command when an older CLI rejects the global output flag", async () => {
+    const calls: string[][] = [];
+    const runner: AntigravityModelCommandRunner = async (_cli, args) => {
+      calls.push(args);
+      if (calls.length === 1) {
+        return { error: new Error("exit 1"), stdout: "", stderr: "Error: unknown flag: --output-format" };
+      }
+      return {
+        error: null,
+        stdout: "gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)\n",
+        stderr: "",
+      };
+    };
+    await expect(probeAntigravityModels("agy-wrapper", {}, runner)).resolves.toEqual({
+      status: "available",
+      options: [{ id: "gemini-3.8-flash-medium", label: "Gemini 3.8 Flash (Medium)" }],
+    });
+    expect(calls).toEqual([["--output-format", "json", "models"], ["models"]]);
+  });
 });
 
 describe("Antigravity decodeConfig", () => {
@@ -71,6 +215,7 @@ describe("Antigravity decodeConfig", () => {
         linux: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
         win32: "irm https://antigravity.google/cli/install.ps1 | iex",
       },
+      signInCommand: "agy",
     });
   });
 
@@ -200,6 +345,166 @@ describe("Antigravity turns (fake CLI)", () => {
 });
 
 describe("Antigravity snapshot", () => {
+  it("discovers models only on explicit refresh, coalesces it, and keeps the last good catalog", async () => {
+    const scratch = mkdtempSync(join(tmpdir(), "omb-agy-live-models-"));
+    const cli = join(scratch, "fake-live-agy.cjs");
+    const state = join(scratch, "state.txt");
+    const calls = join(scratch, "calls.txt");
+    writeFileSync(state, "available");
+    writeFileSync(calls, "");
+    writeFileSync(
+      cli,
+      `#!/usr/bin/env node
+const { appendFileSync, readFileSync } = require("node:fs");
+if (process.argv.includes("--version")) {
+  process.stdout.write("1.1.24\\n");
+  process.exit(0);
+}
+if (!process.argv.includes("models")) process.exit(0);
+appendFileSync(process.env.FAKE_AGY_CALLS, "x");
+const state = readFileSync(process.env.FAKE_AGY_STATE, "utf8").trim();
+if (state === "available") {
+  process.stdout.write("Fetching available models...\\n");
+  process.stdout.write("gemini-3.8-flash-high\\tGemini 3.8 Flash (High)\\n");
+  process.stdout.write("gemini-3.8-flash-low\\tGemini 3.8 Flash (Low)\\n");
+  process.exit(0);
+}
+if (state === "signed-out") {
+  process.stderr.write("Error: Please sign in to view available models.\\n");
+  process.exit(1);
+}
+process.stderr.write("Error: request timed out\\n");
+process.exit(1);
+`,
+    );
+    chmodSync(cli, 0o755);
+    const instance = await AntigravityDriver.create({
+      instanceId: "agy-live-models",
+      displayName: undefined,
+      environment: { FAKE_AGY_STATE: state, FAKE_AGY_CALLS: calls },
+      enabled: true,
+      config: { cli, fullAuto: false },
+    });
+    try {
+      // Startup and ordinary reads are offline and instantaneous. The live-only
+      // low variant arrives after the user explicitly asks for a refresh.
+      expect(instance.models.options.some((option) => option.id === "gemini-3.8-flash-low")).toBe(false);
+      expect(readFileSync(calls, "utf8")).toBe("");
+      await instance.snapshot();
+
+      const firstRefresh = instance.refreshModels!();
+      const coalescedRefresh = instance.refreshModels!();
+      expect(coalescedRefresh).toBe(firstRefresh);
+      await Promise.all([firstRefresh, coalescedRefresh]);
+      expect(readFileSync(calls, "utf8")).toBe("x");
+      expect(instance.models.options.some((option) => option.id === "gemini-3.8-flash-low")).toBe(true);
+      expect((await instance.snapshot()).authenticated).toBe(true);
+
+      writeFileSync(state, "timeout");
+      await instance.refreshModels?.();
+      expect(readFileSync(calls, "utf8")).toBe("xx");
+      expect(instance.models.options.some((option) => option.id === "gemini-3.8-flash-low")).toBe(true);
+      expect((await instance.snapshot()).authenticated).toBeUndefined();
+
+      writeFileSync(state, "signed-out");
+      await instance.refreshModels?.();
+      expect(readFileSync(calls, "utf8")).toBe("xxx");
+      expect(instance.models.options.some((option) => option.id === "gemini-3.8-flash-low")).toBe(false);
+      expect((await instance.snapshot()).authenticated).toBe(false);
+    } finally {
+      await instance.dispose();
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
+  it("refreshes nothing before snapshot and skips model discovery on agy before 1.1.24", async () => {
+    chmodSync(FAKE_CLI, 0o755);
+    const scratch = mkdtempSync(join(tmpdir(), "omb-agy-old-models-"));
+    const dump = join(scratch, "dump.json");
+    const instance = await AntigravityDriver.create({
+      instanceId: "agy-old-models",
+      displayName: undefined,
+      environment: { FAKE_AGY_VERSION: "1.1.23", FAKE_AGY_DUMP: dump },
+      enabled: true,
+      config: { cli: FAKE_CLI, fullAuto: false },
+    });
+    try {
+      expect(existsSync(dump)).toBe(false);
+      await instance.refreshModels?.();
+      expect(existsSync(dump)).toBe(false);
+
+      await instance.snapshot();
+      expect(JSON.parse(readFileSync(dump, "utf8")).argv).toEqual(["--version"]);
+      await instance.refreshModels?.();
+      expect(JSON.parse(readFileSync(dump, "utf8")).argv).toEqual(["--version"]);
+      expect(instance.models.options).toEqual(readAntigravityModelCatalog().options);
+    } finally {
+      await instance.dispose();
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
+  it("hard-stops a stuck model process tree at one deadline and cancels it on dispose", async () => {
+    const scratch = mkdtempSync(join(tmpdir(), "omb-agy-model-timeout-"));
+    const cli = join(scratch, "stuck-agy.cjs");
+    const calls = join(scratch, "calls.txt");
+    const descendantPidFile = join(scratch, "descendant.pid");
+    writeFileSync(calls, "");
+    writeFileSync(
+      cli,
+      `#!/usr/bin/env node
+const { appendFileSync, writeFileSync } = require("node:fs");
+const { spawn } = require("node:child_process");
+if (process.argv.includes("--version")) {
+  process.stdout.write("1.1.24\\n");
+  process.exit(0);
+}
+if (!process.argv.includes("models")) process.exit(0);
+appendFileSync(process.env.FAKE_AGY_CALLS, JSON.stringify(process.argv.slice(2)) + "\\n");
+const descendant = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], { stdio: "ignore" });
+writeFileSync(process.env.FAKE_AGY_DESCENDANT_PID, String(descendant.pid));
+process.on("SIGTERM", () => {});
+setInterval(() => {}, 1000);
+`,
+    );
+    chmodSync(cli, 0o755);
+    const instance = await AntigravityDriver.create({
+      instanceId: "agy-stuck-models",
+      displayName: undefined,
+      environment: { FAKE_AGY_CALLS: calls, FAKE_AGY_DESCENDANT_PID: descendantPidFile },
+      enabled: true,
+      config: { cli, fullAuto: false },
+    });
+    try {
+      expect(readFileSync(calls, "utf8")).toBe("");
+      await instance.snapshot();
+      const startedAt = Date.now();
+      await instance.refreshModels?.();
+      const elapsed = Date.now() - startedAt;
+      expect(elapsed).toBeGreaterThanOrEqual(ANTIGRAVITY_MODEL_PROBE_TIMEOUT_MS - 500);
+      expect(elapsed).toBeLessThan(ANTIGRAVITY_MODEL_PROBE_TIMEOUT_MS + 2_000);
+      // A timed-out structured request is not retried as a second legacy
+      // request, and the descendant from the configured wrapper is gone too.
+      expect(readFileSync(calls, "utf8").trim().split("\n")).toHaveLength(1);
+      const timedOutDescendant = Number(readFileSync(descendantPidFile, "utf8"));
+      await expect.poll(() => processExists(timedOutDescendant), { timeout: 2_000 }).toBe(false);
+
+      rmSync(descendantPidFile, { force: true });
+      const refresh = instance.refreshModels!();
+      await expect.poll(() => existsSync(descendantPidFile), { timeout: 2_000 }).toBe(true);
+      const cancelledDescendant = Number(readFileSync(descendantPidFile, "utf8"));
+      const disposeStartedAt = Date.now();
+      await instance.dispose();
+      await refresh;
+      expect(Date.now() - disposeStartedAt).toBeLessThan(2_000);
+      await expect.poll(() => processExists(cancelledDescendant), { timeout: 2_000 }).toBe(false);
+      expect(readFileSync(calls, "utf8").trim().split("\n")).toHaveLength(2);
+    } finally {
+      await instance.dispose();
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  }, 10_000);
+
   it("reports available with the CLI version against the fake", async () => {
     chmodSync(FAKE_CLI, 0o755);
     const instance = await AntigravityDriver.create({
@@ -267,6 +572,9 @@ describe("Antigravity snapshot", () => {
       config: { cli: FAKE_CLI, fullAuto: false },
     });
     try {
+      // Creation must not launch model discovery (or any other CLI helper).
+      expect(existsSync(dump)).toBe(false);
+
       await instance.snapshot();
       for (const name of names) expect(JSON.parse(readFileSync(dump, "utf8")).env[name]).toBeUndefined();
 
@@ -786,6 +1094,7 @@ describe("Antigravity OpenMaus MCP config", () => {
     const home = mkdtempSync(join(tmpdir(), "omb-agy-mcpinterrupt-"));
     const readyFile = join(home, "ready");
     const secondDump = join(home, "second.json");
+    const createStartedAt = Date.now();
     const first = await AntigravityDriver.create({
       instanceId: "agy-mcp-interrupted",
       displayName: undefined,
@@ -798,6 +1107,8 @@ describe("Antigravity OpenMaus MCP config", () => {
       enabled: true,
       config: { cli: FAKE_CLI, fullAuto: true },
     });
+    // A configured CLI may be slow or offline, but creation never probes it.
+    expect(Date.now() - createStartedAt).toBeLessThan(1_000);
     const second = await AntigravityDriver.create({
       instanceId: "agy-mcp-after-interrupt",
       displayName: undefined,
