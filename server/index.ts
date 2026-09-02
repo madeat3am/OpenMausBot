@@ -32,6 +32,7 @@ import * as checkpoints from "./checkpoints.ts";
 import { appendDecision, readDecisions } from "./decision-log.ts";
 import { validateBotCwd } from "./bot-cwd.ts";
 import { contentDispositionFor, readViewableFile, resolveViewableFile } from "./file-view.ts";
+import { saveFolderFile } from "./folder-upload.ts";
 import {
   attachmentExists,
   extensionForMime,
@@ -6034,6 +6035,39 @@ const server = createServer(async (req, res) => {
     // partial uploads on error. Its optional UUID uploadId is stable across
     // route retries, while the aggregate store quota rejects rather than
     // silently deleting files that old prompts may still reference.
+    // ── a folder from the phone ──────────────────────────────────────────
+    // The desktop attaches a folder by path. The phone's folders are on the
+    // phone, so it sends each file with its relative path and the folder is
+    // rebuilt under attachments/folders/<uploadId>/<name>; the message then
+    // carries that folder's path in an ordinary <attached-file> tag.
+    if (method === "POST" && path === "/api/folders/files") {
+      const rawLength = Array.isArray(req.headers["content-length"])
+        ? req.headers["content-length"][0]
+        : req.headers["content-length"];
+      const declaredLength = rawLength === undefined ? undefined : Number(rawLength);
+      if (declaredLength !== undefined && (!Number.isSafeInteger(declaredLength) || declaredLength < 0)) {
+        req.resume();
+        return json(res, 400, { error: "content-length must be a non-negative integer" });
+      }
+      if (declaredLength !== undefined && declaredLength > FILE_MAX_BYTES) {
+        req.resume();
+        return json(res, 413, { error: `file exceeds ${FILE_MAX_BYTES} bytes` });
+      }
+      try {
+        const chunks = req.iterator({ destroyOnReturn: false }) as AsyncIterable<Buffer>;
+        const saved = await saveFolderFile(chunks, {
+          uploadId: url.searchParams.get("uploadId") ?? undefined,
+          folder: url.searchParams.get("folder"),
+          relativePath: url.searchParams.get("path"),
+          expectedBytes: declaredLength,
+        });
+        return json(res, 201, saved);
+      } catch (error) {
+        req.resume();
+        throw error;
+      }
+    }
+
     // ── viewing a bot-created file ───────────────────────────────────────
     // A reply that links a document it wrote: the desktop reads that path
     // off its own disk, the phone asks here. Containment is the desktop's

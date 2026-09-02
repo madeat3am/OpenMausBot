@@ -455,6 +455,21 @@ public struct FetchedFile: Sendable {
     }
 }
 
+private struct FolderFileUploadResponse: Decodable {
+    let path: String
+    let folderPath: String
+}
+
+public struct UploadedFolderFile: Hashable, Sendable {
+    public let path: String
+    public let folderPath: String
+
+    public init(path: String, folderPath: String) {
+        self.path = path
+        self.folderPath = folderPath
+    }
+}
+
 public struct UploadedFile: Hashable, Sendable {
     public let path: String
     public let name: String
@@ -976,6 +991,43 @@ public struct CompanionClient: Sendable {
             throw APIError.transport("The uploaded file could not be used.")
         }
         return UploadedFile(path: saved.path, name: returnedName)
+    }
+
+    /// One file of a folder picked on the phone. The server rebuilds the
+    /// folder under its attachments directory and answers with both this
+    /// file's path and the folder's, which is what the message will carry.
+    public func uploadFolderFile(
+        data: Data,
+        uploadId: String,
+        folder: String,
+        relativePath: String
+    ) async throws -> UploadedFolderFile {
+        let folderName = folder.trimmingCharacters(in: .whitespacesAndNewlines)
+        let segments = relativePath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        guard Self.validUploadID(uploadId),
+              Self.validUploadedName(folderName),
+              !segments.isEmpty, segments.count <= 32,
+              segments.allSatisfy({ Self.validUploadedName($0) && $0 != "." && $0 != ".." }),
+              !data.isEmpty, data.count <= Self.maximumFileUploadBytes
+        else {
+            throw APIError.transport("Folders can hold files up to 25 MB each, with ordinary names.")
+        }
+        var request = try makeRequest(
+            "POST",
+            "/api/folders/files",
+            query: [
+                URLQueryItem(name: "uploadId", value: uploadId),
+                URLQueryItem(name: "folder", value: folderName),
+                URLQueryItem(name: "path", value: segments.joined(separator: "/")),
+            ]
+        )
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        request.httpBody = data
+        let saved = try await send(request, as: FolderFileUploadResponse.self)
+        guard Self.validUploadedPath(saved.path), Self.validUploadedPath(saved.folderPath) else {
+            throw APIError.transport("The uploaded folder could not be used.")
+        }
+        return UploadedFolderFile(path: saved.path, folderPath: saved.folderPath)
     }
 
     private static func validUploadMime(_ mime: String) -> Bool {

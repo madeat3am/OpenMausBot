@@ -1240,13 +1240,6 @@ final class Session: ObservableObject {
         return try await client.fetchFile(path: path)
     }
 
-    /// A bot-created file for the viewer sheet. Throws so the sheet can say
-    /// why rather than sit blank.
-    func fetchFile(path: String) async throws -> FetchedFile {
-        guard let client else { throw APIError.transport("This computer is offline.") }
-        return try await client.fetchFile(path: path)
-    }
-
     /// Upload what the composer attached and hand back the references the
     /// message will carry — the same tags the share extension and the
     /// desktop write, so a bot sees no difference in where it came from.

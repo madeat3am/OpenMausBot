@@ -32,6 +32,14 @@ struct ChatView: View {
     /// typed-Return detector lets that one through instead of sending.
     @State private var allowsNewline = false
     @State private var shareFile: ShareFile?
+    /// Files and folders picked for the next message, copied into our own
+    /// inbox and uploaded when it is sent.
+    @State private var pendingAttachments: [PendingAttachment] = []
+    @State private var showingFilePicker = false
+    @State private var showingFolderPicker = false
+    /// A line above the composer: upload progress, or why the last send
+    /// did not happen. Cleared on the next successful send.
+    @State private var composerNotice: ComposerNotice?
     @FocusState private var composerFocused: Bool
     @StateObject private var dictation = SpeechDictation()
     /// The opening beat: the island grows with the bot's face in it, then
@@ -285,6 +293,27 @@ struct ChatView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         .overlay(alignment: .bottom) { plusSheet }
+        // Two pickers rather than one with both types: with `.folder` in
+        // the list a folder shows an Open button instead of being entered,
+        // which is not what someone browsing for a file expects.
+        .fileImporter(
+            isPresented: $showingFilePicker,
+            allowedContentTypes: [.item],
+            allowsMultipleSelection: true
+        ) { result in
+            attach {
+                try AttachmentIntake.takeFiles(try result.get())
+            }
+        }
+        .fileImporter(
+            isPresented: $showingFolderPicker,
+            allowedContentTypes: [.folder],
+            allowsMultipleSelection: false
+        ) { result in
+            attach {
+                try result.get().map { try AttachmentIntake.takeFolder($0) }
+            }
+        }
         .toolbar(.hidden, for: .navigationBar)
         .navigationBarBackButtonHidden(true)
         .navigationDestination(isPresented: $showingComputer) {
@@ -321,6 +350,12 @@ struct ChatView: View {
             if shown { dictation.stop() }
         }
         .onChange(of: showingPlus) { _, shown in
+            if shown { dictation.stop() }
+        }
+        .onChange(of: showingFilePicker) { _, shown in
+            if shown { dictation.stop() }
+        }
+        .onChange(of: showingFolderPicker) { _, shown in
             if shown { dictation.stop() }
         }
         .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.interruptionNotification)) { note in
@@ -558,6 +593,14 @@ struct ChatView: View {
             ) { showingTasks = true })
         }
         out.append(PlusAction(
+            id: "attach-files", systemImage: "doc.badge.plus", title: "Attach files",
+            subtitle: "Documents and photos from this phone"
+        ) { showingFilePicker = true })
+        out.append(PlusAction(
+            id: "attach-folder", systemImage: "folder.badge.plus", title: "Attach a folder",
+            subtitle: "Everything inside it, for \(current.name) to read"
+        ) { showingFolderPicker = true })
+        out.append(PlusAction(
             id: "share", systemImage: "doc.plaintext", title: "Share transcript",
             subtitle: "This chat as Markdown"
         ) {
@@ -606,7 +649,23 @@ struct ChatView: View {
     }
 
     private var canSend: Bool {
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pendingAttachments.isEmpty
+    }
+
+    /// Run a picker's result through intake. A refused pick says why above
+    /// the composer; what was accepted before it stays attached.
+    private func attach(_ take: () throws -> [PendingAttachment]) {
+        do {
+            pendingAttachments.append(contentsOf: try take())
+            if case .error = composerNotice { composerNotice = nil }
+        } catch {
+            composerNotice = .error(error.localizedDescription)
+        }
+    }
+
+    private func remove(_ attachment: PendingAttachment) {
+        pendingAttachments.removeAll { $0.id == attachment.id }
+        AttachmentIntake.discard(attachment)
     }
 
     private var hasPendingApproval: Bool {
@@ -618,12 +677,37 @@ struct ChatView: View {
         // open the microphone after the message has already been sent.
         dictation.stop()
         let text = (explicitText ?? draft).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        let attachments = pendingAttachments
+        guard !text.isEmpty || !attachments.isEmpty else { return }
         draft = ""
+        pendingAttachments = []
         showCommandHUD = false
         SoundEffects.playSent()
         Haptics.impact(.medium)
-        Task { await session.send(text, to: current) }
+        guard !attachments.isEmpty else {
+            composerNotice = nil
+            Task { await session.send(text, to: current) }
+            return
+        }
+        // Uploads first, then one message carrying the same tags the
+        // desktop composer writes. If an upload fails the draft and its
+        // chips come back, so a dropped Wi-Fi hop costs a retry, not a
+        // retype.
+        Task {
+            do {
+                let references = try await session.upload(attachments) { composerNotice = .progress($0) }
+                let message = SharedMessageComposer.compose(
+                    instruction: text, text: [], urls: [], attachments: references
+                )
+                composerNotice = nil
+                await session.send(message, to: current)
+                attachments.forEach(AttachmentIntake.discard)
+            } catch {
+                composerNotice = .error(error.localizedDescription)
+                pendingAttachments = attachments + pendingAttachments
+                if draft.isEmpty { draft = text }
+            }
+        }
     }
 
     // MARK: - Composer
@@ -637,6 +721,20 @@ struct ChatView: View {
                     .foregroundStyle(.orange)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 4)
+            }
+
+            if let notice = composerNotice {
+                Text(notice.text)
+                    .font(.system(size: 13))
+                    .foregroundStyle(notice.isError ? Color.orange : Color.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 4)
+                    .transition(.opacity)
+            }
+
+            if !pendingAttachments.isEmpty {
+                PendingAttachmentChips(items: pendingAttachments, onRemove: remove)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
             if showCommandHUD {
@@ -792,6 +890,24 @@ struct ChatView: View {
         .padding(.bottom, 8)
         .frame(maxWidth: CompanionLayout.chatWidth)
         .frame(maxWidth: .infinity)
+    }
+}
+
+/// The line above the composer while attachments go up, or after a send
+/// that could not happen.
+enum ComposerNotice: Equatable {
+    case progress(String)
+    case error(String)
+
+    var text: String {
+        switch self {
+        case let .progress(text), let .error(text): return text
+        }
+    }
+
+    var isError: Bool {
+        if case .error = self { return true }
+        return false
     }
 }
 

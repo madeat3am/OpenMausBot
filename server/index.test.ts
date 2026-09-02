@@ -1525,6 +1525,46 @@ describe("harness HTTP API", () => {
     expect(malformedId.status).toBe(400);
   });
 
+  it("rebuilds a phone's folder file by file under the attachments directory", async () => {
+    const uploadId = "6f1d2c3b-4a5e-4f60-8a1b-2c3d4e5f6a7b";
+    const put = (path: string, body: string) =>
+      fetch(`${BASE}/api/folders/files?uploadId=${uploadId}&folder=${encodeURIComponent("Trip Notes")}&path=${encodeURIComponent(path)}`, {
+        method: "POST",
+        headers: { "content-type": "application/octet-stream" },
+        body,
+      });
+
+    const first = await put("day 1/plan.md", "# Day 1\n");
+    expect(first.status).toBe(201);
+    const saved = await first.json() as { path: string; folderPath: string; bytes: number };
+    expect(saved.folderPath).toBe(join(home, ".openmausbot", "attachments", "folders", uploadId, "Trip Notes"));
+    expect(saved.path).toBe(join(saved.folderPath, "day 1", "plan.md"));
+    expect(saved.bytes).toBe(8);
+    expect(readFileSync(saved.path, "utf8")).toBe("# Day 1\n");
+
+    const second = await put("budget.csv", "item,cost\n");
+    expect(second.status).toBe(201);
+    expect((await second.json() as { folderPath: string }).folderPath).toBe(saved.folderPath);
+
+    // the rebuilt folder is something the viewer route will serve from
+    const viewed = await fetch(`${BASE}/api/files?path=${encodeURIComponent(saved.path)}`);
+    expect(viewed.status).toBe(200);
+
+    expect((await put("../escape.md", "x")).status).toBe(400);
+    expect((await put("", "x")).status).toBe(400);
+    expect((await put("empty.txt", "")).status).toBe(400);
+    const noId = await fetch(`${BASE}/api/folders/files?folder=N&path=a.txt`, { method: "POST", body: "x" });
+    expect(noId.status).toBe(400);
+    const badFolder = await fetch(`${BASE}/api/folders/files?uploadId=${uploadId}&folder=..&path=a.txt`, { method: "POST", body: "x" });
+    expect(badFolder.status).toBe(400);
+    const tooBig = await fetch(`${BASE}/api/folders/files?uploadId=${uploadId}&folder=N&path=big.bin`, {
+      method: "POST",
+      headers: { "content-type": "application/octet-stream" },
+      body: Buffer.alloc(FILE_MAX_BYTES + 1),
+    });
+    expect(tooBig.status).toBe(413);
+  });
+
   it("serves a bot-created file to the phone, and only from inside the data directory", async () => {
     const documents = join(home, ".openmausbot", "documents");
     mkdirSync(documents, { recursive: true });
