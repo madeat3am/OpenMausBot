@@ -119,40 +119,47 @@ that user (`sudo -u maus claude` etc.) before starting the service.
 
 ## Using it from your computer
 
-Open an SSH tunnel and use the web UI in any browser:
+Pair once, then use the server from any browser on any machine that can
+reach it. On the server:
+
+```sh
+pnpm pair                                  # from a checkout
+docker compose exec omb node dist-server/pair-cli.js   # Docker
+```
+
+It prints a 12-character code (single use, five minutes) and, when the
+server knows its public address (`OMB_PUBLIC_URL`, set by the Docker stack),
+a link like `https://maus.example.com/pair#code=XXXX-XXXX-XXXX`. Open the
+link, or open `/pair` on the address you use and type the code. The browser
+gets a session cookie (30 days, revocable) and the app loads. Sessions are
+listed and revoked at `GET`/`DELETE /api/auth/sessions` for now; a Settings
+screen follows.
+
+What this changes about the trust model: the server still binds loopback
+and still trusts loopback as the owner. A **paired session** is the second
+way in: a bearer token or the cookie, same-origin only, with a scope (`admin`
+by default, `--client` for a device that may chat but not change settings or
+pair others). Five bad codes from one address lock that address out for ten
+minutes. The Docker stack's Caddy login (`basic_auth`) is now optional: keep
+it as a second wall, or delete that block once everyone has paired.
+
+Native clients (CLI, scripts) send the token as `Authorization: Bearer …`
+and take a 5-minute ticket from `POST /api/auth/stream-ticket` for the
+event stream, because `EventSource` cannot set headers:
+`GET /api/events?ticket=…`.
+
+`GET /.well-known/openmausbot/environment` is public and tells a client what
+it is talking to: a stable `environmentId`, the label, the version and
+capabilities. Saved connections check the id so a reused address that now
+points at a different server is refused loudly.
+
+An SSH tunnel still works, and is the right answer when the server has no
+address of its own:
 
 ```sh
 ssh -L 8799:localhost:8799 you@your-server
-# then open http://localhost:8799
+# then open http://localhost:8799 — loopback, so no pairing needed
 ```
-
-The server serves the full app UI itself — no desktop install needed on the
-client. The tunnel keeps the loopback trust model intact: to the server,
-you look local, because through the tunnel you are.
-
-Note: a plain `tailscale serve` or reverse proxy is refused — the server
-checks that requests look like loopback on purpose. A proxy can satisfy
-that check; see "Putting a proxy in front" below. Only do it behind a login.
-
-## Putting a proxy in front
-
-The server has two request gates, both aimed at browsers:
-
-1. **Host** must be loopback (`localhost`, `127.x.x.x`, `::1`). The proxy
-   must rewrite `Host` to `127.0.0.1:8799` on the way in.
-2. **Origin**, when present, must be a loopback origin. Browsers send the
-   proxy's origin (`https://your.domain`), so the proxy must map exactly
-   that one origin onto `http://127.0.0.1:8799` — and leave every other
-   Origin untouched, so cross-site requests are still refused.
-
-Plus two non-security rules: the UI streams events over SSE, so the proxy
-must not buffer responses (`flush_interval -1` in Caddy,
-`proxy_buffering off` in nginx); and the webhook receiver (port 8800,
-paths `/hooks/...`) only knows its loopback address, so set
-`OMB_WEBHOOK_PUBLIC_URL=https://your.domain` to make the app print hook
-URLs senders can reach. [`deploy/Caddyfile`](../deploy/Caddyfile) is the
-reference implementation. The proxy itself must add the login — the
-server has none — so never point it at the internet without one.
 
 ## Using it from your phone
 

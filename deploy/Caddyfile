@@ -13,6 +13,9 @@
 	}
 
 	handle {
+		# A shared password in front of everything. Optional since pairing landed
+		# (docs/self-hosting.md "Using it from your computer"): delete this block
+		# once every device has paired, or keep it as a second wall.
 		basic_auth {
 			{$BASIC_AUTH_USER} {$BASIC_AUTH_HASH}
 		}

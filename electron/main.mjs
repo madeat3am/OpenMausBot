@@ -859,6 +859,8 @@ async function startServerOn(port) {
     OMB_RESOURCES_PATH: process.resourcesPath,
     OMB_SKILLS_DIR: path.join(process.resourcesPath, "skills"),
     OMB_PORT: String(port),
+    // the server advertises this to remote clients so version skew is visible
+    OMB_APP_VERSION: app.getVersion(),
     OMB_USER_DATA: app.getPath("userData"),
     ...(secureCredentials.composioApiKey
       ? { COMPOSIO_API_KEY: secureCredentials.composioApiKey }

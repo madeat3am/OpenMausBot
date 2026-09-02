@@ -30,6 +30,7 @@
     "docs:build": "pnpm --filter @openmausbot/docs build",
     "docs:preview": "pnpm --filter @openmausbot/docs preview",
     "companion": "node --experimental-strip-types companion/src/index.ts",
+    "pair": "node --experimental-strip-types server/pair-cli.ts",
     "dev:server": "node --experimental-strip-types server/index.ts",
     "mcp": "node --experimental-strip-types scripts/mcp-server.ts",
     "control:omb": "node --experimental-strip-types scripts/control-omb.ts",

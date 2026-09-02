@@ -4,7 +4,6 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { isIP } from "node:net";
 import { extname, join } from "node:path";
 
 import { z } from "zod";
@@ -241,12 +240,31 @@ import {
 } from "./turn-dispatch-guard.ts";
 import { createGracefulShutdown } from "./graceful-shutdown.ts";
 import { describeEdition, editionStatus, loadEnterpriseLayer } from "./enterprise.ts";
+import { environmentDescriptor, loadEnvironmentId } from "./environment.ts";
+import {
+  clearSessionCookie,
+  labelFromUserAgent,
+  requestOrigin,
+  requestSource,
+  resolveRequestAuth,
+  serializeSessionCookie,
+  sessionCookieName,
+} from "./request-auth.ts";
+import { formatPairingCode, SESSION_TTL_MS, SessionRegistry, type Scope } from "./sessions.ts";
 
 const PORT = Number(process.env.OMB_PORT || process.env.OGB_PORT || 8799);
 const WEBHOOK_PORT = Number(process.env.OMB_WEBHOOK_PORT || PORT + 1);
 // Behind a proxy or tunnel, the base URL senders should use (docs/self-hosting.md).
 const WEBHOOK_PUBLIC_URL = process.env.OMB_WEBHOOK_PUBLIC_URL || undefined;
 const STATIC_DIR = process.env.OMB_STATIC_DIR || null;
+// Remote clients (server/request-auth.ts, server/sessions.ts): a stable identity
+// for this server, the paired sessions, and the cookie the served UI uses.
+const ENVIRONMENT_ID = loadEnvironmentId(DATA_DIR);
+const sessions = new SessionRegistry({ file: join(DATA_DIR, "sessions.json") });
+const SESSION_COOKIE = sessionCookieName(PORT, ENVIRONMENT_ID);
+const DESKTOP_MANAGED = process.env.OMB_DESKTOP_PARENT === "1";
+// Where remote clients reach this server (a proxy's public address); pairing URLs use it.
+const PUBLIC_URL = process.env.OMB_PUBLIC_URL?.trim().replace(/\/+$/, "") || null;
 const MIME: Record<string, string> = {
   ".html": "text/html",
   ".js": "text/javascript",
@@ -5095,6 +5113,33 @@ let providerConfigBusy = false;
 const claudeUpdatesInFlight = new Set<string>();
 
 // ── HTTP plumbing ─────────────────────────────────────────────────────
+/** The built UI, when this process serves it (OMB_STATIC_DIR: set by the
+ * desktop app and by the container image). Public by design: it is the same
+ * bundle anyone can download, holds no secrets, and a remote browser must be
+ * able to load /pair before it has a session. Returns false when there is
+ * nothing to serve so the caller can answer 404. */
+function serveStatic(res: ServerResponse, path: string): boolean {
+  if (!STATIC_DIR) return false;
+  const safe = path === "/" ? "/index.html" : path.replace(/\.\./g, "");
+  const file = join(STATIC_DIR, safe);
+  try {
+    const data = readFileSync(file);
+    res.writeHead(200, { "content-type": MIME[extname(file)] ?? "application/octet-stream" });
+    res.end(data);
+    return true;
+  } catch {
+    // SPA fallback
+    try {
+      const data = readFileSync(join(STATIC_DIR, "index.html"));
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end(data);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
 function json(res: ServerResponse, status: number, body: unknown) {
   const data = JSON.stringify(body);
   res.writeHead(status, { "content-type": "application/json" });
@@ -5142,39 +5187,6 @@ function readBody(req: IncomingMessage): Promise<any> {
 // requests from any loopback connection and any web page that DNS-rebinds
 // onto it. Reject non-loopback Hosts outright (defeats rebinding) and
 // origins outside loopback (blocks remote-web CSRF).
-function isLoopbackHost(host: string | undefined): boolean {
-  if (!host) return false;
-  const value = host.trim().toLowerCase();
-  if (!value) return false;
-
-  let hostname = value;
-  if (value.startsWith("[")) {
-    const close = value.indexOf("]");
-    if (close < 0 || (value.length > close + 1 && !/^:\d+$/.test(value.slice(close + 1)))) return false;
-    hostname = value.slice(1, close);
-  } else {
-    const firstColon = value.indexOf(":");
-    const lastColon = value.lastIndexOf(":");
-    if (firstColon >= 0 && firstColon === lastColon) {
-      if (!/^\d+$/.test(value.slice(firstColon + 1))) return false;
-      hostname = value.slice(0, firstColon);
-    }
-  }
-
-  if (hostname === "localhost" || hostname === "localhost.") return true;
-  if (isIP(hostname) === 4) return hostname.startsWith("127.");
-  return hostname === "::1" || hostname === "0:0:0:0:0:0:0:1";
-}
-
-function isAllowedOrigin(origin: string | undefined | null): boolean {
-  if (!origin) return true; // non-browser clients (CLIs, curl, tests) send none
-  try {
-    const o = new URL(origin);
-    return isLoopbackHost(o.hostname) && (o.protocol === "http:" || o.protocol === "https:");
-  } catch {
-    return false;
-  }
-}
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", `http://localhost:${PORT}`);
@@ -5183,13 +5195,95 @@ const server = createServer(async (req, res) => {
   /** scratch for route matches, shared by every `path.match` below */
   let m: RegExpMatchArray | null = null;
   try {
-    // loopback-host + loopback-origin gate before any route (DNS rebinding / CSRF)
-    if (!isLoopbackHost(req.headers.host)) {
-      return json(res, 403, { error: "forbidden: loopback host required" });
+    // ── who is asking (server/request-auth.ts) ──────────────────────────
+    // Two public routes come first: what this server is, and turning a pairing
+    // code into a session. Everything else needs the loopback owner or a
+    // paired session with the right scope.
+    if (method === "GET" && !path.startsWith("/api/") && !path.startsWith("/.well-known/") && serveStatic(res, path)) return;
+    if (method === "GET" && path === "/.well-known/openmausbot/environment") {
+      return json(res, 200, environmentDescriptor({ environmentId: ENVIRONMENT_ID, desktopManaged: DESKTOP_MANAGED }));
     }
-    const origin = req.headers.origin;
-    if (origin && !isAllowedOrigin(origin)) {
-      return json(res, 403, { error: "forbidden: cross-origin request" });
+    if (method === "POST" && path === "/api/auth/pair") {
+      const body = await readBody(req);
+      const code = typeof body?.code === "string" ? body.code : "";
+      const wantsCookie = body?.cookie === true;
+      const label = typeof body?.label === "string" && body.label.trim() ? body.label : labelFromUserAgent(req.headers["user-agent"]);
+      const result = sessions.exchange({ code, label, source: requestSource(req) });
+      if (!result.ok) {
+        console.warn(`pairing refused from ${requestSource(req)}: ${result.error}`);
+        return json(res, result.status, { error: result.error });
+      }
+      const environment = environmentDescriptor({ environmentId: ENVIRONMENT_ID, desktopManaged: DESKTOP_MANAGED });
+      if (wantsCookie) {
+        const secure = requestOrigin(req)?.startsWith("https://") === true;
+        res.setHeader("set-cookie", serializeSessionCookie(SESSION_COOKIE, result.token, { secure, maxAgeSeconds: SESSION_TTL_MS / 1000 }));
+        return json(res, 200, { session: result.session, environment });
+      }
+      return json(res, 200, { token: result.token, session: result.session, environment });
+    }
+    const gate = resolveRequestAuth(req, { sessions, cookieName: SESSION_COOKIE, streamPath: "/api/events", url });
+    if (!gate.auth) return json(res, gate.status, { error: gate.error });
+    const auth = gate.auth;
+
+    // ── sessions: who am I, tickets, pairing and revocation ─────────────
+    if (method === "GET" && path === "/api/auth/session") {
+      return json(
+        res,
+        200,
+        auth.kind === "loopback"
+          ? { kind: "loopback", scopes: auth.scopes, environmentId: ENVIRONMENT_ID }
+          : {
+              kind: "session",
+              id: auth.session.id,
+              label: auth.session.label,
+              scopes: auth.scopes,
+              expiresAt: auth.session.expiresAt,
+              via: auth.via,
+              environmentId: ENVIRONMENT_ID,
+            },
+      );
+    }
+    if (method === "POST" && path === "/api/auth/stream-ticket") {
+      if (auth.kind === "loopback") return json(res, 200, { ticket: null, reason: "loopback needs no ticket" });
+      return json(res, 200, sessions.issueStreamTicket(auth.session.id));
+    }
+    if (method === "POST" && path === "/api/auth/logout") {
+      if (auth.kind === "session") sessions.revoke(auth.session.id);
+      res.setHeader("set-cookie", clearSessionCookie(SESSION_COOKIE));
+      return json(res, 200, { ok: true });
+    }
+    if (method === "POST" && path === "/api/auth/pairing") {
+      const body = await readBody(req);
+      const requested: unknown = body?.scopes;
+      const scopes = Array.isArray(requested) ? requested.filter((v): v is Scope => v === "admin" || v === "client") : undefined;
+      const opened = sessions.openPairing({ label: typeof body?.label === "string" ? body.label : undefined, scopes });
+      const origin = requestOrigin(req);
+      const base = PUBLIC_URL ?? (auth.kind === "session" && origin ? origin : null);
+      const code = formatPairingCode(opened.code);
+      return json(res, 200, {
+        id: opened.id,
+        code,
+        expiresAt: opened.expiresAt,
+        url: base ? `${base}/pair#code=${code}` : null,
+        hint: base
+          ? null
+          : "this server has no public address to put in a link: set OMB_PUBLIC_URL, or open /pair on the address you use and type the code",
+      });
+    }
+    if (method === "GET" && path === "/api/auth/pairing") return json(res, 200, { pairings: sessions.openPairings() });
+    m = path.match(/^\/api\/auth\/pairing\/([\w-]+)$/);
+    if (m && method === "DELETE") {
+      const cancelled = sessions.cancelPairing(m[1]);
+      return json(res, cancelled ? 200 : 404, cancelled ? { ok: true } : { error: "no such pairing code" });
+    }
+    if (method === "GET" && path === "/api/auth/sessions") {
+      return json(res, 200, { sessions: sessions.list(), current: auth.kind === "session" ? auth.session.id : null });
+    }
+    m = path.match(/^\/api\/auth\/sessions\/([\w-]+)$/);
+    if (m && method === "DELETE") {
+      const revoked = sessions.revoke(m[1]);
+      if (auth.kind === "session" && auth.session.id === m[1]) res.setHeader("set-cookie", clearSessionCookie(SESSION_COOKIE));
+      return json(res, revoked ? 200 : 404, revoked ? { ok: true } : { error: "no such session" });
     }
     // ── internal peer-agent comms (localhost + shared token only) ──────
     // The agents-proxy (spawned inside a bot's agent process) calls these to
@@ -8804,27 +8898,6 @@ const server = createServer(async (req, res) => {
         }
         case "screenshot":
           return json(res, 200, await box.screenshotBox(cfg, botId));
-      }
-    }
-
-    // packaged app: the server serves the built UI too (window → :8799 for
-    // everything, no dev proxy to die). OMB_STATIC_DIR is set by Electron.
-    if (method === "GET" && !path.startsWith("/api/") && STATIC_DIR) {
-      const safe = path === "/" ? "/index.html" : path.replace(/\.\./g, "");
-      const file = join(STATIC_DIR, safe);
-      try {
-        const data = readFileSync(file);
-        res.writeHead(200, { "content-type": MIME[extname(file)] ?? "application/octet-stream" });
-        return res.end(data);
-      } catch {
-        // SPA fallback
-        try {
-          const data = readFileSync(join(STATIC_DIR, "index.html"));
-          res.writeHead(200, { "content-type": "text/html" });
-          return res.end(data);
-        } catch {
-          /* fall through to 404 */
-        }
       }
     }
 
