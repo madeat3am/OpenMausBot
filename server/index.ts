@@ -31,6 +31,7 @@ import {
 import * as checkpoints from "./checkpoints.ts";
 import { appendDecision, readDecisions } from "./decision-log.ts";
 import { validateBotCwd } from "./bot-cwd.ts";
+import { contentDispositionFor, readViewableFile, resolveViewableFile } from "./file-view.ts";
 import {
   attachmentExists,
   extensionForMime,
@@ -6033,6 +6034,24 @@ const server = createServer(async (req, res) => {
     // partial uploads on error. Its optional UUID uploadId is stable across
     // route retries, while the aggregate store quota rejects rather than
     // silently deleting files that old prompts may still reference.
+    // ── viewing a bot-created file ───────────────────────────────────────
+    // A reply that links a document it wrote: the desktop reads that path
+    // off its own disk, the phone asks here. Containment is the desktop's
+    // (electron/save-file.mjs): a regular file whose canonical path sits
+    // under the data directory, never a symlink out of it.
+    if (method === "GET" && path === "/api/files") {
+      const file = resolveViewableFile(url.searchParams.get("path"));
+      const bytes = readViewableFile(file);
+      res.writeHead(200, {
+        "content-type": file.mime,
+        "content-length": String(bytes.byteLength),
+        "content-disposition": contentDispositionFor(file.name),
+        "cache-control": "no-store",
+        "x-content-type-options": "nosniff",
+      });
+      return res.end(bytes);
+    }
+
     if (method === "POST" && path === "/api/files") {
       let uploadId: string | undefined;
       try {

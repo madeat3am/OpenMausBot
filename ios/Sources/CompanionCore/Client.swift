@@ -442,6 +442,19 @@ private struct FileUploadResponse: Decodable {
     let bytes: Int
 }
 
+/// A bot-created file fetched from the Mac for viewing on the phone.
+public struct FetchedFile: Sendable {
+    public let data: Data
+    public let name: String
+    public let mime: String
+
+    public init(data: Data, name: String, mime: String) {
+        self.data = data
+        self.name = name
+        self.mime = mime
+    }
+}
+
 public struct UploadedFile: Hashable, Sendable {
     public let path: String
     public let name: String
@@ -750,18 +763,49 @@ public struct CompanionClient: Sendable {
         try Self.check(response, data)
         let http = response as? HTTPURLResponse
         let fallback = "transcript.\(format == "json" ? "json" : "md")"
-        let disposition = http?.value(forHTTPHeaderField: "Content-Disposition") ?? ""
-        let filenamePart = disposition
-            .split(separator: ";")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .first { $0.lowercased().hasPrefix("filename=") }
-        let filename = filenamePart.map {
-            String($0.dropFirst("filename=".count)).trimmingCharacters(in: CharacterSet(charactersIn: "\""))
-        } ?? fallback
+        let filename = Self.filename(fromDisposition: http?.value(forHTTPHeaderField: "Content-Disposition"))
+            ?? fallback
         return TranscriptExport(
             data: data,
             filename: filename,
             contentType: http?.value(forHTTPHeaderField: "Content-Type") ?? "application/octet-stream"
+        )
+    }
+
+    /// The name a Content-Disposition header carries, preferring the RFC 5987
+    /// `filename*` form (exact, UTF-8) over the ASCII-only quoted one.
+    static func filename(fromDisposition disposition: String?) -> String? {
+        let parts = (disposition ?? "")
+            .split(separator: ";")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        if let starred = parts.first(where: { $0.lowercased().hasPrefix("filename*=") }) {
+            let value = String(starred.dropFirst("filename*=".count))
+            // UTF-8''encoded — the charset and an empty language, then the bytes
+            if let quote = value.range(of: "''"),
+               let decoded = String(value[quote.upperBound...]).removingPercentEncoding,
+               !decoded.isEmpty {
+                return decoded
+            }
+        }
+        guard let plain = parts.first(where: { $0.lowercased().hasPrefix("filename=") }) else { return nil }
+        let name = String(plain.dropFirst("filename=".count)).trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+        return name.isEmpty ? nil : name
+    }
+
+    /// A file a reply linked, read off the Mac. The path is whatever the
+    /// link carried; the server decides whether it is one it will serve.
+    public func fetchFile(path: String) async throws -> FetchedFile {
+        guard !path.isEmpty, path.utf8.count <= 4_096, !path.contains("\0") else { throw APIError.badURL }
+        let request = try makeRequest("GET", "/api/files", query: [URLQueryItem(name: "path", value: path)])
+        let (data, response) = try await perform(request)
+        try Self.check(response, data)
+        let http = response as? HTTPURLResponse
+        let name = Self.filename(fromDisposition: http?.value(forHTTPHeaderField: "Content-Disposition"))
+            ?? URL(fileURLWithPath: path).lastPathComponent
+        return FetchedFile(
+            data: data,
+            name: name,
+            mime: http?.value(forHTTPHeaderField: "Content-Type") ?? "application/octet-stream"
         )
     }
 

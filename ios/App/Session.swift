@@ -1233,6 +1233,80 @@ final class Session: ObservableObject {
         }
     }
 
+    /// A bot-created file for the viewer sheet. Throws so the sheet can say
+    /// why rather than sit blank.
+    func fetchFile(path: String) async throws -> FetchedFile {
+        guard let client else { throw APIError.transport("This computer is offline.") }
+        return try await client.fetchFile(path: path)
+    }
+
+    /// A bot-created file for the viewer sheet. Throws so the sheet can say
+    /// why rather than sit blank.
+    func fetchFile(path: String) async throws -> FetchedFile {
+        guard let client else { throw APIError.transport("This computer is offline.") }
+        return try await client.fetchFile(path: path)
+    }
+
+    /// Upload what the composer attached and hand back the references the
+    /// message will carry — the same tags the share extension and the
+    /// desktop write, so a bot sees no difference in where it came from.
+    /// A folder goes up file by file and comes back as one reference to
+    /// the rebuilt folder. Each attachment's own id is its uploadId, so a
+    /// retry after a dropped connection replaces rather than duplicates.
+    func upload(
+        _ attachments: [PendingAttachment],
+        progress: @MainActor (String) -> Void
+    ) async throws -> [SharedAttachmentReference] {
+        guard let client else { throw APIError.transport("This computer is offline.") }
+        var references: [SharedAttachmentReference] = []
+        for attachment in attachments {
+            switch attachment.kind {
+            case .image:
+                progress("Uploading \(attachment.name)…")
+                let data = try await Self.read(attachment.url)
+                let path = try await client.uploadImage(
+                    data: data, mime: attachment.mime, uploadId: attachment.id.uuidString
+                )
+                references.append(SharedAttachmentReference(path: path, kind: .image))
+            case .file:
+                progress("Uploading \(attachment.name)…")
+                let data = try await Self.read(attachment.url)
+                let uploaded = try await client.uploadFile(
+                    data: data, name: attachment.name, mime: attachment.mime,
+                    uploadId: attachment.id.uuidString
+                )
+                references.append(SharedAttachmentReference(
+                    path: uploaded.path, kind: .file, displayName: uploaded.name
+                ))
+            case .folder:
+                let files = AttachmentIntake.files(in: attachment)
+                var folderPath: String?
+                for (index, file) in files.enumerated() {
+                    progress("Uploading \(attachment.name) (\(index + 1) of \(files.count))…")
+                    let data = try await Self.read(file.url)
+                    let uploaded = try await client.uploadFolderFile(
+                        data: data, uploadId: attachment.id.uuidString,
+                        folder: attachment.name, relativePath: file.relativePath
+                    )
+                    folderPath = uploaded.folderPath
+                }
+                guard let folderPath else {
+                    throw APIError.transport("\(attachment.name) has no files to attach.")
+                }
+                references.append(SharedAttachmentReference(
+                    path: folderPath, kind: .file, displayName: attachment.name
+                ))
+            }
+        }
+        return references
+    }
+
+    private static func read(_ url: URL) async throws -> Data {
+        try await Task.detached(priority: .userInitiated) {
+            try Data(contentsOf: url, options: .mappedIfSafe)
+        }.value
+    }
+
     // MARK: - Connected apps
 
     func loadConnectorCatalog() async -> ConnectorCatalog? {

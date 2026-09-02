@@ -954,6 +954,8 @@ struct TextBubble: View {
     let message: Message
     let chat: Chat
     var tailed = true
+    /// A linked file being opened, and the viewer's presentation in one value.
+    @State private var viewingFile: FileViewRequest?
 
     private var attachedContent: AttachedMessageContent {
         AttachedMessageContent.parse(message.text ?? "")
@@ -1083,6 +1085,17 @@ struct TextBubble: View {
                         .foregroundStyle(Color.primary)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
+                        // A link to a file the bot wrote opens in the viewer;
+                        // the system's own action would refuse a bare path
+                        // and has nothing behind a file:// URL, which is why
+                        // tapping one used to do nothing. Web links still go
+                        // to the system.
+                        .environment(\.openURL, OpenURLAction { url in
+                            guard let path = LocalFileLink.path(for: url) else { return .systemAction }
+                            viewingFile = FileViewRequest(path: path)
+                            return .handled
+                        })
+                        .sheet(item: $viewingFile) { FileViewerSheet(path: $0.path) }
                 }
             }
             .padding(.horizontal, customCard ? 0 : 15)

@@ -1525,6 +1525,39 @@ describe("harness HTTP API", () => {
     expect(malformedId.status).toBe(400);
   });
 
+  it("serves a bot-created file to the phone, and only from inside the data directory", async () => {
+    const documents = join(home, ".openmausbot", "documents");
+    mkdirSync(documents, { recursive: true });
+    const report = join(documents, "weekly report.md");
+    writeFileSync(report, "# Weekly\n\n- done\n");
+    const elsewhere = join(home, "private.md");
+    writeFileSync(elsewhere, "not for bots\n");
+
+    const viewed = await fetch(`${BASE}/api/files?path=${encodeURIComponent(report)}`);
+    expect(viewed.status).toBe(200);
+    expect(viewed.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
+    expect(viewed.headers.get("content-disposition")).toContain('filename="weekly report.md"');
+    expect(viewed.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(await viewed.text()).toBe("# Weekly\n\n- done\n");
+
+    // the file:// form bots also emit
+    const asUrl = await fetch(`${BASE}/api/files?path=${encodeURIComponent(`file://${report}`)}`);
+    expect(asUrl.status).toBe(200);
+
+    const outside = await fetch(`${BASE}/api/files?path=${encodeURIComponent(elsewhere)}`);
+    expect(outside.status).toBe(403);
+    const traversal = await fetch(`${BASE}/api/files?path=${encodeURIComponent(join(documents, "..", "..", "private.md"))}`);
+    expect(traversal.status).toBe(403);
+    const missing = await fetch(`${BASE}/api/files?path=${encodeURIComponent(join(documents, "gone.md"))}`);
+    expect(missing.status).toBe(404);
+    const directory = await fetch(`${BASE}/api/files?path=${encodeURIComponent(documents)}`);
+    expect(directory.status).toBe(400);
+    const relative = await fetch(`${BASE}/api/files?path=documents%2Fweekly%20report.md`);
+    expect(relative.status).toBe(400);
+    const unnamed = await fetch(`${BASE}/api/files`);
+    expect(unnamed.status).toBe(400);
+  });
+
   it("streams shared documents safely into the local attachments directory", async () => {
     const contents = Buffer.from("name,score\nAda,10\n");
     const saved = await fetch(`${BASE}/api/files?name=${encodeURIComponent("scores.exe")}`, {
