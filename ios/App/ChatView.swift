@@ -28,6 +28,9 @@ struct ChatView: View {
     @State private var showingPlus = false
     @State private var showingProfile = false
     @State private var showCommandHUD = false
+    /// Set by a hardware shift-Return just before the newline lands, so the
+    /// typed-Return detector lets that one through instead of sending.
+    @State private var allowsNewline = false
     @State private var shareFile: ShareFile?
     @FocusState private var composerFocused: Bool
     @StateObject private var dictation = SpeechDictation()
@@ -715,13 +718,29 @@ struct ChatView: View {
                             // Partial transcripts rebuild from a frozen base;
                             // prevent competing edits without dimming the text.
                             .allowsHitTesting(!dictation.isListening && !dictation.isStarting)
-                            .onChange(of: draft) { _, value in
+                            .onChange(of: draft) { old, value in
+                                // The software keyboard's Return on a vertical
+                                // TextField inserts "\n" and never fires
+                                // onSubmit, so the blue send key added a line.
+                                // Recognise that exact edit and send instead.
+                                // Dictation rebuilds the draft wholesale and
+                                // is left alone.
+                                if !allowsNewline, !dictation.isListening,
+                                   let stripped = ComposerReturn.textWithoutTypedReturn(old: old, new: value) {
+                                    draft = stripped
+                                    submit(stripped)
+                                    return
+                                }
+                                allowsNewline = false
                                 withAnimation(.easeInOut(duration: 0.15)) {
                                     showCommandHUD = value.hasPrefix("/")
                                 }
                             }
                             .onKeyPress(.return, phases: .down) { press in
-                                guard !press.modifiers.contains(.shift) else { return .ignored }
+                                guard !press.modifiers.contains(.shift) else {
+                                    allowsNewline = true
+                                    return .ignored
+                                }
                                 submit()
                                 return .handled
                             }
