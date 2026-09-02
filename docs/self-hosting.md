@@ -33,15 +33,13 @@ Desktop-only for now (needs the Mac/Linux app):
 
 ## Docker (recommended)
 
-One tenant = one container for the server plus Caddy for HTTPS and login.
+One tenant = one container for the server plus Caddy for HTTPS.
 Requirements: Docker with Compose, a DNS name pointing at the machine, and
 ports 80/443 open.
 
 ```sh
 git clone https://github.com/milind-soni/OpenMausBot && cd OpenMausBot/deploy
-cp .env.example .env
-# set DOMAIN, BASIC_AUTH_USER and BASIC_AUTH_HASH (the file says how;
-# the hash's `$` signs must be doubled, Compose interpolates them)
+cp .env.example .env            # set DOMAIN
 docker compose pull omb && docker compose up -d
 ```
 
@@ -49,17 +47,20 @@ That uses the image CI publishes on every `main` push
 (`ghcr.io/milind-soni/openmausbot`, tagged `latest`, `sha-…` and `v…`).
 To build from your checkout instead: `docker compose up -d --build`.
 
-Then sign the engine CLIs in **inside the container** — their logins live
-on the `data` volume, so they survive restarts and image upgrades:
+Then sign the engine CLIs in **inside the container** (their logins live on
+the `data` volume, so they survive restarts and image upgrades) and mint a
+pairing code for your first device:
 
 ```sh
-docker compose exec omb claude     # each CLI you listed in ENGINES
+docker compose exec omb claude                       # each CLI you listed in ENGINES
+docker compose exec omb node dist-server/pair-cli.js # prints a code and a link
 ```
 
-Open `https://<DOMAIN>` and log in with the basic-auth user. Webhook URLs
-(`https://<DOMAIN>/hooks/wh_…`) work without the login — every hook
-carries its own secret — and that is the base the app prints on new hooks,
-because the stack sets `OMB_WEBHOOK_PUBLIC_URL`.
+Open the link (`https://<DOMAIN>/pair#code=…`) in a browser and it is
+paired; see "Using it from your computer" for what a session is. Webhook
+URLs (`https://<DOMAIN>/hooks/wh_…`) work without a session, and that is the
+base the app prints on new hooks because the stack sets
+`OMB_WEBHOOK_PUBLIC_URL`.
 
 What the stack does, so you can adapt it:
 
@@ -69,16 +70,15 @@ What the stack does, so you can adapt it:
   into the image.
 - [`deploy/docker-compose.yml`](../deploy/docker-compose.yml) runs Caddy
   **in the server's network namespace**, so Caddy reaches the server on
-  `127.0.0.1` and the server never binds anything public. The loopback
-  invariant above holds unchanged.
-- [`deploy/Caddyfile`](../deploy/Caddyfile) carries the two header rules
-  from "Putting a proxy in front" below. Swap `basic_auth` for
-  `forward_auth` to an identity provider (Authentik, oauth2-proxy) when you
-  outgrow a shared password — nothing in the server needs to change.
+  `127.0.0.1` and the server never binds anything public.
+- [`deploy/Caddyfile`](../deploy/Caddyfile) terminates TLS and forwards
+  the real `Host` plus `X-Forwarded-For`/`X-Forwarded-Proto`; the server's
+  own pairing is the login. A shared-password `basic_auth` block is there,
+  commented out, if you want a second wall in front of pairing.
 
 Upgrade with `docker compose pull omb && docker compose up -d` (or
 `git pull && docker compose up -d --build`). State (chats, routines,
-engine logins) is on the `data` volume; back that up.
+engine logins, paired sessions) is on the `data` volume; back that up.
 
 ## From source
 
@@ -140,8 +140,9 @@ and still trusts loopback as the owner. A **paired session** is the second
 way in: a bearer token or the cookie, same-origin only, with a scope (`admin`
 by default, `--client` for a device that may chat but not change settings or
 pair others). Five bad codes from one address lock that address out for ten
-minutes. The Docker stack's Caddy login (`basic_auth`) is now optional: keep
-it as a second wall, or delete that block once everyone has paired.
+minutes. Over plain HTTP (a LAN address without TLS) the cookie is not
+marked `Secure` and travels in clear: use the Docker stack, Tailscale, or
+another TLS front for anything beyond a trusted private network.
 
 Native clients (CLI, scripts) send the token as `Authorization: Bearer …`
 and take a 5-minute ticket from `POST /api/auth/stream-ticket` for the
@@ -160,6 +161,26 @@ address of its own:
 ssh -L 8799:localhost:8799 you@your-server
 # then open http://localhost:8799 — loopback, so no pairing needed
 ```
+
+## Putting a proxy in front
+
+Any reverse proxy works, given three things:
+
+1. **Forward the real `Host`** and set `X-Forwarded-Proto`. Any request that
+   carries forwarded headers is treated as remote and needs a session, so a
+   proxy that rewrites `Host` to `127.0.0.1`, or forwards a stranger's
+   `Host: localhost`, gains nothing. The proxy's scheme decides whether the
+   session cookie is `Secure` and is part of the same-origin check.
+2. **Set `X-Forwarded-For` yourself** (Caddy and nginx do by default) and
+   drop any the client sent: the pairing lockout counts failures per first
+   forwarded address.
+3. **Do not buffer** the event stream (`flush_interval -1` in Caddy,
+   `proxy_buffering off` in nginx); the UI streams events over SSE.
+
+Plus one convenience: set `OMB_PUBLIC_URL=https://your.domain` so pairing
+links, and `OMB_WEBHOOK_PUBLIC_URL=https://your.domain` so hook URLs, are
+printed with the public address. [`deploy/Caddyfile`](../deploy/Caddyfile)
+is the reference implementation.
 
 ## Using it from your phone
 

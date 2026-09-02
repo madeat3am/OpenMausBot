@@ -64,40 +64,53 @@ jobs:
             echo "server answered on $ip — it must only bind 127.0.0.1"; exit 1
           fi
           echo "unreachable on $ip: loopback-only holds"
-      - name: Run the tenant stack (server + Caddy) and use it like a browser would
-        # deploy/docker-compose.yml is the product here: prove the login wall,
-        # the Host/Origin rules that satisfy the server's loopback gates, the
-        # unbuffered SSE stream, and the advertised webhook base — through TLS.
+      - name: Run the tenant stack (server + Caddy) and pair like a browser would
+        # deploy/docker-compose.yml is the product here: through TLS, prove that
+        # nothing but the descriptor and the UI shell is served before pairing,
+        # that a code minted inside the container turns into a Secure cookie
+        # session, that the cookie is same-origin only, that the event stream is
+        # unbuffered, and that hooks stay reachable without a session.
         run: |
           set -euo pipefail
           docker rm -f omb >/dev/null
           docker tag openmausbot:ci ghcr.io/milind-soni/openmausbot:latest
-          hash=$(docker run --rm caddy:2 caddy hash-password --plaintext 'ci-pass')
-          printf 'DOMAIN=localhost\nBASIC_AUTH_USER=ci\nBASIC_AUTH_HASH=%s\nENGINES=\n' "$(printf '%s' "$hash" | sed 's/\$/$$/g')" > deploy/.env
+          printf 'DOMAIN=localhost\nENGINES=\n' > deploy/.env
           docker compose -f deploy/docker-compose.yml up -d --no-build
           for i in $(seq 1 45); do
-            curl -sk -o /dev/null --max-time 2 https://localhost/api/health && break
+            curl -sk -o /dev/null --max-time 2 https://localhost/.well-known/openmausbot/environment && break
             sleep 2
             if [ "$i" = "45" ]; then docker compose -f deploy/docker-compose.yml logs; echo "caddy never answered"; exit 1; fi
           done
           code() { curl -sk -o /dev/null -w '%{http_code}' --max-time 5 "$@"; }
-          H=https://localhost
-          test "$(code $H/api/health)" = 401                                      # login wall
-          test "$(code -u ci:wrong $H/api/health)" = 401
-          # Bodies are captured before grepping: with pipefail, `curl | grep -q`
-          # can fail on SIGPIPE when grep closes the pipe early.
           body() { curl -sk --max-time 10 "$@"; }
-          grep -q openmausbot <<<"$(body -u ci:ci-pass $H/api/health)"             # Host rule satisfies the loopback gate
-          grep -qi '<html' <<<"$(body -u ci:ci-pass $H/)"                          # UI served through the proxy
-          test "$(code -u ci:ci-pass -H 'Origin: https://evil.example' $H/api/health)" = 403   # CSRF gate survives the proxy
-          test "$(code -u ci:ci-pass -H 'Origin: https://localhost' $H/api/health)" = 200      # own origin is mapped
-          grep -q error <<<"$(body -X POST $H/hooks/wh_nope)"                      # hook path reaches the receiver without login
+          H=https://localhost
+          grep -q '"environmentId"' <<<"$(body $H/.well-known/openmausbot/environment)"   # descriptor is public
+          test "$(code $H/api/health)" = 403                                      # nothing else before pairing
+          grep -q 'pair this device' <<<"$(body $H/api/health)"
+          grep -qi '<html' <<<"$(body $H/pair)"                                    # the UI shell is served so /pair can load
           test "$(code http://localhost/)" = 308                                   # HTTP redirects to HTTPS
+          pairing=$(docker compose -f deploy/docker-compose.yml exec -T omb node dist-server/pair-cli.js --label ci)
+          echo "$pairing"
+          pcode=$(grep -o 'code=[A-Z2-9-]*' <<<"$pairing" | head -1 | cut -d= -f2)
+          test -n "$pcode"
+          jar=$(mktemp)
+          paired=$(curl -sk --max-time 10 -c "$jar" -D - -X POST $H/api/auth/pair -H 'content-type: application/json' -d "{\"code\":\"$pcode\",\"cookie\":true}")
+          grep -qi 'set-cookie: omb_session_' <<<"$paired"                        # cookie session
+          grep -qi 'Secure' <<<"$paired"                                          # over TLS the cookie is Secure
+          grep -qi 'HttpOnly' <<<"$paired"
+          test "$(code -b "$jar" $H/api/health)" = 200                              # paired: the API answers
+          grep -q openmausbot <<<"$(body -b "$jar" $H/api/health)"
+          test "$(code -b "$jar" -H 'Origin: https://evil.example' -X POST -d '{}' $H/api/bots)" = 403   # cookie is same-origin only
+          test "$(code -b "$jar" -H 'Origin: https://localhost' $H/api/auth/session)" = 200
+          grep -q '"via":"cookie"' <<<"$(body -b "$jar" $H/api/auth/session)"
+          grep -q '"label":"ci"' <<<"$(body -b "$jar" $H/api/auth/sessions)"        # listed for revocation
+          grep -q error <<<"$(body -X POST $H/hooks/wh_nope)"                      # hook path reaches the receiver without a session
           # The event stream never ends, so curl's own --max-time exit (28) is expected;
           # the proof is that bytes arrived within the window (a buffering proxy sends none).
-          sse=$( (curl -sk -u ci:ci-pass -N --max-time 4 $H/api/events || true) | head -c 64 )
+          sse=$( (curl -sk -b "$jar" -N --max-time 4 $H/api/events || true) | head -c 64 )
           test -n "$sse"                                                           # SSE streams, not buffered
-          grep -q '"baseUrl":"https://localhost"' <<<"$(body -u ci:ci-pass $H/api/webhooks)"   # OMB_WEBHOOK_PUBLIC_URL is advertised
+          grep -q '"baseUrl":"https://localhost"' <<<"$(body -b "$jar" $H/api/webhooks)"   # OMB_WEBHOOK_PUBLIC_URL is advertised
+          test "$(code $H/api/health)" = 403                                      # and without the cookie it is still closed
           docker compose -f deploy/docker-compose.yml down -v
 
   publish:

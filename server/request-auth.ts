@@ -73,6 +73,15 @@ export function requestOrigin(req: IncomingMessage): string | null {
   return `${proto}://${host.toLowerCase()}`;
 }
 
+/** A proxy on the way in sets forwarded headers; a client on this machine
+ * does not. Loopback trust is for the latter only: a proxy that hands the
+ * server a loopback Host (or forwards `Host: localhost` from a stranger)
+ * must not turn a remote client into the owner. */
+export function isProxied(req: IncomingMessage): boolean {
+  const h = req.headers;
+  return Boolean(h["x-forwarded-for"] || h["x-forwarded-proto"] || h["x-forwarded-host"] || h["forwarded"]);
+}
+
 /** Origin absent (non-browser) or equal to this request's own origin. */
 export function isSameOrigin(req: IncomingMessage): boolean {
   const origin = headerValue(req.headers.origin);
@@ -81,11 +90,16 @@ export function isSameOrigin(req: IncomingMessage): boolean {
   return own !== null && origin.trim().toLowerCase() === own;
 }
 
-/** Who to count a pairing attempt against: the first forwarded hop when a
- * proxy says so, else the socket peer. Lockout keys on this. */
+/** Who to count a pairing attempt against. The server binds loopback, so a
+ * remote client always arrives through a proxy or tunnel on this machine;
+ * that proxy's X-Forwarded-For (Caddy overwrites any the client sent) names
+ * the real source. A connection whose peer is not loopback (a future bind to
+ * an interface) is the source itself, and its forwarded header is ignored. */
 export function requestSource(req: IncomingMessage): string {
-  const forwarded = headerValue(req.headers["x-forwarded-for"])?.split(",")[0]?.trim();
-  return forwarded || req.socket?.remoteAddress || "unknown";
+  const peer = req.socket?.remoteAddress || "unknown";
+  const viaLocalProxy = peer === "127.0.0.1" || peer === "::1" || peer === "::ffff:127.0.0.1";
+  const forwarded = viaLocalProxy ? headerValue(req.headers["x-forwarded-for"])?.split(",")[0]?.trim() : undefined;
+  return forwarded || peer;
 }
 
 /** "Safari on iPhone" beats "Unnamed device" in the sessions list. */
@@ -198,11 +212,15 @@ export function resolveRequestAuth(req: IncomingMessage, options: ResolveOptions
     return { auth: { kind: "session", session, via, scopes: session.scopes }, status: 401, error: "" };
   }
 
-  const loopback = isLoopbackHost(headerValue(req.headers.host)) && isAllowedOrigin(headerValue(req.headers.origin));
+  const proxied = isProxied(req);
+  const loopback = !proxied && isLoopbackHost(headerValue(req.headers.host)) && isAllowedOrigin(headerValue(req.headers.origin));
   if (loopback) return { auth: { kind: "loopback", scopes: LOOPBACK_SCOPES }, status: 401, error: "" };
 
   if (via) {
     return deny(401, "unauthorized: this session has expired or was revoked; pair this device again");
+  }
+  if (proxied) {
+    return deny(403, "forbidden: this request came through a proxy (pair this device to use the server remotely)");
   }
   if (!isLoopbackHost(headerValue(req.headers.host))) {
     return deny(403, "forbidden: loopback host required (pair this device to use the server remotely)");

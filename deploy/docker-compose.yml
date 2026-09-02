@@ -4,7 +4,7 @@
 # 127.0.0.1 — the server never binds a public interface. Ports are therefore
 # declared on the `omb` service (the namespace owner).
 #
-#   cp .env.example .env   # set DOMAIN, BASIC_AUTH_USER, BASIC_AUTH_HASH
+#   cp .env.example .env   # set DOMAIN
 #   docker compose pull omb && docker compose up -d     # prebuilt image
 #   docker compose up -d --build                        # or build from source
 services:
@@ -43,8 +43,6 @@ services:
         condition: service_healthy
     environment:
       DOMAIN: ${DOMAIN}
-      BASIC_AUTH_USER: ${BASIC_AUTH_USER}
-      BASIC_AUTH_HASH: ${BASIC_AUTH_HASH}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

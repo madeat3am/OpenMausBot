@@ -22,6 +22,12 @@ export const PAIRING_CODE_TTL_MS = 5 * 60_000;
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60_000;
 export const STREAM_TICKET_TTL_MS = 5 * 60_000;
 export const LOCKOUT = { failures: 5, windowMs: 60_000, lockMs: 10 * 60_000 } as const;
+/** Every source together: a client rotating its forwarded address still
+ * cannot try more than this many codes a minute. */
+export const GLOBAL_LOCKOUT = { failures: 30, windowMs: 60_000, lockMs: 60_000 } as const;
+/** A consumed code presented again by the same source within this window
+ * gets the same answer, so a lost response does not strand the device. */
+export const EXCHANGE_REPLAY_MS = 60_000;
 const LAST_SEEN_WRITE_INTERVAL_MS = 60_000;
 
 const scopeSchema = z.enum(["admin", "client"]);
@@ -123,6 +129,8 @@ export class SessionRegistry {
   private pairings: PairingCode[] = [];
   private tickets = new Map<string, { sessionId: string; expiresAt: number }>();
   private failures = new Map<string, { count: number; windowStart: number; lockedUntil: number }>();
+  private globalFailures = { count: 0, windowStart: 0, lockedUntil: 0 };
+  private replays: Array<{ codeHash: string; source: string; result: ExchangeResult; expiresAt: number }> = [];
   private lastSeenWrites = new Map<string, number>();
   private readonly now: () => number;
   private readonly options: { file: string; now?: () => number };
@@ -160,6 +168,7 @@ export class SessionRegistry {
   private prune(): void {
     const now = this.now();
     this.pairings = this.pairings.filter((p) => p.expiresAt > now);
+    this.replays = this.replays.filter((r) => r.expiresAt > now);
     for (const [hash, ticket] of this.tickets) if (ticket.expiresAt <= now) this.tickets.delete(hash);
     const live = this.sessions.filter((s) => s.expiresAt > now);
     if (live.length !== this.sessions.length) {
@@ -208,6 +217,17 @@ export class SessionRegistry {
 
   private recordFailure(source: string): void {
     const now = this.now();
+    const g = this.globalFailures;
+    if (now - g.windowStart > GLOBAL_LOCKOUT.windowMs) {
+      g.count = 0;
+      g.windowStart = now;
+    }
+    g.count += 1;
+    if (g.count >= GLOBAL_LOCKOUT.failures) {
+      g.lockedUntil = now + GLOBAL_LOCKOUT.lockMs;
+      g.count = 0;
+      g.windowStart = now;
+    }
     const entry = this.failures.get(source) ?? { count: 0, windowStart: now, lockedUntil: 0 };
     if (now - entry.windowStart > LOCKOUT.windowMs) {
       entry.count = 0;
@@ -224,14 +244,23 @@ export class SessionRegistry {
 
   /** Turn a pairing code into a session. `source` identifies the caller for
    * the lockout (an IP); `label` names the device in the sessions list. */
-  exchange(input: { code: string; label: string; source: string }): ExchangeResult {
+  /** `label` is what the client asked to be called; the code's own label
+   * (set by whoever minted it) comes next; `fallbackLabel` (derived from the
+   * user agent) last. */
+  exchange(input: { code: string; label: string; source: string; fallbackLabel?: string }): ExchangeResult {
     this.prune();
+    const now = this.now();
+    const presented = sha256(normalizePairingCode(input.code));
+    const replay = this.replays.find((r) => r.source === input.source && sameDigest(r.codeHash, presented));
+    if (replay) return replay.result;
     const lock = this.lockState(input.source);
     if (lock.locked) {
       const minutes = Math.ceil(lock.retryAfterMs / 60_000);
       return { ok: false, status: 429, error: `too many failed pairing attempts; try again in ${minutes} min` };
     }
-    const presented = sha256(normalizePairingCode(input.code));
+    if (this.globalFailures.lockedUntil > now) {
+      return { ok: false, status: 429, error: "too many failed pairing attempts across all clients; try again in a minute" };
+    }
     const index = this.pairings.findIndex((p) => sameDigest(p.codeHash, presented));
     if (index < 0) {
       this.recordFailure(input.source);
@@ -239,12 +268,11 @@ export class SessionRegistry {
     }
     const [pairing] = this.pairings.splice(index, 1); // single use
     this.failures.delete(input.source);
-    const now = this.now();
     const token = `omb_sess_${randomBytes(32).toString("base64url")}`;
     const record: SessionRecord = {
       id: randomUUID(),
       tokenHash: sha256(token),
-      label: (input.label || pairing.label || "Unnamed device").trim().slice(0, 80),
+      label: (input.label.trim() || pairing.label || input.fallbackLabel?.trim() || "Unnamed device").slice(0, 80),
       scopes: [...pairing.scopes],
       createdAt: now,
       lastSeenAt: now,
@@ -253,7 +281,9 @@ export class SessionRegistry {
     this.sessions.push(record);
     this.lastSeenWrites.set(record.id, now); // the exchange itself was the first sighting
     this.persist();
-    return { ok: true, token, session: publicSession(record) };
+    const result: ExchangeResult = { ok: true, token, session: publicSession(record) };
+    this.replays.push({ codeHash: presented, source: input.source, result, expiresAt: now + EXCHANGE_REPLAY_MS });
+    return result;
   }
 
   // ── sessions ───────────────────────────────────────────────────────────

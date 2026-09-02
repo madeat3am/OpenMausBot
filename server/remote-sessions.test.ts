@@ -175,7 +175,11 @@ describe("pairing", () => {
     expect(paired.body.token).toMatch(/^omb_sess_/);
     expect(paired.body.session.label).toBe("Safari on Mac");
     expect(paired.body.environment.label).toBe("cab mini");
-    const again = await call("/api/auth/pair", { method: "POST", headers: remote("10.0.0.3"), body: JSON.stringify({ code: opened.code }) });
+    // a retry from the same address (lost response) replays the same session; another address is refused
+    const replay = await call("/api/auth/pair", { method: "POST", headers: remote("10.0.0.3"), body: JSON.stringify({ code: opened.code }) });
+    expect(replay.status).toBe(200);
+    expect(replay.body.token).toBe(paired.body.token);
+    const again = await call("/api/auth/pair", { method: "POST", headers: remote("10.0.0.33"), body: JSON.stringify({ code: opened.code }) });
     expect(again.status).toBe(401);
 
     const bearer = remote("10.0.0.3", { authorization: `Bearer ${paired.body.token}` });

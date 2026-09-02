@@ -8,9 +8,11 @@ import {
   clearSessionCookie,
   isAllowedOrigin,
   isLoopbackHost,
+  isProxied,
   isSameOrigin,
   parseCookies,
   requestOrigin,
+  requestSource,
   requiredScope,
   resolveRequestAuth,
   serializeSessionCookie,
@@ -65,6 +67,18 @@ describe("origin and cookies", () => {
   });
 });
 
+describe("request source for the lockout", () => {
+  const withPeer = (peer: string, headers: Record<string, string>) =>
+    // SAFETY: only headers and the socket peer are read
+    ({ headers, method: "POST", socket: { remoteAddress: peer } }) as unknown as IncomingMessage;
+  it("takes the forwarded address only from a proxy on this machine", () => {
+    expect(requestSource(withPeer("127.0.0.1", { "x-forwarded-for": "203.0.113.9, 10.0.0.1" }))).toBe("203.0.113.9");
+    expect(requestSource(withPeer("::ffff:127.0.0.1", { "x-forwarded-for": "203.0.113.9" }))).toBe("203.0.113.9");
+    expect(requestSource(withPeer("127.0.0.1", {}))).toBe("127.0.0.1");
+    expect(requestSource(withPeer("100.64.0.7", { "x-forwarded-for": "1.1.1.1" }))).toBe("100.64.0.7");
+  });
+});
+
 describe("scopes", () => {
   it("needs admin for pairing, session management and configuration writes; client elsewhere", () => {
     expect(requiredScope("POST", "/api/auth/pairing")).toBe("admin");
@@ -109,6 +123,21 @@ describe("resolveRequestAuth", () => {
     const foreignOrigin = resolve({ host: "127.0.0.1:8799", origin: "https://evil.example" });
     expect(foreignOrigin.status).toBe(403);
     expect(foreignOrigin.error).toBe("forbidden: cross-origin request");
+  });
+
+  it("never grants loopback trust to a request that came through a proxy, whatever Host it carries", () => {
+    expect(isProxied(request({ host: "localhost", "x-forwarded-for": "203.0.113.9" }))).toBe(true);
+    expect(isProxied(request({ host: "localhost", "x-forwarded-proto": "https" }))).toBe(true);
+    expect(isProxied(request({ host: "localhost" }))).toBe(false);
+    const viaProxy = resolve({ host: "localhost", "x-forwarded-for": "203.0.113.9" });
+    expect(viaProxy.auth).toBeNull();
+    expect(viaProxy.status).toBe(403);
+    expect(viaProxy.error).toMatch(/came through a proxy.*pair this device/);
+    const rewritten = resolve({ host: "127.0.0.1:8799", "x-forwarded-proto": "https", "x-forwarded-for": "203.0.113.9" });
+    expect(rewritten.auth).toBeNull();
+    // a paired session through the same proxy is fine
+    const token = pairedToken();
+    expect(resolve({ host: "localhost", "x-forwarded-for": "203.0.113.9", authorization: `Bearer ${token}` }).auth?.kind).toBe("session");
   });
 
   it("admits a bearer session from any host and reports how it authenticated", () => {

@@ -5207,8 +5207,8 @@ const server = createServer(async (req, res) => {
       const body = await readBody(req);
       const code = typeof body?.code === "string" ? body.code : "";
       const wantsCookie = body?.cookie === true;
-      const label = typeof body?.label === "string" && body.label.trim() ? body.label : labelFromUserAgent(req.headers["user-agent"]);
-      const result = sessions.exchange({ code, label, source: requestSource(req) });
+      const label = typeof body?.label === "string" ? body.label : "";
+      const result = sessions.exchange({ code, label, source: requestSource(req), fallbackLabel: labelFromUserAgent(req.headers["user-agent"]) });
       if (!result.ok) {
         console.warn(`pairing refused from ${requestSource(req)}: ${result.error}`);
         return json(res, result.status, { error: result.error });

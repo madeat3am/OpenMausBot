@@ -4,8 +4,10 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  EXCHANGE_REPLAY_MS,
   formatPairingCode,
   generatePairingCode,
+  GLOBAL_LOCKOUT,
   LOCKOUT,
   normalizePairingCode,
   PAIRING_CODE_ALPHABET,
@@ -51,7 +53,9 @@ describe("pairing codes", () => {
     const first = registry.exchange({ code: formatPairingCode(code).toLowerCase(), label: "", source: "a" });
     expect(first.ok).toBe(true);
     if (first.ok) expect(first.session.label).toBe("phone");
-    const again = registry.exchange({ code, label: "x", source: "a" });
+    // the same source retrying gets the same answer (lost-response replay); anyone else is refused
+    expect(registry.exchange({ code, label: "x", source: "a" })).toEqual(first);
+    const again = registry.exchange({ code, label: "x", source: "someone-else" });
     expect(again.ok).toBe(false);
     if (!again.ok) expect(again.error).toMatch(/wrong or has expired/);
     const { code: stale } = registry.openPairing();
@@ -78,6 +82,45 @@ describe("pairing codes", () => {
     expect(registry.exchange({ code: fresh, label: "", source: "attacker" }).ok).toBe(true);
   });
 
+  it("answers a lost-response retry with the same session for a minute, from the same source only", () => {
+    const { code } = registry.openPairing();
+    const first = registry.exchange({ code, label: "phone", source: "a" });
+    const retry = registry.exchange({ code, label: "phone", source: "a" });
+    expect(retry).toEqual(first);
+    expect(registry.list()).toHaveLength(1);
+    const stranger = registry.exchange({ code, label: "x", source: "b" });
+    expect(stranger.ok).toBe(false);
+    clock += EXCHANGE_REPLAY_MS + 1;
+    expect(registry.exchange({ code, label: "phone", source: "a" }).ok).toBe(false);
+  });
+
+  it("caps failures across all sources so rotating the forwarded address does not help", () => {
+    for (let i = 0; i < GLOBAL_LOCKOUT.failures; i++) {
+      expect(registry.exchange({ code: "AAAAAAAAAAAA", label: "", source: `rotating-${i}` }).ok).toBe(false);
+    }
+    const { code } = registry.openPairing();
+    const blocked = registry.exchange({ code, label: "", source: "fresh-address" });
+    expect(blocked.ok).toBe(false);
+    if (!blocked.ok) expect(blocked.error).toMatch(/across all clients/);
+    clock += GLOBAL_LOCKOUT.lockMs + 1;
+    expect(registry.exchange({ code, label: "", source: "fresh-address" }).ok).toBe(true);
+  });
+
+  it("names the device from the client, else the code's label, else the user agent", () => {
+    const a = registry.openPairing({ label: "Milind's MacBook" });
+    const named = registry.exchange({ code: a.code, label: "", source: "s1", fallbackLabel: "Safari on Mac" });
+    if (!named.ok) throw new Error(named.error);
+    expect(named.session.label).toBe("Milind's MacBook");
+    const b = registry.openPairing();
+    const ua = registry.exchange({ code: b.code, label: "  ", source: "s2", fallbackLabel: "Safari on Mac" });
+    if (!ua.ok) throw new Error(ua.error);
+    expect(ua.session.label).toBe("Safari on Mac");
+    const c = registry.openPairing({ label: "ignored" });
+    const explicit = registry.exchange({ code: c.code, label: "Kitchen iPad", source: "s3", fallbackLabel: "Safari on iPad" });
+    if (!explicit.ok) throw new Error(explicit.error);
+    expect(explicit.session.label).toBe("Kitchen iPad");
+  });
+
   it("carries scopes from the code into the session, deduplicated", () => {
     const { code } = registry.openPairing({ scopes: ["client", "client"] });
     const result = registry.exchange({ code, label: "viewer", source: "s" });
@@ -93,7 +136,7 @@ describe("sessions", () => {
     const onDisk = readFileSync(file(), "utf8");
     expect(onDisk).not.toContain(token);
     expect(onDisk).toContain(session.id);
-    expect(statSync(file()).mode & 0o777).toBe(0o600);
+    if (process.platform !== "win32") expect(statSync(file()).mode & 0o777).toBe(0o600); // Windows has no POSIX modes
     const reloaded = new SessionRegistry({ file: file(), now: () => clock });
     expect(reloaded.authenticate(token)?.id).toBe(session.id);
     expect(reloaded.authenticate("omb_sess_nope")).toBeNull();
