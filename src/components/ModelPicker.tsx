@@ -135,10 +135,14 @@ export function ModelPicker({
     if (refreshingRef.current) return;
     refreshingRef.current = true;
     setRefreshing(true);
-    void refreshInstances().finally(() => {
-      refreshingRef.current = false;
-      setRefreshing(false);
-    });
+    void refreshInstances()
+      .catch(() => {
+        // Keep the last known catalog when the app is temporarily offline.
+      })
+      .finally(() => {
+        refreshingRef.current = false;
+        setRefreshing(false);
+      });
   }, [refreshInstances]);
 
   useEffect(() => {

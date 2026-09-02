@@ -3,6 +3,7 @@
 // unavailable shadow, never crash the fleet. These tests pin that.
 import { describe, expect, it } from "vitest";
 
+import type { ModelCatalog } from "../contracts.ts";
 import { makeFakeDriver } from "../testing/fake-driver.ts";
 import { ProviderRegistry } from "./registry.ts";
 
@@ -151,27 +152,30 @@ describe("ProviderRegistry", () => {
   it("refreshes a live model catalog before returning each description", async () => {
     const fake = makeFakeDriver();
     const registry = new ProviderRegistry([fake.driver]);
-    await registry.load({ a: { driver: "fake" } });
-    const instance = registry.get("a")!;
-    let refreshes = 0;
-    Object.assign(instance, {
-      refreshModels: async () => {
-        refreshes += 1;
-        instance.models.default = `dynamic-${refreshes}`;
-        instance.models.options = [
-          { id: `dynamic-${refreshes}`, label: `Dynamic ${refreshes}` },
-        ];
-      },
-    });
+    await registry.load({ a: { driver: "fake" }, b: { driver: "fake" } });
+    const refreshes = { a: 0, b: 0 };
+    for (const instanceId of ["a", "b"] as const) {
+      const instance = registry.get(instanceId)!;
+      const models: ModelCatalog = { default: "", options: [] };
+      Object.assign(instance, {
+        models,
+        refreshModels: async () => {
+          refreshes[instanceId] += 1;
+          const id = `${instanceId}-${refreshes[instanceId]}`;
+          models.default = id;
+          models.options = [{ id, label: `Dynamic ${id}` }];
+        },
+      });
+    }
 
-    expect((await registry.describe())[0].models).toEqual({
-      default: "dynamic-1",
-      options: [{ id: "dynamic-1", label: "Dynamic 1" }],
-    });
-    expect((await registry.describe())[0].models).toEqual({
-      default: "dynamic-2",
-      options: [{ id: "dynamic-2", label: "Dynamic 2" }],
-    });
+    const first = Object.fromEntries((await registry.describe()).map((row) => [row.instanceId, row.models]));
+    expect(first.a.default).toBe("a-1");
+    expect(first.b.default).toBe("b-1");
+
+    const second = Object.fromEntries((await registry.describe()).map((row) => [row.instanceId, row.models]));
+    expect(second.a.default).toBe("a-2");
+    expect(second.b.default).toBe("b-2");
+    expect(refreshes).toEqual({ a: 2, b: 2 });
   });
 
   it("disposeAll disposes every live instance and empties the registry", async () => {
