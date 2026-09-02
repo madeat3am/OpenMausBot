@@ -55,7 +55,7 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
-          fetch-depth: 2
+          fetch-depth: 0
       - id: pin
         env:
           BEFORE: ${{ github.event.before }}
@@ -64,7 +64,11 @@ jobs:
           current=$(node -p "require('./package.json').version")
           echo "version=$current" >> "$GITHUB_OUTPUT"
           should_release=true
-          if [ "$GITHUB_EVENT_NAME" = push ] && git cat-file -e "$BEFORE:package.json" 2>/dev/null; then
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            git cat-file -e "$BEFORE:package.json" 2>/dev/null || {
+              echo "::error::cannot verify the version before this push; refusing to start a release"
+              exit 1
+            }
             previous=$(git show "$BEFORE:package.json" | node -e 'let s=""; process.stdin.on("data", d => s += d).on("end", () => console.log(JSON.parse(s).version))')
             if [ "$previous" = "$current" ]; then
               echo "package.json changed without a version bump; skipping the release"
