@@ -929,6 +929,17 @@ public struct CompanionClient: Sendable {
         ).bot
     }
 
+    /// Change only the engine, model and optional reasoning effort. This uses
+    /// the companion's narrow model route rather than the desktop's general
+    /// bot PATCH, which also owns execution policy and computer settings.
+    public func updateModel(botId: String, selection: ModelSelection) async throws -> Bot {
+        guard Self.validRouteID(botId) else { throw APIError.badURL }
+        return try await send(
+            try makeRequest("PATCH", "/api/bots/\(botId)/model", encodedBody: selection),
+            as: BotResponse.self
+        ).bot
+    }
+
     /// Upload raw image bytes and return the path the agent can open on its
     /// Mac. This is also the primitive used by avatar upload and sharing.
     public func uploadImage(

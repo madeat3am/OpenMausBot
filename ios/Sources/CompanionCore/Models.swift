@@ -186,6 +186,15 @@ public struct Message: Codable, Hashable, Identifiable, Sendable {
 public struct ModelSelection: Codable, Hashable, Sendable {
     public var instanceId: String
     public var model: String
+    /// Optional reasoning effort passed through to engines that support it.
+    /// Older computers omit this field, which means the engine default.
+    public var effort: String?
+
+    public init(instanceId: String, model: String, effort: String? = nil) {
+        self.instanceId = instanceId
+        self.model = model
+        self.effort = effort
+    }
 }
 
 public struct BotTask: Codable, Hashable, Sendable {
@@ -480,12 +489,24 @@ public struct ModelCatalog: Codable, Hashable, Sendable {
     public var options: [ModelOption]
 }
 
+/// The small, phone-safe part of an engine's capabilities needed by bot
+/// settings. Missing capabilities or effort levels mean the engine does not
+/// offer a reasoning control.
+public struct InstanceCapabilities: Codable, Hashable, Sendable {
+    public var effortLevels: [String]?
+
+    public init(effortLevels: [String]? = nil) {
+        self.effortLevels = effortLevels
+    }
+}
+
 public struct Instance: Codable, Hashable, Identifiable, Sendable {
     public var instanceId: String
     public var driverKind: String
     public var displayName: String?
     public var snapshot: ProviderSnapshot
     public var models: ModelCatalog
+    public var capabilities: InstanceCapabilities? = nil
 
     public var id: String { instanceId }
 }

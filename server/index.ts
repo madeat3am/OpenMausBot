@@ -7240,6 +7240,29 @@ const server = createServer(async (req, res) => {
       broadcast({ kind: "bot", bot: visible });
       return json(res, 200, { bot: visible });
     }
+    m = path.match(/^\/api\/bots\/([\w-]+)\/model$/);
+    if (m && method === "PATCH") {
+      const body = await readBody(req);
+      if (body && typeof body === "object" && !Array.isArray(body)) {
+        const unsupported = Object.keys(body).find(
+          (key) => key !== "instanceId" && key !== "model" && key !== "effort",
+        );
+        if (unsupported) return json(res, 400, { error: `unsupported model field: ${unsupported}` });
+      }
+      const existing = store.bot(m[1]);
+      if (!existing) return json(res, 404, { error: "no such bot" });
+      const checked = checkedModelSelection(
+        body,
+        { selection: existing.modelSelection, busy: Boolean(existing.busy) },
+        true,
+      );
+      if (!checked.ok) return json(res, checked.status, { error: checked.error });
+      // patchBot persists first and emits the canonical bot change, which the
+      // store listener above turns into the slim wire-format SSE broadcast.
+      const bot = store.patchBot(existing.id, { modelSelection: checked.selection });
+      if (!bot) return json(res, 404, { error: "no such bot" });
+      return json(res, 200, { bot: wireBot(bot) });
+    }
     m = path.match(/^\/api\/bots\/([\w-]+)\/read$/);
     if (m && method === "POST") {
       const bot = store.patchBot(m[1], { unread: false });

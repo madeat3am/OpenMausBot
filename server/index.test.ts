@@ -1741,6 +1741,144 @@ describe("harness HTTP API", () => {
     }
   });
 
+  it("updates a paired bot's model, persists it, broadcasts it, and clears effort", async () => {
+    const instances = (await api("GET", "/api/instances")).body.instances;
+    const claude = instances.find((instance: { instanceId: string }) => instance.instanceId === "claude");
+    expect(claude).toMatchObject({
+      snapshot: { state: "available" },
+      capabilities: { effortLevels: expect.arrayContaining(["high"]) },
+    });
+    const selection = { instanceId: claude.instanceId, model: claude.models.default };
+    const bot = (await api("POST", "/api/bots", {
+      modelSelection: selection,
+      requireAvailableModel: true,
+    })).body.bot;
+    const stream = await openSse(`${BASE}/api/events`);
+    try {
+      await stream.until((frame) => frame.kind === "hello");
+      const saved = await api("PATCH", `/api/bots/${bot.id}/model`, {
+        ...selection,
+        effort: "high",
+      });
+      expect(saved.status).toBe(200);
+      expect(saved.body.bot.modelSelection).toEqual({ ...selection, effort: "high" });
+      expect(saved.body.bot).not.toHaveProperty("resumeCursors");
+
+      const setFrame = await stream.until(
+        (frame) => frame.kind === "bot" &&
+          frame.bot?.id === bot.id &&
+          frame.bot?.modelSelection?.effort === "high",
+      );
+      expect(setFrame.bot.modelSelection).toEqual({ ...selection, effort: "high" });
+      const afterSet = (await api("GET", "/api/bots?messages=0")).body.bots.find(
+        (candidate: { id: string }) => candidate.id === bot.id,
+      );
+      expect(afterSet.modelSelection).toEqual({ ...selection, effort: "high" });
+
+      // Omitting effort is the complete "use the engine default" selection,
+      // rather than a partial patch that accidentally preserves the old one.
+      const cleared = await api("PATCH", `/api/bots/${bot.id}/model`, selection);
+      expect(cleared.status).toBe(200);
+      expect(cleared.body.bot.modelSelection).toEqual(selection);
+      const clearFrame = await stream.until(
+        (frame) => frame.kind === "bot" &&
+          frame.bot?.id === bot.id &&
+          frame.bot?.modelSelection?.model === selection.model &&
+          frame.bot?.modelSelection?.effort === undefined,
+      );
+      expect(clearFrame.bot.modelSelection).toEqual(selection);
+      const afterClear = (await api("GET", "/api/bots?messages=0")).body.bots.find(
+        (candidate: { id: string }) => candidate.id === bot.id,
+      );
+      expect(afterClear.modelSelection).toEqual(selection);
+    } finally {
+      stream.close();
+      await api("DELETE", `/api/bots/${bot.id}`);
+    }
+  });
+
+  it("keeps paired model writes inside the live catalog and exact request shape", async () => {
+    const instances = (await api("GET", "/api/instances")).body.instances;
+    const claude = instances.find((instance: { instanceId: string }) => instance.instanceId === "claude");
+    const selection = { instanceId: claude.instanceId, model: claude.models.default };
+    const bot = (await api("POST", "/api/bots", {
+      modelSelection: selection,
+      requireAvailableModel: true,
+    })).body.bot;
+    try {
+      const cases: Array<{ body: unknown; error: RegExp }> = [
+        { body: { instanceId: "missing", model: "anything" }, error: /instance .* unavailable/i },
+        { body: { ...selection, model: `${selection.model}-not-offered` }, error: /not offered/i },
+        { body: { ...selection, effort: "turbo" }, error: /not recognized/i },
+        { body: { ...selection, effort: "none" }, error: /not offered/i },
+        { body: { instanceId: selection.instanceId }, error: /modelSelection\.model/i },
+        { body: { ...selection, autoApprove: true }, error: /unsupported model field: autoApprove/i },
+      ];
+      for (const testCase of cases) {
+        const rejected = await api("PATCH", `/api/bots/${bot.id}/model`, testCase.body);
+        expect(rejected.status).toBe(400);
+        expect(rejected.body.error).toMatch(testCase.error);
+      }
+
+      for (const raw of ["null", "[]"]) {
+        const rejected = await fetch(`${BASE}/api/bots/${bot.id}/model`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: raw,
+        });
+        expect(rejected.status).toBe(400);
+      }
+      expect((await api("PATCH", "/api/bots/no-such-bot/model", selection)).status).toBe(404);
+
+      const after = (await api("GET", "/api/bots?messages=0")).body.bots.find(
+        (candidate: { id: string }) => candidate.id === bot.id,
+      );
+      expect(after.modelSelection).toEqual(selection);
+      expect(after.autoApprove).toBeUndefined();
+    } finally {
+      await api("DELETE", `/api/bots/${bot.id}`);
+    }
+  });
+
+  it("refuses paired model changes while the bot is working", async () => {
+    const instances = (await api("GET", "/api/instances")).body.instances;
+    const claude = instances.find((instance: { instanceId: string }) => instance.instanceId === "claude");
+    const selection = { instanceId: claude.instanceId, model: claude.models.default };
+    const bot = (await api("POST", "/api/bots", {
+      modelSelection: selection,
+      requireAvailableModel: true,
+    })).body.bot;
+    try {
+      expect((await api("POST", `/api/bots/${bot.id}/messages`, { text: "keep running" })).status).toBe(202);
+      await expect.poll(async () => {
+        const current = (await api("GET", "/api/bots?messages=0")).body.bots.find(
+          (candidate: { id: string }) => candidate.id === bot.id,
+        );
+        return current?.busy;
+      }).toBe(true);
+
+      const blocked = await api("PATCH", `/api/bots/${bot.id}/model`, {
+        ...selection,
+        effort: "high",
+      });
+      expect(blocked.status).toBe(409);
+      expect(blocked.body.error).toMatch(/working.*stop it before changing models/i);
+      const unchanged = (await api("GET", "/api/bots?messages=0")).body.bots.find(
+        (candidate: { id: string }) => candidate.id === bot.id,
+      );
+      expect(unchanged.modelSelection).toEqual(selection);
+    } finally {
+      await api("POST", `/api/bots/${bot.id}/interrupt`, {});
+      await expect.poll(async () => {
+        const current = (await api("GET", "/api/bots?messages=0")).body.bots.find(
+          (candidate: { id: string }) => candidate.id === bot.id,
+        );
+        return current?.busy;
+      }, { timeout: 5_000 }).toBe(false);
+      await api("DELETE", `/api/bots/${bot.id}`);
+    }
+  });
+
   it("exports every visible bot and imports the team without creating a room", async () => {
     const first = (await api("POST", "/api/bots")).body.bot;
     const second = (await api("POST", "/api/bots")).body.bot;

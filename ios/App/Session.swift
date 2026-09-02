@@ -1217,6 +1217,31 @@ final class Session: ObservableObject {
 
     // MARK: - Agent profile
 
+    /// The model catalog lives on the paired computer because availability
+    /// depends on which engines are installed and signed in there.
+    func modelInstances() async -> [Instance] {
+        guard let client else { return [] }
+        do {
+            return try await client.instances()
+        } catch {
+            if !Task.isCancelled { actionError = error.localizedDescription }
+            return []
+        }
+    }
+
+    func updateModel(_ selection: ModelSelection, for bot: Bot) async -> Bot? {
+        guard let client else { return nil }
+        do {
+            let updated = try await client.updateModel(botId: bot.id, selection: selection)
+            guard !Task.isCancelled else { return nil }
+            state.apply(.bot(updated))
+            return updated
+        } catch {
+            if !Task.isCancelled { actionError = error.localizedDescription }
+            return nil
+        }
+    }
+
     func updateProfile(_ patch: BotProfilePatch, for bot: Bot) async -> Bot? {
         guard let client else { return nil }
         do {

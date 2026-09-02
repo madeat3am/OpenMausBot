@@ -466,8 +466,8 @@ struct ChatView: View {
                 .buttonStyle(.plain)
                 .allowsHitTesting(!islandVisible)
                 .accessibilityHidden(islandVisible)
-                .accessibilityLabel("Open \(current.name) profile")
-                .accessibilityHint("Edits this agent's identity, avatar, notifications, and voice")
+                .accessibilityLabel("Open \(current.name) settings")
+                .accessibilityHint("Changes this bot's model, profile, notifications, and voice")
             } else {
                 Color.clear.frame(width: 60, height: 60)
             }
@@ -486,7 +486,7 @@ struct ChatView: View {
                             .foregroundStyle(Color.secondary)
                             .lineLimit(1)
                     }
-                    Image(systemName: current.isBot ? "person.crop.circle" : "ellipsis")
+                    Image(systemName: current.isBot ? "gearshape" : "ellipsis")
                         .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(Color.secondary)
                 }
@@ -497,7 +497,7 @@ struct ChatView: View {
             }
             .buttonStyle(.plain)
             .glassCapsule()
-            .accessibilityLabel(current.isBot ? "Open \(current.name) profile" : "Open \(current.name) chat options")
+            .accessibilityLabel(current.isBot ? "Open \(current.name) settings" : "Open \(current.name) chat options")
         }
         .padding(.top, -4)
     }
@@ -590,6 +590,10 @@ struct ChatView: View {
                 id: "tasks", systemImage: "square.stack", title: "Tasks",
                 subtitle: "Switch, rename or remove one"
             ) { showingTasks = true })
+            out.append(PlusAction(
+                id: "settings", systemImage: "gearshape", title: "Bot settings",
+                subtitle: "Model, profile, voice and notifications"
+            ) { showingProfile = true })
             out.append(PlusAction(
                 id: "computer", systemImage: "display", title: "Watch computer",
                 subtitle: "Live view of what \(bot.name) is doing"

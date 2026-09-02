@@ -3,9 +3,9 @@ import CompanionCore
 import PhotosUI
 import SwiftUI
 
-/// The paired-safe subset of an agent profile. Shared provider keys remain on
-/// the computer; the phone sees only configured/not-configured status and the
-/// renderer-neutral voice/avatar operations.
+/// The paired-safe subset of bot settings. Shared provider keys remain on the
+/// computer; the phone sees only the model catalog, configured/not-configured
+/// status, and renderer-neutral profile operations.
 struct AgentProfileView: View {
     let bot: Bot
 
@@ -22,6 +22,12 @@ struct AgentProfileView: View {
     @State private var prompt = ""
     @State private var voices: [Voice] = []
     @State private var config: ConfigStatus?
+    @State private var instances: [Instance] = []
+    @State private var modelsLoaded = false
+    @State private var selectedInstanceID: String
+    @State private var selectedModelID: String
+    @State private var selectedEffort: String?
+    @State private var savedModel: ModelSelection
     @State private var busy = false
     @State private var player: AVAudioPlayer?
     @State private var baseline: ProfileFormSnapshot
@@ -35,6 +41,10 @@ struct AgentProfileView: View {
         _crop = State(initialValue: bot.avatarCrop ?? .mascot)
         _voice = State(initialValue: bot.voice ?? "")
         _speakReplies = State(initialValue: bot.speakReplies == true)
+        _selectedInstanceID = State(initialValue: bot.modelSelection.instanceId)
+        _selectedModelID = State(initialValue: bot.modelSelection.model)
+        _selectedEffort = State(initialValue: bot.modelSelection.effort)
+        _savedModel = State(initialValue: bot.modelSelection)
         _baseline = State(initialValue: ProfileFormSnapshot(bot: bot))
     }
 
@@ -43,6 +53,56 @@ struct AgentProfileView: View {
     private var voiceConfigured: Bool { config?.isTTSConfigured == true }
     private var hasWorkspaceDefaultVoice: Bool { config?.hasWorkspaceDefaultVoice == true }
     private var selectedVoiceCanSpeak: Bool { config?.canSpeak(agentVoice: voice) == true }
+    private var selectedInstance: Instance? {
+        instances.first { $0.instanceId == selectedInstanceID }
+    }
+    private var availableInstances: [Instance] { instances.filter(\.snapshot.isAvailable) }
+    private var instanceChoices: [Instance] {
+        guard let currentInstance = instances.first(where: { $0.instanceId == savedModel.instanceId }),
+              !currentInstance.snapshot.isAvailable
+        else { return availableInstances }
+        return [currentInstance] + availableInstances
+    }
+    private var selectedModelChoices: [ModelChoice] {
+        guard let instance = selectedInstance else {
+            return selectedModelID.isEmpty ? [] : [ModelChoice(id: selectedModelID, label: selectedModelID)]
+        }
+        var seen = Set<String>()
+        var choices: [ModelChoice] = []
+        let defaultOption = instance.models.options.first { $0.id == instance.models.default }
+        if !instance.models.default.isEmpty {
+            seen.insert(instance.models.default)
+            choices.append(ModelChoice(
+                id: instance.models.default,
+                label: defaultOption?.label ?? instance.models.default
+            ))
+        }
+        for option in instance.models.options where seen.insert(option.id).inserted {
+            choices.append(ModelChoice(id: option.id, label: option.label))
+        }
+        if !selectedModelID.isEmpty, seen.insert(selectedModelID).inserted {
+            choices.append(ModelChoice(id: selectedModelID, label: selectedModelID))
+        }
+        return choices
+    }
+    private var effortLevels: [String] {
+        var seen = Set<String>()
+        return (selectedInstance?.capabilities?.effortLevels ?? []).filter {
+            !$0.isEmpty && seen.insert($0).inserted
+        }
+    }
+    private var modelDraft: ModelSelection {
+        ModelSelection(instanceId: selectedInstanceID, model: selectedModelID, effort: selectedEffort)
+    }
+    private var canApplyModel: Bool {
+        guard modelsLoaded, current.busy != true,
+              let selectedInstance, selectedInstance.snapshot.isAvailable
+        else { return false }
+        let modelIsOffered = selectedModelID == selectedInstance.models.default
+            || selectedInstance.models.options.contains { $0.id == selectedModelID }
+        let effortIsOffered = selectedEffort.map(effortLevels.contains) ?? true
+        return modelIsOffered && effortIsOffered && modelDraft != savedModel
+    }
     /// Which engine's words to use. An unloaded status is ElevenLabs for the
     /// same reason a missing `provider` is: that is the server's own fallback,
     /// and the copy that shipped.
@@ -51,6 +111,70 @@ struct AgentProfileView: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    if !modelsLoaded {
+                        HStack {
+                            Text("Loading models")
+                            Spacer()
+                            ProgressView()
+                        }
+                    } else if instanceChoices.isEmpty {
+                        Label("No model providers are available", systemImage: "exclamationmark.triangle")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Picker("Provider", selection: $selectedInstanceID) {
+                            if !instances.contains(where: { $0.instanceId == selectedInstanceID }) {
+                                Text("Current provider (unavailable)")
+                                    .tag(selectedInstanceID)
+                                    .disabled(true)
+                            }
+                            ForEach(instanceChoices) { instance in
+                                Text(instanceLabel(instance))
+                                    .tag(instance.instanceId)
+                                    .disabled(!instance.snapshot.isAvailable)
+                            }
+                        }
+                        .onChange(of: selectedInstanceID) { _, instanceID in
+                            selectDefaults(for: instanceID)
+                        }
+
+                        Picker("Model", selection: $selectedModelID) {
+                            ForEach(selectedModelChoices) { option in
+                                Text(option.label).tag(option.id)
+                            }
+                        }
+                        .disabled(selectedInstance?.snapshot.isAvailable != true)
+
+                        if !effortLevels.isEmpty {
+                            Picker("Reasoning effort", selection: $selectedEffort) {
+                                Text("Default").tag(String?.none)
+                                ForEach(effortLevels, id: \.self) { level in
+                                    Text(effortLabel(level)).tag(Optional(level))
+                                }
+                            }
+                        }
+
+                        if current.busy == true {
+                            Label("Stop this bot before changing its model.", systemImage: "hourglass")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        } else if selectedInstance?.snapshot.isAvailable != true {
+                            Label("Choose an available provider to change this bot's model.", systemImage: "info.circle")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Button("Apply model", systemImage: "checkmark") {
+                            Task { await saveModel() }
+                        }
+                        .disabled(busy || !canApplyModel)
+                    }
+                } header: {
+                    Text("Model")
+                } footer: {
+                    Text("Provider accounts and API keys stay on your computer. Default sends no reasoning level and lets the provider decide.")
+                }
+
                 Section {
                     HStack {
                         Spacer()
@@ -171,11 +295,11 @@ struct AgentProfileView: View {
                 }
 
                 Section {
-                    Button("Save profile") { Task { await save() } }
+                    Button("Save profile changes") { Task { await save() } }
                         .disabled(busy || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
-            .navigationTitle("Agent profile")
+            .navigationTitle("Bot settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
@@ -184,9 +308,12 @@ struct AgentProfileView: View {
             .task {
                 async let status = session.configStatus()
                 async let options = session.voiceOptions()
-                let loadedConfig = await status
+                async let catalog = session.modelInstances()
+                let (loadedConfig, loadedVoices, loadedInstances) = await (status, options, catalog)
                 config = loadedConfig
-                voices = await options
+                voices = loadedVoices
+                instances = loadedInstances
+                modelsLoaded = true
                 if let loadedConfig, !loadedConfig.canSpeak(agentVoice: voice) {
                     speakReplies = false
                 }
@@ -222,6 +349,43 @@ struct AgentProfileView: View {
             synchronizeForm(with: updated)
         }
         busy = false
+    }
+
+    private func saveModel() async {
+        guard canApplyModel else { return }
+        busy = true
+        defer { busy = false }
+        if let updated = await session.updateModel(modelDraft, for: current) {
+            selectedInstanceID = updated.modelSelection.instanceId
+            selectedModelID = updated.modelSelection.model
+            selectedEffort = updated.modelSelection.effort
+            savedModel = updated.modelSelection
+        }
+    }
+
+    private func selectDefaults(for instanceID: String) {
+        guard let instance = instances.first(where: { $0.instanceId == instanceID }) else { return }
+        if instanceID == savedModel.instanceId {
+            selectedModelID = savedModel.model
+            let supported = instance.capabilities?.effortLevels ?? []
+            selectedEffort = savedModel.effort.flatMap { supported.contains($0) ? $0 : nil }
+        } else {
+            selectedModelID = instance.models.default
+            selectedEffort = nil
+        }
+    }
+
+    private func instanceLabel(_ instance: Instance) -> String {
+        let base = instance.displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = base.flatMap { $0.isEmpty ? nil : $0 } ?? instance.instanceId
+        return instance.snapshot.isAvailable ? name : "\(name) (Unavailable)"
+    }
+
+    private func effortLabel(_ effort: String) -> String {
+        switch effort.lowercased() {
+        case "xhigh": "X-High"
+        default: effort.capitalized
+        }
     }
 
     private func clearImage() async {
@@ -349,6 +513,11 @@ struct AgentProfileView: View {
         speakReplies = bot.speakReplies == true
         baseline = ProfileFormSnapshot(bot: bot)
     }
+}
+
+private struct ModelChoice: Identifiable {
+    let id: String
+    let label: String
 }
 
 private struct ProfileFormSnapshot {
