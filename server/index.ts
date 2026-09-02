@@ -473,6 +473,16 @@ function generatedImageTurnKey(threadId: string, turnId?: string): string {
   return `${threadId}:${turnId ?? "active"}`;
 }
 
+function purgeGeneratedImagesForThread(threadId: string): void {
+  for (const [key, attachments] of generatedImagesByTurn) {
+    if (!key.startsWith(`${threadId}:`)) continue;
+    generatedImagesByTurn.delete(key);
+    for (const attachment of attachments) {
+      try { unlinkSync(attachment.path); } catch {}
+    }
+  }
+}
+
 function markCancelledProviderHandshake(threadId: string, ownerId: string): void {
   pendingCancelledProviderHandshakes.mark(threadId, ownerId);
 }
@@ -7365,6 +7375,9 @@ const server = createServer(async (req, res) => {
         const directThreadId = directClaim?.threadId ?? bot.threadId;
         await registry.get(bot.modelSelection.instanceId)?.adapter.interruptTurn(directThreadId).catch(() => {});
         closeOpenApprovals(directThreadId);
+        // Deletion removes the thread before a late turn.completed can fold
+        // staged provider images into a message, so dispose them here.
+        purgeGeneratedImagesForThread(directThreadId);
         stopScreenPoller(bot.id);
         activeVpsThreads.delete(bot.id);
         routines!.disableForBot(bot.id);

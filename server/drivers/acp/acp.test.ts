@@ -278,6 +278,27 @@ describe("ACP turns (fake CLI)", () => {
     expect(texts).toEqual(["before one", "before two", "after"]);
   });
 
+  it("normalizes a structured ACP image block without treating it as text", async () => {
+    await create(GeminiAgentDriver, "image");
+    await instance.adapter.sendTurn({ threadId: "t-image", text: "draw it" });
+    await recorder.until((event) => event.type === "turn.completed");
+
+    const image = recorder.events.find(
+      (event) => event.type === "item.completed" && event.itemType === "assistant_image",
+    );
+    expect(image).toMatchObject({
+      type: "item.completed",
+      itemType: "assistant_image",
+      alt: "Generated image",
+    });
+    expect(image && "data" in image ? image.data : "").toMatch(/^iVBOR/);
+    expect(
+      recorder.events.some(
+        (event) => event.type === "item.completed" && event.itemType === "assistant_text",
+      ),
+    ).toBe(false);
+  });
+
   it("reads token usage from the root of the prompt result", async () => {
     process.env.FAKE_ACP_USAGE_ROOT = "1";
     await create();
