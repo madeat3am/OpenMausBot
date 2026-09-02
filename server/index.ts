@@ -272,14 +272,6 @@ const WEBHOOK_PORT = Number(process.env.OMB_WEBHOOK_PORT || PORT + 1);
 // Behind a proxy or tunnel, the base URL senders should use (docs/self-hosting.md).
 const WEBHOOK_PUBLIC_URL = process.env.OMB_WEBHOOK_PUBLIC_URL || undefined;
 const STATIC_DIR = process.env.OMB_STATIC_DIR || null;
-// Remote clients (server/request-auth.ts, server/sessions.ts): a stable identity
-// for this server, the paired sessions, and the cookie the served UI uses.
-const ENVIRONMENT_ID = loadEnvironmentId(DATA_DIR);
-const sessions = new SessionRegistry({ file: join(DATA_DIR, "sessions.json") });
-const SESSION_COOKIE = sessionCookieName(PORT, ENVIRONMENT_ID);
-const DESKTOP_MANAGED = process.env.OMB_DESKTOP_PARENT === "1";
-// Where remote clients reach this server (a proxy's public address); pairing URLs use it.
-const PUBLIC_URL = process.env.OMB_PUBLIC_URL?.trim().replace(/\/+$/, "") || null;
 const MIME: Record<string, string> = {
   ".html": "text/html",
   ".js": "text/javascript",
@@ -292,6 +284,16 @@ const MIME: Record<string, string> = {
 };
 
 ensureDirs();
+// Only after ensureDirs(): it performs the one-time rename of the legacy data
+// dir, which must not find a freshly created ~/.openmausbot already there.
+// Remote clients (server/request-auth.ts, server/sessions.ts): a stable identity
+// for this server, the paired sessions, and the cookie the served UI uses.
+const ENVIRONMENT_ID = loadEnvironmentId(DATA_DIR);
+const sessions = new SessionRegistry({ file: join(DATA_DIR, "sessions.json") });
+const SESSION_COOKIE = sessionCookieName(PORT, ENVIRONMENT_ID);
+const DESKTOP_MANAGED = process.env.OMB_DESKTOP_PARENT === "1";
+// Where remote clients reach this server (a proxy's public address); pairing URLs use it.
+const PUBLIC_URL = process.env.OMB_PUBLIC_URL?.trim().replace(/\/+$/, "") || null;
 const cfg = loadConfig();
 const registry = new ProviderRegistry(BUILT_IN_DRIVERS);
 await registry.load(instanceConfigs(cfg));
