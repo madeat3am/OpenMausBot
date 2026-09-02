@@ -41,10 +41,11 @@ describe("message-linked files", () => {
     })[0]).toBe("/current/project");
   });
 
-  it("matches the decoded path iOS sends to its encoded Markdown href", () => {
-    const encoded = "file:///Users/milind/Project/release%20notes.md";
-    expect(messageReferencesFile(`[Open the notes](${encoded})`, "/Users/milind/Project/release notes.md"))
-      .toBe(true);
+  it("matches Unix, Windows, and UNC links independently of the server OS", () => {
+    expect(messageReferencesFile(
+      "[Open the notes](file:///Users/milind/Project/release%20notes.md)",
+      "/Users/milind/Project/release notes.md",
+    )).toBe(true);
     expect(messageReferencesFile(
       "I created /Users/milind/Project/release notes.md for you.",
       "/Users/milind/Project/release notes.md",
@@ -55,8 +56,12 @@ describe("message-linked files", () => {
       "C:\\Users\\Maus\\report.md",
     )).toBe(true);
     expect(messageReferencesFile(
+      "[Open it](file:///C:/Users/Maus/release%20notes.md)",
+      "C:\\Users\\Maus\\release notes.md",
+    )).toBe(true);
+    expect(messageReferencesFile(
       "[Open it](file://server/share/phone%20report.md)",
-      "//server/share/phone report.md",
+      "\\\\server\\share\\phone report.md",
     )).toBe(true);
     expect(messageReferencesFile(
       "[Open A&amp;B](docs/A&amp;B.md \"download\")",
@@ -64,6 +69,17 @@ describe("message-linked files", () => {
     )).toBe(true);
     expect(messageReferencesFile("<file:///Users/milind/report.md>", "/Users/milind/report.md"))
       .toBe(true);
+
+    // Equivalent separators and dot segments are normalised within a path
+    // flavour, but distinct path flavours and casing remain distinct.
+    expect(messageReferencesFile(
+      "[Open it](C:/Users/Maus/drafts/../report.md)",
+      "C:\\Users\\Maus\\report.md",
+    )).toBe(true);
+    expect(messageReferencesFile("[Open it](/C:/Users/Maus/report.md)", "C:/Users/Maus/report.md"))
+      .toBe(false);
+    expect(messageReferencesFile("[Open it](C:/Users/Maus/report.md)", "c:/users/maus/report.md"))
+      .toBe(false);
   });
 
   it("resolves only definitions used by rendered reference links", () => {

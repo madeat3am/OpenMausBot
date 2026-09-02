@@ -4,7 +4,7 @@
 // message, and this helper keeps the eventual file handle inside one of them.
 import { constants } from "node:fs";
 import { open, realpath, stat, type FileHandle } from "node:fs/promises";
-import { basename, extname, isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, extname, isAbsolute, posix, relative, resolve, sep, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { fromMarkdown } from "mdast-util-from-markdown";
@@ -37,7 +37,7 @@ function statusError(status: number, message: string): Error & { status: number 
   return Object.assign(new Error(message), { status });
 }
 
-function referencedPath(href: string): string {
+function referencedPath(href: string, portableFileURL = false): string {
   if (!href || Buffer.byteLength(href) > 8_192 || href.includes("\0")) {
     throw statusError(400, "path must be a non-empty file link");
   }
@@ -64,8 +64,19 @@ function referencedPath(href: string): string {
         throw statusError(400, "path must be a valid file link");
       }
     }
+    if (!portableFileURL) {
+      try {
+        return fileURLToPath(url);
+      } catch {
+        throw statusError(400, "path must be a valid file link");
+      }
+    }
     try {
-      return fileURLToPath(url);
+      const decoded = decodeURIComponent(url.pathname);
+      // WHATWG file URLs always spell drive paths as /C:/..., even when the
+      // URL is parsed on macOS or Linux. Strip only that drive sentinel; an
+      // ordinary /Users/... URL must remain a POSIX path on every host.
+      return /^\/[a-z]:[\\/]/i.test(decoded) ? decoded.slice(1) : decoded;
     } catch {
       throw statusError(400, "path must be a valid file link");
     }
@@ -79,6 +90,23 @@ function referencedPath(href: string): string {
   } catch {
     throw statusError(400, "path must be a valid file link");
   }
+}
+
+/**
+ * A lexical path identity used only for matching a requested file against a
+ * rendered Markdown link. Native `resolve` and `fileURLToPath` follow the
+ * runner OS, which makes a Unix link compare differently on Windows CI and a
+ * Windows link compare differently on macOS. Keeping the path flavour in the
+ * identity also prevents a POSIX path such as `/C:/notes.md` from being
+ * mistaken for the Windows path `C:\\notes.md`.
+ */
+function referencedPathIdentity(href: string): string {
+  const path = referencedPath(href, true);
+  if (/^[a-z]:[\\/]/i.test(path) || path.startsWith("\\\\") || path.startsWith("//")) {
+    return `windows:${win32.resolve(path)}`;
+  }
+  if (path.startsWith("/")) return `posix:${posix.resolve(path)}`;
+  return `relative:${posix.normalize(path)}`;
 }
 
 type MarkdownNode = {
@@ -132,14 +160,14 @@ function renderedMarkdownTargets(markdown: string): string[] {
 export function messageReferencesFile(text: string, requested: string): boolean {
   let wanted: string;
   try {
-    wanted = resolve(referencedPath(requested));
+    wanted = referencedPathIdentity(requested);
   } catch {
     return false;
   }
 
   for (const target of renderedMarkdownTargets(text)) {
     try {
-      if (resolve(referencedPath(target)) === wanted) return true;
+      if (referencedPathIdentity(target) === wanted) return true;
     } catch {
       // A malformed candidate is not the link the client asked to open.
     }
