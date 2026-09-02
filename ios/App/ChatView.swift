@@ -28,6 +28,7 @@ struct ChatView: View {
     @State private var showingComputer = false
     @State private var showingPlus = false
     @State private var showingProfile = false
+    @State private var showingCall = false
     @State private var showCommandHUD = false
     /// Set by a hardware shift-Return just before the newline lands, so the
     /// typed-Return detector lets that one through instead of sending.
@@ -365,6 +366,12 @@ struct ChatView: View {
         .onChange(of: showingProfile) { _, shown in
             if shown { dictation.stop() }
         }
+        .onChange(of: showingCall) { _, shown in
+            if shown { dictation.stop() }
+        }
+        .fullScreenCover(isPresented: $showingCall) {
+            if case let .bot(bot) = current { CallView(bot: bot) }
+        }
         .onChange(of: showingPlus) { _, shown in
             if shown { dictation.stop() }
         }
@@ -434,6 +441,10 @@ struct ChatView: View {
             Spacer(minLength: 4)
 
             if case .bot = current {
+                GlassButton(systemImage: "phone.fill", size: 44, weight: .medium) {
+                    showingCall = true
+                }
+                .accessibilityLabel("Call \(current.name)")
                 GlassButton(systemImage: "display", size: 44, weight: .medium) {
                     showingComputer = true
                 }

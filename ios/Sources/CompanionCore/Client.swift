@@ -443,6 +443,11 @@ private struct FileUploadResponse: Decodable {
 }
 
 /// A bot-created file fetched from the Mac for viewing on the phone.
+public struct PreparedSpeech: Decodable, Sendable {
+    public var ready: Bool
+    public var utterances: [String]
+}
+
 public struct FetchedFile: Sendable {
     public let data: Data
     public let name: String
@@ -1069,13 +1074,45 @@ public struct CompanionClient: Sendable {
     }
 
     public func previewVoice(text: String, voiceId: String) async throws -> Data {
-        let request = try makeRequest(
-            "POST", "/api/tts/speak",
-            body: ["text": String(text.prefix(500)), "voiceId": voiceId]
-        )
+        try await speak(text: text, voiceId: voiceId)
+    }
+
+    /// One utterance, synthesized on the paired computer. The server caps
+    /// this at 500 characters; `prepareSpeech` splits a reply into pieces
+    /// that fit.
+    public func speak(text: String, voiceId: String?) async throws -> Data {
+        var body: [String: Any] = ["text": String(text.prefix(500))]
+        if let voiceId, !voiceId.isEmpty { body["voiceId"] = voiceId }
+        let request = try makeRequest("POST", "/api/tts/speak", body: body)
         let (data, response) = try await perform(request)
         try Self.check(response, data)
         return data
+    }
+
+    /// Split a reply into utterances the way the desktop does — on the
+    /// server, next to the transform that shapes replies — and learn
+    /// whether the computer can voice them at all.
+    public func prepareSpeech(text: String, voiceId: String?) async throws -> PreparedSpeech {
+        var body: [String: Any] = ["text": text]
+        if let voiceId, !voiceId.isEmpty { body["voiceId"] = voiceId }
+        return try await send(try makeRequest("POST", "/api/tts/prepare", body: body), as: PreparedSpeech.self)
+    }
+
+    /// Store (or, with an empty string, remove) the workspace's ElevenLabs
+    /// key. The server checks a non-empty key against the provider before
+    /// saving it and answers 400 with the reason if it is rejected; the
+    /// key itself never comes back in any response.
+    public func updateVoiceKey(_ key: String) async throws {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.utf8.count <= 512, !trimmed.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+            throw APIError.transport("That doesn't look like an API key.")
+        }
+        try await send(try makeRequest("PUT", "/api/config", body: ["tts": ["key": trimmed]]))
+    }
+
+    /// Pick the voice engine: "elevenlabs" or "system".
+    public func updateVoiceProvider(_ provider: String) async throws {
+        try await send(try makeRequest("PUT", "/api/config", body: ["tts": ["provider": provider]]))
     }
 
     public func createRoutine(_ input: RoutineInput) async throws -> Routine {
