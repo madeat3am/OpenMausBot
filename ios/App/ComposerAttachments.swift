@@ -7,6 +7,7 @@
 // copied file by file with its structure kept, and the copies are uploaded
 // when the message is sent. The chips above the composer are these copies.
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 
 struct PendingAttachment: Identifiable, Hashable {
@@ -94,6 +95,68 @@ enum AttachmentIntake {
                 url: destination, bytes: bytes, mime: mime, fileCount: 1
             )
         }
+    }
+
+    /// The server's ceiling for an image, and the four formats it accepts.
+    static let imageLimitBytes = 10 * 1_024 * 1_024
+
+    /// A picture from the photo library: a screenshot, a camera shot, a
+    /// saved image. What arrives is whatever the library holds, and a
+    /// camera shot is usually HEIC, which the Mac side does not take — so
+    /// anything that is not one of its four formats is re-encoded as JPEG,
+    /// and anything over the ceiling is scaled down until it fits. A
+    /// screenshot is PNG and small, and passes through untouched.
+    static func takeImage(_ data: Data, ordinal: Int) throws -> PendingAttachment {
+        let sniffed = sniffImageMime(data)
+        var bytes = data
+        var mime = sniffed ?? ""
+        if sniffed == nil || data.count > imageLimitBytes {
+            guard let image = UIImage(data: data) else { throw IntakeError.unreadable("Photo \(ordinal)") }
+            bytes = try jpegWithinLimit(image, ordinal: ordinal)
+            mime = "image/jpeg"
+        }
+        let ext = ["image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp"][mime] ?? "jpg"
+        let name = "Photo \(ordinal).\(ext)"
+        let id = UUID()
+        let destination = try inbox(for: id).appendingPathComponent(name)
+        try bytes.write(to: destination, options: .atomic)
+        return PendingAttachment(
+            id: id, kind: .image, name: name, url: destination,
+            bytes: bytes.count, mime: mime, fileCount: 1
+        )
+    }
+
+    private static func jpegWithinLimit(_ image: UIImage, ordinal: Int) throws -> Data {
+        var current = image
+        for _ in 0..<6 {
+            if let jpeg = current.jpegData(compressionQuality: 0.85), jpeg.count <= imageLimitBytes {
+                return jpeg
+            }
+            // halve the pixel count each time; six halvings takes a 100 MP
+            // shot under 2 MP, which is always under the ceiling
+            let scale = 1 / 2.0.squareRoot()
+            let size = CGSize(width: current.size.width * scale, height: current.size.height * scale)
+            let renderer = UIGraphicsImageRenderer(size: size, format: {
+                let format = UIGraphicsImageRendererFormat.default()
+                format.scale = 1
+                return format
+            }())
+            current = renderer.image { _ in current.draw(in: CGRect(origin: .zero, size: size)) }
+        }
+        throw IntakeError.tooLarge("Photo \(ordinal)", imageLimitBytes / 1_048_576)
+    }
+
+    /// The format by its first bytes, for the four the server accepts.
+    /// The library's own type claim is not consulted: an edited screenshot
+    /// can carry a type that no longer matches its bytes.
+    private static func sniffImageMime(_ data: Data) -> String? {
+        guard data.count >= 12 else { return nil }
+        let head = [UInt8](data.prefix(12))
+        if head.starts(with: [0x89, 0x50, 0x4E, 0x47]) { return "image/png" }
+        if head.starts(with: [0xFF, 0xD8, 0xFF]) { return "image/jpeg" }
+        if head.starts(with: [0x47, 0x49, 0x46, 0x38]) { return "image/gif" }
+        if head.starts(with: [0x52, 0x49, 0x46, 0x46]), Array(head[8..<12]) == [0x57, 0x45, 0x42, 0x50] { return "image/webp" }
+        return nil
     }
 
     /// A folder from the document picker, copied with its structure. Hidden

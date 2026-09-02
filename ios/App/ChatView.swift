@@ -6,6 +6,7 @@
 // did that and having two folds is how two clients start disagreeing.
 import SwiftUI
 import CompanionCore
+import PhotosUI
 // Unconditional, because the uses below are: `Color(uiColor:)` and
 // `UIImage(data:)` are reached on every path through this file. A
 // `canImport` guard around the import alone does not make the file portable
@@ -37,6 +38,10 @@ struct ChatView: View {
     @State private var pendingAttachments: [PendingAttachment] = []
     @State private var showingFilePicker = false
     @State private var showingFolderPicker = false
+    @State private var showingPhotoPicker = false
+    /// The photo library's selection; drained into `pendingAttachments`
+    /// as each item's bytes arrive, then cleared for the next pick.
+    @State private var pickedPhotos: [PhotosPickerItem] = []
     /// A line above the composer: upload progress, or why the last send
     /// did not happen. Cleared on the next successful send.
     @State private var composerNotice: ComposerNotice?
@@ -314,6 +319,17 @@ struct ChatView: View {
                 try result.get().map { try AttachmentIntake.takeFolder($0) }
             }
         }
+        .photosPicker(
+            isPresented: $showingPhotoPicker,
+            selection: $pickedPhotos,
+            maxSelectionCount: 10,
+            matching: .images
+        )
+        .onChange(of: pickedPhotos) { _, items in
+            guard !items.isEmpty else { return }
+            pickedPhotos = []
+            Task { await attachPhotos(items) }
+        }
         .toolbar(.hidden, for: .navigationBar)
         .navigationBarBackButtonHidden(true)
         .navigationDestination(isPresented: $showingComputer) {
@@ -356,6 +372,9 @@ struct ChatView: View {
             if shown { dictation.stop() }
         }
         .onChange(of: showingFolderPicker) { _, shown in
+            if shown { dictation.stop() }
+        }
+        .onChange(of: showingPhotoPicker) { _, shown in
             if shown { dictation.stop() }
         }
         .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.interruptionNotification)) { note in
@@ -593,6 +612,10 @@ struct ChatView: View {
             ) { showingTasks = true })
         }
         out.append(PlusAction(
+            id: "attach-photos", systemImage: "photo.badge.plus", title: "Add photos",
+            subtitle: "Screenshots and pictures from your library"
+        ) { showingPhotoPicker = true })
+        out.append(PlusAction(
             id: "attach-files", systemImage: "doc.badge.plus", title: "Attach files",
             subtitle: "Documents and photos from this phone"
         ) { showingFilePicker = true })
@@ -660,6 +683,28 @@ struct ChatView: View {
             if case .error = composerNotice { composerNotice = nil }
         } catch {
             composerNotice = .error(error.localizedDescription)
+        }
+    }
+
+    /// Photos arrive one at a time as the library hands over their bytes.
+    /// Each lands as its own chip; one that cannot be read says so and
+    /// does not stop the rest.
+    private func attachPhotos(_ items: [PhotosPickerItem]) async {
+        let start = pendingAttachments.filter { $0.kind == .image }.count
+        for (offset, item) in items.enumerated() {
+            let ordinal = start + offset + 1
+            do {
+                guard let data = try await item.loadTransferable(type: Data.self) else {
+                    throw AttachmentIntake.IntakeError.unreadable("Photo \(ordinal)")
+                }
+                let attachment = try await Task.detached(priority: .userInitiated) {
+                    try AttachmentIntake.takeImage(data, ordinal: ordinal)
+                }.value
+                pendingAttachments.append(attachment)
+                if case .error = composerNotice { composerNotice = nil }
+            } catch {
+                composerNotice = .error(error.localizedDescription)
+            }
         }
     }
 
