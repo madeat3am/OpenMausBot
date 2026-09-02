@@ -32,6 +32,11 @@ on:
         required: false
         type: boolean
         default: false
+  push:
+    branches:
+      - main
+    paths:
+      - package.json
 
 permissions:
   contents: read
@@ -44,16 +49,31 @@ jobs:
     outputs:
       sha: ${{ steps.pin.outputs.sha }}
       version: ${{ steps.pin.outputs.version }}
+      should_release: ${{ steps.pin.outputs.should_release }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.ref || github.ref }}
+          ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
+          fetch-depth: 2
       - id: pin
+        env:
+          BEFORE: ${{ github.event.before }}
         run: |
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+          current=$(node -p "require('./package.json').version")
+          echo "version=$current" >> "$GITHUB_OUTPUT"
+          should_release=true
+          if [ "$GITHUB_EVENT_NAME" = push ] && git cat-file -e "$BEFORE:package.json" 2>/dev/null; then
+            previous=$(git show "$BEFORE:package.json" | node -e 'let s=""; process.stdin.on("data", d => s += d).on("end", () => console.log(JSON.parse(s).version))')
+            if [ "$previous" = "$current" ]; then
+              echo "package.json changed without a version bump; skipping the release"
+              should_release=false
+            fi
+          fi
+          echo "should_release=$should_release" >> "$GITHUB_OUTPUT"
       - name: Refuse to overwrite a published canonical release
+        if: steps.pin.outputs.should_release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -63,6 +83,7 @@ jobs:
             exit 1
           fi
       - name: Refuse to overwrite a published legacy mirror
+        if: steps.pin.outputs.should_release == 'true'
         env:
           GH_TOKEN: ${{ secrets.RELEASES_PAT }}
         run: |
@@ -76,6 +97,7 @@ jobs:
   mac:
     name: macOS arm64 + x64 (sign, notarize, staple)
     needs: prepare
+    if: needs.prepare.outputs.should_release == 'true'
     runs-on: macos-14
     timeout-minutes: 90
     steps:
@@ -229,6 +251,7 @@ jobs:
   windows:
     name: Windows x64
     needs: prepare
+    if: needs.prepare.outputs.should_release == 'true'
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -295,6 +318,7 @@ jobs:
   linux:
     name: Ubuntu 24.04 x64
     needs: prepare
+    if: needs.prepare.outputs.should_release == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
@@ -375,6 +399,7 @@ jobs:
   assemble:
     name: Assemble the draft and verify every feed
     needs: [prepare, mac, windows, linux]
+    if: needs.prepare.outputs.should_release == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     concurrency:
