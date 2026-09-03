@@ -181,7 +181,7 @@ posixOnly("unattended turns keep asking", () => {
 
       // Settle the webhook card, then schedule trusted work on the same bot.
       // The routine must clear the webhook's in-memory unattended mark rather
-      // than inheriting it for the next six hours.
+      // than inheriting it for the next 30 minutes.
       expect((await api("POST", `/api/bots/${bot.id}/respond`, {
         requestId: card.card.requestId,
         behavior: "deny",

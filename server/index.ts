@@ -2912,7 +2912,7 @@ async function startTurn(
   if (opts?.automationSource === "webhook" || opts?.unattended) markUnattended(bot.id);
   // Manual and scheduled routines are definitions the operator created and
   // enabled. They must not inherit a stale webhook mark from an earlier run
-  // on the same bot, or Auto would behave differently for up to six hours.
+  // on the same bot, or Auto would behave differently for up to 30 minutes.
   else if (opts?.automationSource === "manual" || opts?.automationSource === "schedule") {
     clearUnattended(bot.id);
   }
