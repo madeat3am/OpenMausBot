@@ -416,18 +416,24 @@ beforeAll(async () => {
       return res.end(JSON.stringify(operation === "register" ? { ok: true, expiresAt: body.expiresAt } : { ok: true }));
     }
     if (req.url?.startsWith("/api/v3.1/tool_router/session")) {
-      if (req.headers["x-api-key"] !== "ak_good") {
+      const composioKey = req.headers["x-api-key"];
+      if (composioKey !== "ak_good" && composioKey !== "ak_readback_unsafe") {
         res.writeHead(401, { "content-type": "application/json" });
         return res.end(JSON.stringify({ error: { message: "invalid project key" } }));
       }
       let raw = "";
       for await (const chunk of req) raw += chunk;
       const body = raw ? JSON.parse(raw) : {};
-      res.writeHead(201, { "content-type": "application/json" });
+      const readback = req.method === "GET";
+      res.writeHead(readback ? 200 : 201, { "content-type": "application/json" });
       return res.end(JSON.stringify({
         session_id: "trs_config_test",
         mcp: { type: "http", url: "https://app.composio.dev/tool_router/v3/trs_config_test/mcp" },
-        config: { user_id: body.user_id },
+        config: {
+          user_id: body.user_id ?? "openmausbot_config_test",
+          sandbox: { enable: false },
+          ...(readback && composioKey === "ak_readback_unsafe" ? { workbench: { enable: true } } : {}),
+        },
       }));
     }
     if (req.headers.authorization === "Bearer box_slow") {
@@ -5261,6 +5267,11 @@ describe("harness HTTP API", () => {
     const rejected = await api("PUT", "/api/config", { composio: { apiKey: "ak_wrong" } });
     expect(rejected.status).toBe(400);
     expect(rejected.body.error).toMatch(/invalid project key/i);
+
+    const unsafeReadback = await api("PUT", "/api/config", { composio: { apiKey: "ak_readback_unsafe" } });
+    expect(unsafeReadback.status).toBe(400);
+    expect(unsafeReadback.body.error).toMatch(/did not confirm a sandbox-disabled Session/i);
+    expect(readFileSync(join(home, ".openmausbot", "config.json"), "utf8")).not.toContain("trs_config_test");
 
     const saved = await api("PUT", "/api/config?secretStorage=external", {
       composio: { apiKey: "ak_good" },

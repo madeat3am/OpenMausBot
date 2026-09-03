@@ -45,7 +45,10 @@ docker compose pull omb && docker compose up -d
 
 That uses the image CI publishes on every `main` push
 (`ghcr.io/milind-soni/openmausbot`, tagged `latest`, `sha-…` and `v…`).
-To build from your checkout instead: `docker compose up -d --build`.
+To build from your checkout instead, set `OMB_APP_VERSION` to the package
+version and `OMB_APP_REVISION` to the full checked-out Git revision in `.env`,
+then run `docker compose up -d --build`. Source builds fail closed when either
+immutable identity value is missing; pulled release images already carry both.
 
 Then sign the engine CLIs in **inside the container** (their logins live on
 the `data` volume, so they survive restarts and image upgrades) and mint a
@@ -67,7 +70,10 @@ What the stack does, so you can adapt it:
 - [`Dockerfile`](../Dockerfile) builds the UI and the self-contained
   server bundle, and runs them as an unprivileged user with `HOME=/data`.
   `--build-arg ENGINES="…"` (or `ENGINES=` in `.env`) bakes engine CLIs
-  into the image.
+  into the image. `SYSTEM_PACKAGES=` adds OS packages needed by mounted local
+  stdio MCP commands (for example, `python3` for a Python MCP script). Source
+  builds also require the exact version and full Git revision through
+  `OMB_APP_VERSION` and `OMB_APP_REVISION`.
 - [`deploy/docker-compose.yml`](../deploy/docker-compose.yml) runs Caddy
   **in the server's network namespace**, so Caddy reaches the server on
   `127.0.0.1` and the server never binds anything public.
@@ -79,6 +85,12 @@ What the stack does, so you can adapt it:
 Upgrade with `docker compose pull omb && docker compose up -d` (or
 `git pull && docker compose up -d --build`). State (chats, routines,
 engine logins, paired sessions) is on the `data` volume; back that up.
+
+If you migrate by copying that data directory or volume to another host,
+stop the old server before starting the copy. The stable environment identity
+is part of the data, so running both copies creates two authorities with the
+same identity. A desktop app may start its Local server as soon as it opens;
+leave it closed until its saved remote profile is ready.
 
 ## From source
 
@@ -159,9 +171,9 @@ event stream, because `EventSource` cannot set headers:
 `GET /api/events?ticket=…`.
 
 `GET /.well-known/openmausbot/environment` is public and tells a client what
-it is talking to: a stable `environmentId`, the label, the version and
-capabilities. Saved connections check the id so a reused address that now
-points at a different server is refused loudly.
+it is talking to: a stable `environmentId`, the label, the version, the
+immutable build revision, and capabilities. Saved connections check the id so
+a reused address that now points at a different server is refused loudly.
 
 An SSH tunnel still works, and is the right answer when the server has no
 address of its own:

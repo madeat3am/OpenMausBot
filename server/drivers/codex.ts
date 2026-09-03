@@ -36,6 +36,15 @@ export { decodeCodexSelection, readCodexModelCatalog, STATIC_CODEX_MODELS } from
 
 const DRIVER_KIND = "codex";
 
+// Exact Composio meta-tools that do not execute provider actions. Codex
+// prompts for every other connector tool through the existing app-server
+// approval request path.
+const QUIET_COMPOSIO_TOOLS = [
+  "COMPOSIO_SEARCH_TOOLS",
+  "COMPOSIO_GET_TOOL_SCHEMAS",
+  "COMPOSIO_WAIT_FOR_CONNECTIONS",
+] as const;
+
 export interface CodexConfig {
   cli: string;
   fullAuto: boolean;
@@ -148,6 +157,9 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
       let stopRequested = false;
       const { threadId } = turn;
       if (active.has(threadId)) throw new Error("a turn is already running on this thread");
+      if (turn.integrations?.composio && config.fullAuto) {
+        throw new Error("connected apps require interactive approval; disable fullAuto");
+      }
       const turnId = newId();
       // a retry relaunches the whole app-server; the backoff is scaled down in
       // tests so a fake's transient failures don't stall real seconds
@@ -157,7 +169,12 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
         const env = childEnv();
         const appServerArgs = ["app-server", ...codexLocalProviderArgs(env, turn.model)];
         if (turn.integrations?.composio) {
-          mountMcpServer(appServerArgs, env, "openmausbot_connectors", turn.integrations.composio);
+          mountMcpServer(appServerArgs, env, "openmausbot_connectors", turn.integrations.composio, false);
+          const prefix = "mcp_servers.openmausbot_connectors";
+          appServerArgs.push("-c", `${prefix}.default_tools_approval_mode="prompt"`);
+          for (const tool of QUIET_COMPOSIO_TOOLS) {
+            appServerArgs.push("-c", `${prefix}.tools.${tool}.approval_mode="approve"`);
+          }
         }
         if (turn.integrations?.agents) {
           mountMcpServer(appServerArgs, env, "agents", turn.integrations.agents);
@@ -280,9 +297,12 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
         const mcpTool = isMcpElicitation
           ? String(params.message ?? "").match(/tool \"([^\"]+)\"/)?.[1]
           : undefined;
+        const mcpServer = isMcpElicitation && typeof params.serverName === "string"
+          ? params.serverName
+          : undefined;
         const tool =
           isMcpElicitation
-            ? (mcpTool ?? "mcp")
+            ? (mcpServer ? `mcp__${mcpServer}__${mcpTool ?? "unknown"}` : (mcpTool ?? "mcp"))
             : method === "item/fileChange/requestApproval" || method === "applyPatchApproval"
             ? "edit"
             : isQuestion
@@ -530,10 +550,22 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
       child.on("close", (code) => {
         if (abandoned) return;
         if (!state.settled) {
+          if (stopRequested) {
+            settle(false, "interrupted");
+            return;
+          }
+          const actionableStderr = stderr
+            .split(/\r?\n/)
+            .filter((line) =>
+              !line.includes("Codex could not find bubblewrap on PATH.")
+              && !line.includes("Codex will use the bundled bubblewrap in the meantime."),
+            )
+            .join("\n")
+            .trim();
           emit({
             ...base(threadId, turnId),
             type: "runtime.error",
-            message: `codex exited ${code} before turn/completed${stderr ? `: ${stderr.trim().slice(-300)}` : ""}`,
+            message: `codex exited ${code} before turn/completed${actionableStderr ? `: ${actionableStderr.slice(-300)}` : ""}`,
           });
           settle(false, "exit_before_result");
         }

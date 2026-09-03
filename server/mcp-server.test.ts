@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   handleToolCall,
@@ -60,6 +63,9 @@ describe("MCP JSON-RPC protocol", () => {
     expect(names).toContain("create_bot");
     expect(names).toContain("create_channel");
     expect(names).toContain("wait_for_conversation");
+    expect(names).toContain("download_message_file");
+    expect(response.result.tools.find((tool: any) => tool.name === "download_message_file")?.annotations)
+      .toMatchObject({ readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false });
     expect(names).toContain("interrupt_conversation");
     expect(names).not.toContain("wait_for_bot");
     expect(names).not.toContain("interrupt_bot");
@@ -219,6 +225,94 @@ describe("MCP tool execution", () => {
     await expect(handleToolCall("send_channel_message", {
       channel_id: "channel-1", text: "Ship it",
     }, fetcher)).resolves.toMatchObject({ success: true, taskId: "channel-task" });
+  });
+
+  it("downloads an exact message-linked file without overwriting local data", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "omb-mcp-download-"));
+    try {
+      const outputPath = join(directory, "client-revisions.pdf");
+      const responseFetcher = vi.fn(async (path: string, options?: RequestInit) => {
+        expect(path).toBe("/api/threads/task-1/messages/message-1/file");
+        expect(JSON.parse(String(options?.body))).toEqual({ path: "/work/client revisions.pdf" });
+        return new Response("revision bytes", {
+          headers: { "content-length": "14", "content-type": "application/pdf" },
+        });
+      });
+      const result: any = await handleToolCall("download_message_file", {
+        task_id: "task-1",
+        message_id: "message-1",
+        path: "/work/client revisions.pdf",
+        output_path: outputPath,
+      }, vi.fn(), undefined, responseFetcher);
+
+      expect(await readFile(outputPath, "utf8")).toBe("revision bytes");
+      expect(result).toMatchObject({
+        success: true,
+        outputPath,
+        bytes: 14,
+        contentType: "application/pdf",
+        sha256: "7004b2e2ff599a006e6a125b07fa56332a3cc3e50a46fda3d6a108b67d9cc009",
+      });
+
+      await writeFile(join(directory, "existing.pdf"), "keep me");
+      await expect(handleToolCall("download_message_file", {
+        task_id: "task-1",
+        message_id: "message-1",
+        path: "/work/client revisions.pdf",
+        output_path: join(directory, "existing.pdf"),
+      }, vi.fn(), undefined, responseFetcher)).rejects.toMatchObject({ code: "EEXIST" });
+      expect(await readFile(join(directory, "existing.pdf"), "utf8")).toBe("keep me");
+      expect(await readdir(directory)).toEqual(["client-revisions.pdf", "existing.pdf"]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects malformed or oversized message file responses before writing", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "omb-mcp-download-"));
+    const outputPath = join(directory, "too-large.pdf");
+    try {
+      const oversizedCancel = vi.fn(async () => undefined);
+      const responseFetcher = vi.fn(async () => ({
+        headers: new Headers({ "content-length": String(25 * 1024 * 1024 + 1) }),
+        body: { cancel: oversizedCancel },
+      }) as unknown as Response);
+      await expect(handleToolCall("download_message_file", {
+        task_id: "task-1",
+        message_id: "message-1",
+        path: "/work/too-large.pdf",
+        output_path: outputPath,
+      }, vi.fn(), undefined, responseFetcher)).rejects.toThrow("exceeds");
+      expect(oversizedCancel).toHaveBeenCalledOnce();
+      await expect(readFile(outputPath)).rejects.toMatchObject({ code: "ENOENT" });
+
+      const missingLengthCancel = vi.fn(async () => undefined);
+      const missingLength = vi.fn(async () => ({
+        headers: new Headers(),
+        body: { cancel: missingLengthCancel },
+      }) as unknown as Response);
+      await expect(handleToolCall("download_message_file", {
+        task_id: "task-1",
+        message_id: "message-1",
+        path: "/work/unframed.pdf",
+        output_path: outputPath,
+      }, vi.fn(), undefined, missingLength)).rejects.toThrow("valid content length");
+      expect(missingLengthCancel).toHaveBeenCalledOnce();
+
+      const underestimated = vi.fn(async () => new Response("larger than promised", {
+        headers: { "content-length": "4" },
+      }));
+      await expect(handleToolCall("download_message_file", {
+        task_id: "task-1",
+        message_id: "message-1",
+        path: "/work/mismatch.pdf",
+        output_path: outputPath,
+      }, vi.fn(), undefined, underestimated)).rejects.toThrow("length mismatch");
+      await expect(readFile(outputPath)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(await readdir(directory)).toEqual([]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("creates a bot through the safe profile boundary", async () => {

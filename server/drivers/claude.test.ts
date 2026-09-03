@@ -146,6 +146,26 @@ describe("ClaudeDriver.decodeConfig", () => {
     await bypass.dispose();
   });
 
+  it("refuses connected apps when bypassPermissions would suppress approval cards", async () => {
+    const bypass = await ClaudeDriver.create({
+      instanceId: "claude-bypass-composio",
+      displayName: "Claude Bypass Composio",
+      environment: {},
+      enabled: true,
+      config: { cli: FAKE_CLI, permissionMode: "bypassPermissions" },
+    });
+    await expect(
+      bypass.adapter.sendTurn({
+        threadId: "t-bypass-composio",
+        text: "send mail",
+        integrations: {
+          composio: { command: process.execPath, args: ["/tmp/connector-proxy.js"], env: {} },
+        },
+      }),
+    ).rejects.toThrow(/connected apps require the interactive approval broker/);
+    await bypass.dispose();
+  });
+
   it("gives each collision test a distinct broker pipe path", () => {
     const paths = COLLISION_THREAD_IDS.map(permissionSocketPath);
     expect(new Set(paths).size).toBe(COLLISION_THREAD_IDS.length);
@@ -542,7 +562,7 @@ describe("ClaudeDriver turns (fake CLI)", () => {
   // the harness gates both the integration and the prompt hint on
   // capabilities.composioMcp, so the flag and the mount must agree — a bot
   // told about tools its driver never mounted burns the turn hunting
-  it("mounts the user's connected apps and claims the capability that gates them", async () => {
+  it("keeps Composio discovery quiet while provider execution requires approval", async () => {
     await create();
     const dump = join(scratch, "dump.json");
     process.env.FAKE_CLAUDE_DUMP = dump;
@@ -569,7 +589,13 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     });
     // the user's Composio key must not be readable via `ps`
     expect(JSON.stringify(seen.argv)).not.toContain("ak_test");
-    expect(seen.argv[seen.argv.indexOf("--allowedTools") + 1]).toContain("mcp__composio");
+    const allowed = seen.argv[seen.argv.indexOf("--allowedTools") + 1].split(",");
+    expect(allowed).toContain("mcp__composio__COMPOSIO_SEARCH_TOOLS");
+    expect(allowed).toContain("mcp__composio__COMPOSIO_GET_TOOL_SCHEMAS");
+    expect(allowed).toContain("mcp__composio__COMPOSIO_WAIT_FOR_CONNECTIONS");
+    expect(allowed).not.toContain("mcp__composio");
+    expect(allowed).not.toContain("mcp__composio__COMPOSIO_MANAGE_CONNECTIONS");
+    expect(allowed).not.toContain("mcp__composio__COMPOSIO_MULTI_EXECUTE_TOOL");
   });
 
   // the config file holds live credentials, so it must not outlive the turn —

@@ -8,13 +8,13 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs, type ParseArgsOptionsConfig } from "node:util";
 
-import { handleToolCall, request, validateBaseUrl } from "./mcp-server.ts";
+import { handleToolCall, request, requestResponse, validateBaseUrl } from "./mcp-server.ts";
 import { removeTempDir, waitForExit } from "../server/testing/cleanup.ts";
 import { freePortBlock } from "../server/testing/ports.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const FAKE_CLI = join(ROOT, "server", "testing", "fake-claude-cli.ts");
-const MUTATING = new Set(["new-bot", "new-channel", "send", "send-channel", "interrupt"]);
+const MUTATING = new Set(["new-bot", "new-channel", "send", "send-channel", "interrupt", "download"]);
 
 export class ControlOmbError extends Error {
   readonly hint?: string;
@@ -27,10 +27,12 @@ export class ControlOmbError extends Error {
 
 type ToolCaller = typeof handleToolCall;
 type Requester = typeof request;
+type ResponseRequester = typeof requestResponse;
 
 export interface ControlOmbDependencies {
   callTool?: ToolCaller;
   request?: Requester;
+  requestResponse?: ResponseRequester;
   env?: NodeJS.ProcessEnv;
 }
 
@@ -53,6 +55,7 @@ mutating (an explicit --url or OPENMAUSBOT_URL/OMB_PORT is required):
   send-channel --channel ID --text TEXT [--dry-run] [--url URL]
   interrupt --bot ID [--dry-run] [--url URL]
   interrupt --channel ID [--dry-run] [--url URL]
+  download --task ID --message ID --path LINK --output PATH [--url URL]
 
 isolated fixture:
   node --experimental-strip-types scripts/control-omb.ts launch
@@ -138,13 +141,17 @@ export async function runControlOmb(
   const env = dependencies.env ?? process.env;
   const callTool = dependencies.callTool ?? handleToolCall;
   const requester = dependencies.request ?? request;
+  const responseRequester = dependencies.requestResponse ?? requestResponse;
   const mutation = MUTATING.has(command);
   const call = async (tool: string, input: Record<string, unknown>, rawUrl: unknown) => {
     const url = configuredUrl(rawUrl, env, mutation);
     const fetcher = url
       ? (path: string, options: RequestInit = {}) => requester(path, options, url)
       : requester;
-    return callTool(tool, input, fetcher);
+    const responseFetcher = url
+      ? (path: string, options: RequestInit = {}) => responseRequester(path, options, url)
+      : responseRequester;
+    return callTool(tool, input, fetcher, undefined, responseFetcher);
   };
 
   if (command === "doctor") {
@@ -200,6 +207,21 @@ export async function runControlOmb(
       name: required(values.name, "--name"),
       member_ids: memberIds,
       ...(values.section ? { section: values.section } : {}),
+    }, values.url);
+  }
+
+  if (command === "download") {
+    const values = parse(command, args, {
+      task: { type: "string" },
+      message: { type: "string" },
+      path: { type: "string" },
+      output: { type: "string" },
+    });
+    return call("download_message_file", {
+      task_id: required(values.task, "--task"),
+      message_id: required(values.message, "--message"),
+      path: required(values.path, "--path"),
+      output_path: required(values.output, "--output"),
     }, values.url);
   }
 
@@ -307,6 +329,7 @@ export async function launchVerificationServer(
     FAKE_CLAUDE_DUMP: fixtureDumpPath,
     PATH: "",
   });
+  if (parentEnv.FAKE_CLAUDE_REPLIES) childEnv.FAKE_CLAUDE_REPLIES = parentEnv.FAKE_CLAUDE_REPLIES;
   const child = spawn(process.execPath, ["--experimental-strip-types", join(ROOT, "server", "index.ts")], {
     cwd: ROOT,
     env: childEnv,

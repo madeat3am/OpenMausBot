@@ -13,6 +13,7 @@ interface ComposioSession {
   headers: Record<string, string>;
   userId?: string;
   multiAccountConfigured: boolean;
+  sandboxDisabled: boolean;
 }
 
 interface ConnectedAccountSummary {
@@ -41,6 +42,8 @@ const sessionWireSchema = z.object({
   }),
   config: z.object({
     user_id: z.string().optional(),
+    sandbox: z.object({ enable: z.boolean().optional() }).optional(),
+    workbench: z.object({ enable: z.boolean().optional() }).optional(),
     multi_account: z.object({
       enable: z.boolean().optional(),
       max_accounts_per_toolkit: z.number().optional(),
@@ -147,6 +150,8 @@ function parseSession(value: SessionWire): ComposioSession {
   }
   const config = value.config;
   const multi = config?.multi_account;
+  const sandbox = config?.sandbox?.enable;
+  const workbench = config?.workbench?.enable;
   return {
     sessionId: value.session_id,
     url: url.toString(),
@@ -156,7 +161,13 @@ function parseSession(value: SessionWire): ComposioSession {
     // creation, and recreating a Session would post the same config and get
     // the same echo back — strict equality here can only churn, never fix.
     multiAccountConfigured: multi?.enable === true,
+    sandboxDisabled: sandbox !== true && workbench !== true && (sandbox === false || workbench === false),
   };
+}
+
+function requireSandboxDisabled(session: ComposioSession) {
+  if (!session.sandboxDisabled) throw new Error("Composio did not confirm a sandbox-disabled Session");
+  return session;
 }
 
 async function upstreamError(response: Response, fallback: string) {
@@ -194,6 +205,7 @@ async function createSession(env: Env, userId: string) {
     method: "POST",
     body: JSON.stringify({
       user_id: userId,
+      sandbox: { enable: false },
       manage_connections: {
         enable: true,
         enable_wait_for_connections: true,
@@ -203,7 +215,10 @@ async function createSession(env: Env, userId: string) {
     }),
   });
   if (!response.ok) throw new Error(await upstreamError(response, `Session creation failed (${response.status})`));
-  return parseSession(sessionWireSchema.parse(await response.json()));
+  const created = requireSandboxDisabled(parseSession(sessionWireSchema.parse(await response.json())));
+  const verified = await getSession(env, created.sessionId);
+  if (!verified) throw new Error("Composio Session disappeared after creation");
+  return requireSandboxDisabled(verified);
 }
 
 /** Session ids this isolate already tried to upgrade once. If the fresh
@@ -217,10 +232,10 @@ async function ensureSession(installation: InstallationRow, env: Env, ctx: Execu
     throw new Response(JSON.stringify({ error: "too many connected-app requests" }), { status: 429, headers: JSON_HEADERS });
   }
   let session = installation.session_id ? await getSession(env, installation.session_id) : null;
-  if (session && !session.multiAccountConfigured && multiAccountUpgradeAttempted.has(session.sessionId)) {
+  if (session?.sandboxDisabled && !session.multiAccountConfigured && multiAccountUpgradeAttempted.has(session.sessionId)) {
     return session;
   }
-  if (!session?.multiAccountConfigured) {
+  if (!session?.sandboxDisabled || !session.multiAccountConfigured) {
     // Connected accounts are attached to this stable Composio user ID. A new
     // Session upgrades legacy installations without relinking OAuth grants.
     session = await createSession(env, installation.composio_user_id);

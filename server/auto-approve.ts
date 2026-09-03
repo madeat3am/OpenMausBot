@@ -58,6 +58,25 @@ export function looksDestructive(text: string): boolean {
  * client so the two sides can never disagree about what was granted. */
 const COMMAND_TOOLS = new Set(["bash", "shell", "execute", "run_command", "computer_exec", "terminal"]);
 
+// Composio exposes provider reads and writes through generic MCP tools. The
+// summary is model-authored, so a remembered per-tool grant is too coarse.
+// Explicit Bot Auto mode may authorize these calls for person-started turns
+// and operator-authored routines; webhook-originated turns remain blocked by
+// the unattended guard below. Discovery helpers are pre-approved by the
+// drivers and do not reach this path.
+function isComposioAction(tool: string): boolean {
+  const lower = tool.toLowerCase();
+  const name = tool.split("__").at(-1)?.toUpperCase() ?? "";
+  const connectorServer = lower.startsWith("mcp__composio__")
+    || lower.startsWith("mcp__openmausbot_connectors__");
+  if (!connectorServer && !name.startsWith("COMPOSIO_")) return false;
+  return ![
+    "COMPOSIO_SEARCH_TOOLS",
+    "COMPOSIO_GET_TOOL_SCHEMAS",
+    "COMPOSIO_WAIT_FOR_CONNECTIONS",
+  ].includes(name);
+}
+
 export function approvalKey(tool: string, summary: string, scope?: "local-computer"): string {
   const bare = tool.replace(/^mcp__[^_]+__/, "").toLowerCase();
   if (!COMMAND_TOOLS.has(bare)) return scope ? `${scope}:${tool}` : tool;
@@ -114,6 +133,7 @@ export function autoVerdict(
     scope?: "local-computer";
   },
 ): AutoVerdict {
+  const composioAction = isComposioAction(tool);
   // the guards outrank the grants, so an "always allow" can never widen
   // into them
   const destructive = matchFirst(DESTRUCTIVE, summary) ?? matchFirst(DESTRUCTIVE, tool);
@@ -143,6 +163,11 @@ export function autoVerdict(
     if (destructive) return { approve: null, source: "destructive-guard", rule: destructive };
     if (sensitive) return { approve: null, source: "sensitive-guard", rule: sensitive };
     return { approve: null, source: "no-grant" };
+  }
+  if (composioAction) {
+    return bot.autoApprove
+      ? { approve: `auto-approved ${tool}`, source: "auto-mode" }
+      : { approve: null, source: "no-grant" };
   }
   if (context?.scope === "local-computer" && !bot.autoApprove) {
     // Host control is not covered by a remembered always-allow grant.

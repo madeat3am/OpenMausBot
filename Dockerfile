@@ -24,12 +24,17 @@ COPY apps/docs/package.json ./apps/docs/package.json
 COPY cloudflare/control-plane/package.json ./cloudflare/control-plane/package.json
 RUN pnpm install --frozen-lockfile
 COPY . .
+ARG OMB_APP_VERSION=unknown
+ARG OMB_APP_REVISION=unknown
+RUN test "$OMB_APP_VERSION" = "$(node -p "require('./package.json').version")" \
+  && printf '%s' "$OMB_APP_REVISION" | grep -Eq '^[0-9a-f]{40}([0-9a-f]{24})?$'
 RUN pnpm build:server && pnpm exec vite build
 
 FROM node:24-bookworm-slim
 # git + curl: agent CLIs shell out to git; curl backs the healthcheck
+ARG SYSTEM_PACKAGES=""
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl git \
+  && apt-get install -y --no-install-recommends ca-certificates curl git $SYSTEM_PACKAGES \
   && rm -rf /var/lib/apt/lists/* \
   && useradd --create-home --home-dir /data --shell /bin/bash maus
 WORKDIR /app
@@ -38,11 +43,15 @@ COPY --from=build --chown=maus:maus /src/dist ./dist
 # Optional engine CLIs baked into the image (space-separated npm packages).
 ARG ENGINES=""
 RUN if [ -n "$ENGINES" ]; then npm install -g $ENGINES; fi
+ARG OMB_APP_VERSION=unknown
+ARG OMB_APP_REVISION=unknown
 ENV HOME=/data \
     OMB_DATA_DIR=/data/.openmausbot \
     OMB_STATIC_DIR=/app/dist \
     OMB_PORT=8799 \
     OMB_WEBHOOK_PORT=8800 \
+    OMB_APP_VERSION=$OMB_APP_VERSION \
+    OMB_APP_REVISION=$OMB_APP_REVISION \
     NODE_ENV=production
 VOLUME ["/data"]
 USER maus

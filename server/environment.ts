@@ -14,6 +14,7 @@ export interface EnvironmentDescriptor {
   label: string;
   platform: NodeJS.Platform;
   version: string;
+  revision: string;
   capabilities: {
     /** Pairing and sessions are available (this build). */
     remoteSessions: true;
@@ -50,12 +51,21 @@ export function serverVersion(): string {
   return "unknown";
 }
 
+/** Immutable source revision for self-hosted images. Desktop builds that do not
+ * inject one report unknown rather than implying that a version identifies the
+ * exact source tree. */
+export function serverRevision(): string {
+  const revision = process.env.OMB_APP_REVISION?.trim() ?? "";
+  return /^[0-9a-f]{40}([0-9a-f]{24})?$/i.test(revision) ? revision.toLowerCase() : "unknown";
+}
+
 export function environmentDescriptor(input: { environmentId: string; desktopManaged: boolean }): EnvironmentDescriptor {
   return {
     environmentId: input.environmentId,
     label: process.env.OMB_ENVIRONMENT_LABEL?.trim() || hostname(),
     platform: process.platform,
     version: serverVersion(),
+    revision: serverRevision(),
     capabilities: {
       remoteSessions: true,
       selfUpdate: input.desktopManaged ? "desktop-managed" : "operator",

@@ -59,6 +59,7 @@ describe("CodexDriver turns (fake app-server)", () => {
     delete process.env.FAKE_CODEX_PARTIAL_FAILS;
     delete process.env.FAKE_CODEX_STATE;
     delete process.env.FAKE_CODEX_RETRY_SCALE;
+    delete process.env.FAKE_CODEX_STDERR;
     delete process.env.OPENAI_API_KEY;
     delete process.env.BOX_TOKEN;
     delete process.env.OMB_TTS_KEY;
@@ -184,7 +185,7 @@ describe("CodexDriver turns (fake app-server)", () => {
     expect(JSON.parse(readFileSync(dump, "utf8")).env.CODEX_HOME).toBe(codexHome);
   });
 
-  it("mounts connected apps without placing credential values in argv", async () => {
+  it("keeps Composio discovery quiet while provider execution requires approval", async () => {
     await create();
     const dump = join(scratch, "composio.json");
     process.env.FAKE_CODEX_DUMP = dump;
@@ -210,6 +211,26 @@ describe("CodexDriver turns (fake app-server)", () => {
     expect(seen.argv.join(" ")).toContain("OMB_COMMS_TOKEN");
     expect(seen.argv.join(" ")).not.toContain("per-boot-token");
     expect(seen.env.OMB_COMMS_TOKEN).toBe("per-boot-token");
+    const argv = seen.argv.join(" ");
+    expect(argv).toContain('mcp_servers.openmausbot_connectors.default_tools_approval_mode="prompt"');
+    expect(argv).toContain('mcp_servers.openmausbot_connectors.tools.COMPOSIO_SEARCH_TOOLS.approval_mode="approve"');
+    expect(argv).toContain('mcp_servers.openmausbot_connectors.tools.COMPOSIO_GET_TOOL_SCHEMAS.approval_mode="approve"');
+    expect(argv).toContain('mcp_servers.openmausbot_connectors.tools.COMPOSIO_WAIT_FOR_CONNECTIONS.approval_mode="approve"');
+    expect(argv).not.toContain("tools.COMPOSIO_MANAGE_CONNECTIONS.approval_mode");
+    expect(argv).not.toContain("tools.COMPOSIO_MULTI_EXECUTE_TOOL.approval_mode");
+  });
+
+  it("refuses connected apps when fullAuto would suppress approval cards", async () => {
+    await create({ fullAuto: true });
+    await expect(
+      instance.adapter.sendTurn({
+        threadId: "t-full-auto-composio",
+        text: "send mail",
+        integrations: {
+          composio: { command: process.execPath, args: ["/tmp/connector-proxy.js"], env: {} },
+        },
+      }),
+    ).rejects.toThrow(/connected apps require interactive approval/);
   });
 
   it("mounts custom MCP servers on-request while built-ins stay pre-quieted", async () => {
@@ -240,9 +261,10 @@ describe("CodexDriver turns (fake app-server)", () => {
     expect(argv).toContain("NOTES_TOKEN");
     expect(argv).not.toContain("tok-notes");
     expect(seen.env.NOTES_TOKEN).toBe("tok-notes");
-    // the built-in keeps codex's pre-quieted approval mode; the custom
-    // server does NOT — its tool calls arrive as approval cards
+    // the connector server prompts by default, with only its safe helper
+    // tools pre-quieted; the custom server also stays on-request
     expect(argv).toContain('mcp_servers.openmausbot_connectors.default_tools_approval_mode');
+    expect(argv).toContain('mcp_servers.openmausbot_connectors.default_tools_approval_mode="prompt"');
     expect(argv).not.toContain('mcp_servers.notes.default_tools_approval_mode');
   });
 
@@ -419,13 +441,28 @@ describe("CodexDriver turns (fake app-server)", () => {
     const opened = await recorder.until((e) => e.type === "request.opened");
     expect(opened).toMatchObject({
       requestType: "permission",
-      tool: "list_bots",
+      tool: "mcp__agents__list_bots",
       summary: 'Allow the agents MCP server to run tool "list_bots"?',
     });
 
     await instance.adapter.respondToRequest("t-mcp-elicitation", opened.requestId!, { behavior: "allow" });
     await recorder.until((e) => e.type === "turn.completed");
     expect(JSON.parse(readFileSync(dump, "utf8")).decision).toEqual({ action: "accept", content: {} });
+  });
+
+  it("preserves the connector server identity when the display text omits a tool name", async () => {
+    await create({ mode: "mcp-elicitation-no-tool" });
+
+    await instance.adapter.sendTurn({ threadId: "t-mcp-unknown-tool", text: "use a connected app" });
+    const opened = await recorder.until((e) => e.type === "request.opened");
+    expect(opened).toMatchObject({
+      requestType: "permission",
+      tool: "mcp__openmausbot_connectors__unknown",
+      summary: "Allow this connected-app request?",
+    });
+
+    await instance.adapter.respondToRequest("t-mcp-unknown-tool", opened.requestId!, { behavior: "deny" });
+    await recorder.until((e) => e.type === "turn.completed");
   });
 
   it("stamps approvalScope on cards only when the turn controls this Mac", async () => {
@@ -472,12 +509,31 @@ describe("CodexDriver turns (fake app-server)", () => {
   });
 
   it("rejects a second turn while one is in flight", async () => {
+    process.env.FAKE_CODEX_STDERR = "Codex will use the bundled bubblewrap in the meantime.\n";
     await create({ mode: "approval" }); // approval mode parks the turn open
     await instance.adapter.sendTurn({ threadId: "t-busy", text: "one" });
     await recorder.until((e) => e.type === "request.opened");
     await expect(instance.adapter.sendTurn({ threadId: "t-busy", text: "two" })).rejects.toThrow(/already running/);
     await instance.adapter.interruptTurn("t-busy");
-    await recorder.until((e) => e.type === "turn.completed");
+    await expect(recorder.until((e) => e.type === "turn.completed")).resolves.toMatchObject({
+      ok: false,
+      stopReason: "interrupted",
+    });
+    expect(recorder.events.some((e) => e.type === "runtime.error")).toBe(false);
+  });
+
+  it("still reports an unexpected clean exit when stderr contains a startup warning", async () => {
+    process.env.FAKE_CODEX_STDERR = "Codex will use the bundled bubblewrap in the meantime.\n";
+    await create({ mode: "exit-before-result" });
+
+    await instance.adapter.sendTurn({ threadId: "t-exit", text: "one" });
+    await expect(recorder.until((e) => e.type === "runtime.error")).resolves.toMatchObject({
+      message: "codex exited 0 before turn/completed",
+    });
+    await expect(recorder.until((e) => e.type === "turn.completed")).resolves.toMatchObject({
+      ok: false,
+      stopReason: "exit_before_result",
+    });
   });
 
   it("a missing binary surfaces as a failed turn, and snapshot says unavailable", async () => {

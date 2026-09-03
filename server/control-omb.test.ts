@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
@@ -103,6 +103,7 @@ describe("control-omb isolated verification loop", () => {
   it("launches, drives a real fake-engine turn, and removes only its test data", async () => {
     const session = await launchVerificationServer({
       ...process.env,
+      FAKE_CLAUDE_REPLIES: JSON.stringify(["[client revisions](client-revisions.pdf)"]),
       COMPOSIO_API_KEY: "must-not-reach-the-fixture",
       OMB_SKILLS_DIR: "/must/not/reach/the/fixture",
       XAI_API_KEY: "must-not-reach-the-fixture",
@@ -115,11 +116,27 @@ describe("control-omb isolated verification loop", () => {
 
       const created = await runControlOmb(["new-bot", "--name", "Verification Probe"], { env }) as any;
       const botId = created.bot.id as string;
+      const workspace = join(session.info.dataDir, "workspaces", botId);
+      mkdirSync(workspace, { recursive: true });
+      writeFileSync(join(workspace, "client-revisions.pdf"), "approved revisions");
       await runControlOmb(["send", "--bot", botId, "--text", "hello from the verification test"], { env });
       const settled = await runControlOmb(["wait", "--bot", botId, "--timeout", "20"], { env }) as any;
       expect(settled.status).toBe("settled");
       const transcript = await runControlOmb(["messages", "--bot", botId, "--limit", "10"], { env }) as any;
       expect(transcript.messages.some((message: { role?: string }) => message.role === "bot")).toBe(true);
+      const linkedMessage = transcript.messages.find((message: { role?: string; text?: string }) =>
+        message.role === "bot" && message.text?.includes("client-revisions.pdf")
+      );
+      const receivedPath = join(session.info.dataDir, "received-revisions.pdf");
+      const downloaded = await runControlOmb([
+        "download",
+        "--task", transcript.taskId,
+        "--message", linkedMessage.id,
+        "--path", "client-revisions.pdf",
+        "--output", receivedPath,
+      ], { env }) as any;
+      expect(downloaded).toMatchObject({ success: true, outputPath: receivedPath, bytes: 18 });
+      expect(readFileSync(receivedPath, "utf8")).toBe("approved revisions");
       const fixtureEnv = JSON.parse(readFileSync(session.fixtureDumpPath, "utf8")).env as Record<string, string>;
       expect(fixtureEnv).not.toHaveProperty("COMPOSIO_API_KEY");
       expect(fixtureEnv).not.toHaveProperty("OMB_SKILLS_DIR");

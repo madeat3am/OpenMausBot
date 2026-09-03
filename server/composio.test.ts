@@ -26,6 +26,16 @@ let connectedAccountsUnavailable = false;
 // the whole reason #509 happened.
 let customAuthConfigs: Array<Record<string, unknown>> = [];
 let sessionAuthConfigs: Record<string, string> = {};
+let sessionSandbox: { enable?: boolean } | undefined = { enable: false };
+let sessionWorkbench: { enable?: boolean } | undefined;
+let nextCreatedSafety: {
+  sandbox?: { enable?: boolean };
+  workbench?: { enable?: boolean };
+} | undefined;
+let nextReadbackSafety: {
+  sandbox?: { enable?: boolean };
+  workbench?: { enable?: boolean };
+} | undefined;
 
 beforeAll(async () => {
   api = createServer(async (req, res) => {
@@ -42,20 +52,34 @@ beforeAll(async () => {
 
     if (req.method === "POST" && url.pathname === "/api/v3.1/tool_router/session") {
       sessionAuthConfigs = body.auth_configs ?? {};
+      sessionSandbox = nextCreatedSafety?.sandbox ?? body.sandbox;
+      sessionWorkbench = nextCreatedSafety?.workbench;
+      nextCreatedSafety = undefined;
       res.writeHead(201, { "content-type": "application/json" });
       return res.end(JSON.stringify({
         session_id: "trs_test",
         mcp: { type: "http", url: "https://app.composio.dev/tool_router/v3/trs_test/mcp" },
-        config: { user_id: body.user_id, multi_account: body.multi_account, auth_configs: sessionAuthConfigs },
+        config: {
+          user_id: body.user_id,
+          sandbox: sessionSandbox,
+          workbench: sessionWorkbench,
+          multi_account: body.multi_account,
+          auth_configs: sessionAuthConfigs,
+        },
       }));
     }
     if (req.method === "GET" && url.pathname === "/api/v3.1/tool_router/session/trs_test") {
+      const readbackSandbox = nextReadbackSafety?.sandbox ?? sessionSandbox;
+      const readbackWorkbench = nextReadbackSafety?.workbench ?? sessionWorkbench;
+      nextReadbackSafety = undefined;
       res.writeHead(200, { "content-type": "application/json" });
       return res.end(JSON.stringify({
         session_id: "trs_test",
         mcp: { type: "http", url: "https://app.composio.dev/tool_router/v3/trs_test/mcp" },
         config: {
           user_id: "openmausbot_existing",
+          sandbox: readbackSandbox,
+          workbench: readbackWorkbench,
           multi_account: {
             enable: true,
             max_accounts_per_toolkit: 5,
@@ -219,6 +243,7 @@ describe.sequential("Composio Sessions", () => {
     });
     expect(calls.filter((call) => call.method === "POST" && call.path.endsWith("/session")).at(-1)?.body).toEqual({
       user_id: "openmausbot_existing",
+      sandbox: { enable: false },
       manage_connections: {
         enable: true,
         enable_wait_for_connections: true,
@@ -239,6 +264,45 @@ describe.sequential("Composio Sessions", () => {
     });
   });
 
+  it("recreates a persisted Session whose sandbox is still enabled", async () => {
+    sessionSandbox = { enable: true };
+    const cfg: AppConfig = {
+      composio: { apiKey: "ak_test", userId: "openmausbot_existing", sessionId: "trs_test" },
+    };
+    try {
+      const before = calls.length;
+      await connectedServices(cfg);
+      expect(calls.slice(before).filter((call) => call.method === "POST" && call.path.endsWith("/session"))).toHaveLength(1);
+      expect(cfg.composio).toMatchObject({ userId: "openmausbot_existing", sessionId: "trs_test" });
+      expect(sessionSandbox).toEqual({ enable: false });
+    } finally {
+      sessionSandbox = { enable: false };
+      sessionWorkbench = undefined;
+    }
+  });
+
+  it("fails closed when Composio does not confirm the sandbox is disabled", async () => {
+    nextCreatedSafety = { sandbox: { enable: true } };
+    await expect(prepareProjectSession("ak_test", { userId: "openmausbot_existing" }))
+      .rejects.toThrow(/did not confirm a sandbox-disabled Session/i);
+
+    nextCreatedSafety = { sandbox: { enable: false }, workbench: { enable: true } };
+    await expect(prepareProjectSession("ak_test", { userId: "openmausbot_existing" }))
+      .rejects.toThrow(/did not confirm a sandbox-disabled Session/i);
+
+    sessionSandbox = { enable: false };
+    sessionWorkbench = undefined;
+  });
+
+  it("fails before returning settings when the created Session GET readback is unsafe", async () => {
+    nextReadbackSafety = { sandbox: { enable: false }, workbench: { enable: true } };
+    await expect(prepareProjectSession("ak_test", { userId: "openmausbot_existing" }))
+      .rejects.toThrow(/did not confirm a sandbox-disabled Session/i);
+    expect(nextReadbackSafety).toBeUndefined();
+    sessionSandbox = { enable: false };
+    sessionWorkbench = undefined;
+  });
+
   it("recreates a legacy Session with the same Composio user ID", async () => {
     const upgraded = await prepareProjectSession("ak_test", {
       apiKey: "ak_test",
@@ -252,6 +316,7 @@ describe.sequential("Composio Sessions", () => {
     });
     expect(calls.filter((call) => call.method === "POST" && call.path.endsWith("/session")).at(-1)?.body).toMatchObject({
       user_id: "openmausbot_legacy",
+      sandbox: { enable: false },
       multi_account: {
         enable: true,
         max_accounts_per_toolkit: 5,

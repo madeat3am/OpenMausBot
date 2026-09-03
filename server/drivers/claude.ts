@@ -91,6 +91,16 @@ function claudeEnvironment(
 
 const DRIVER_KIND = "claudeAgent";
 
+// Composio's catalog/auth helpers do not run provider tools. Keep that
+// discovery path quiet, but leave execution and remote-workbench tools out so
+// they flow through OpenMausBot's existing permission broker one call at a
+// time.
+const QUIET_COMPOSIO_TOOLS = [
+  "COMPOSIO_SEARCH_TOOLS",
+  "COMPOSIO_GET_TOOL_SCHEMAS",
+  "COMPOSIO_WAIT_FOR_CONNECTIONS",
+] as const;
+
 export interface ClaudeConfig {
   cli: string;
   permissionMode: "acceptEdits" | "auto" | "bypassPermissions";
@@ -637,6 +647,9 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       const { threadId } = turn;
       if (active.has(threadId)) throw new Error("a turn is already running on this thread");
       const controlsHost = turn.integrations?.localComputer?.scope === "local-computer";
+      if (turn.integrations?.composio && config.permissionMode === "bypassPermissions") {
+        throw new Error("connected apps require the interactive approval broker");
+      }
       if (controlsHost && config.permissionMode === "bypassPermissions") {
         throw new Error("local computer control requires the interactive approval broker");
       }
@@ -684,7 +697,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       const allowed: string[] = [];
       if (turn.integrations?.composio) {
         mcpServers.composio = { ...turn.integrations.composio };
-        allowed.push("mcp__composio");
+        allowed.push(...QUIET_COMPOSIO_TOOLS.map((tool) => `mcp__composio__${tool}`));
       }
       if (turn.integrations?.computer) {
         mcpServers.computer = {

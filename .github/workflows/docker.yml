@@ -30,12 +30,26 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Reject a source-build version that does not match package.json
+        run: |
+          if docker build \
+            --build-arg OMB_APP_VERSION=0.0.0-mismatch \
+            --build-arg "OMB_APP_REVISION=$GITHUB_SHA" \
+            -t openmausbot:invalid-version .; then
+            echo "source build accepted a false version" >&2
+            exit 1
+          fi
       - name: Build image
-        run: docker build -t openmausbot:ci .
+        run: |
+          version=$(node -p "require('./package.json').version")
+          docker build \
+            --build-arg "OMB_APP_VERSION=$version" \
+            --build-arg "OMB_APP_REVISION=$GITHUB_SHA" \
+            -t openmausbot:ci .
       - name: Boot the container and prove the server + UI answer
         run: |
           set -euo pipefail
-          docker run -d --name omb openmausbot:ci
+          docker run -d --name omb -e OMB_ENVIRONMENT_LABEL=ci openmausbot:ci
           for i in $(seq 1 40); do
             if docker exec omb curl -sf http://127.0.0.1:8799/api/health | grep -q openmausbot; then break; fi
             sleep 2
@@ -43,6 +57,9 @@ jobs:
           done
           # the renderer is served by the server itself (OMB_STATIC_DIR)
           docker exec omb curl -sf http://127.0.0.1:8799/ | grep -qi "<html" || { docker logs omb; echo "UI not served"; exit 1; }
+          descriptor=$(docker exec omb curl -sf http://127.0.0.1:8799/.well-known/openmausbot/environment)
+          version=$(node -p "require('./package.json').version")
+          node -e 'const d=JSON.parse(process.argv[1]); if(d.version!==process.argv[2] || d.revision!==process.argv[3] || d.label!=="ci") process.exit(1)' "$descriptor" "$version" "$GITHUB_SHA"
           docker logs omb | tail -5
       - name: Prove the server never binds a public interface
         # The loopback-trust model is the auth model, so the image must keep
@@ -74,7 +91,8 @@ jobs:
           set -euo pipefail
           docker rm -f omb >/dev/null
           docker tag openmausbot:ci ghcr.io/milind-soni/openmausbot:latest
-          printf 'DOMAIN=localhost\nENGINES=\n' > deploy/.env
+          printf 'DOMAIN=localhost\nENGINES=\nOMB_APP_VERSION=%s\nOMB_APP_REVISION=%s\nOMB_ENVIRONMENT_LABEL=ci\n' \
+            "$(node -p "require('./package.json').version")" "$GITHUB_SHA" > deploy/.env
           docker compose -f deploy/docker-compose.yml up -d --no-build
           for i in $(seq 1 45); do
             curl -sk -o /dev/null --max-time 2 https://localhost/.well-known/openmausbot/environment && break
@@ -137,11 +155,16 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,format=long
             type=ref,event=tag
+      - id: package
+        run: echo "version=$(node -p \"require('./package.json').version\")" >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            OMB_APP_VERSION=${{ steps.package.outputs.version }}
+            OMB_APP_REVISION=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

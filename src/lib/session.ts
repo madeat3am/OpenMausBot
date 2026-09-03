@@ -7,6 +7,7 @@ export interface EnvironmentDescriptor {
   label: string;
   platform: string;
   version: string;
+  revision?: string;
   capabilities: { remoteSessions: true; selfUpdate: "desktop-managed" | "operator" };
 }
 
