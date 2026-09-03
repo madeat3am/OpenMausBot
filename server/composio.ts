@@ -363,7 +363,16 @@ function sessionCoversAuthConfigs(session: SessionResponse, wanted: AuthConfigMa
  * execute nested provider calls behind one workbench tool approval, so only a
  * Session that explicitly disables that native capability is safe to reuse. */
 function sessionDisablesSandbox(session: SessionResponse): boolean {
-  return session.config?.sandbox?.enable === false || session.config?.workbench?.enable === false;
+  const sandbox = session.config?.sandbox?.enable;
+  const workbench = session.config?.workbench?.enable;
+  return sandbox !== true && workbench !== true && (sandbox === false || workbench === false);
+}
+
+function requireSandboxDisabled(session: SessionResponse): SessionResponse {
+  if (!sessionDisablesSandbox(session)) {
+    throw new Error("Composio did not confirm a sandbox-disabled Session");
+  }
+  return session;
 }
 
 function authConfigsKey(sessionId: string, wanted: AuthConfigMap): string {
@@ -427,7 +436,7 @@ export async function prepareProjectSession(
     signal: AbortSignal.timeout(30_000),
   });
   if (!res.ok) throw new Error(await responseError(res, `Composio rejected this key (HTTP ${res.status})`));
-  const session = parseSessionResponse(sessionResponseSchema.parse(await res.json()));
+  const session = requireSandboxDisabled(parseSessionResponse(sessionResponseSchema.parse(await res.json())));
   // If Composio does not echo the configs back, a later check would ask for
   // the same creation again — remember this attempt so it happens once.
   authConfigUpgradeAttempted.add(authConfigsKey(session.session_id, authConfigs));
@@ -439,19 +448,24 @@ async function ensureProjectSession(cfg: AppConfig): Promise<SessionResponse> {
   if (!composio?.apiKey) throw new Error("No Composio project key configured");
   if (composio.sessionId) {
     const existing = await getProjectSession(composio.apiKey, composio.sessionId);
-    if (existing && (supportsMultiAccount(existing) || multiAccountUpgradeAttempted.has(existing.session_id))) {
+    if (
+      existing
+      && sessionDisablesSandbox(existing)
+      && (supportsMultiAccount(existing) || multiAccountUpgradeAttempted.has(existing.session_id))
+    ) {
       return existing;
     }
   }
   // A missing/deleted session is recreated and its non-secret identifiers are
   // persisted so an edited config/env setup does not recreate it every launch.
   const prepared = await prepareProjectSession(composio.apiKey, composio);
+  const created = await getProjectSession(composio.apiKey, prepared.sessionId);
+  if (!created) throw new Error("Composio Session disappeared after creation");
+  requireSandboxDisabled(created);
   multiAccountUpgradeAttempted.add(prepared.sessionId);
   composio.userId = prepared.userId;
   composio.sessionId = prepared.sessionId;
   saveConfig({ composio: { userId: prepared.userId, sessionId: prepared.sessionId } });
-  const created = await getProjectSession(composio.apiKey, prepared.sessionId);
-  if (!created) throw new Error("Composio Session disappeared after creation");
   return created;
 }
 
@@ -470,12 +484,13 @@ async function recreateProjectSession(
     { apiKey: composio.apiKey, userId },
     authConfigs,
   );
+  const created = await getProjectSession(composio.apiKey, prepared.sessionId);
+  if (!created) throw new Error("Composio Session disappeared after creation");
+  requireSandboxDisabled(created);
   multiAccountUpgradeAttempted.add(prepared.sessionId);
   composio.userId = prepared.userId;
   composio.sessionId = prepared.sessionId;
   saveConfig({ composio: { userId: prepared.userId, sessionId: prepared.sessionId } });
-  const created = await getProjectSession(composio.apiKey, prepared.sessionId);
-  if (!created) throw new Error("Composio Session disappeared after creation");
   return created;
 }
 

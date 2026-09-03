@@ -5,7 +5,8 @@
 // real app-server, it never exits on its own — the driver kills it.
 //
 //   FAKE_CODEX_MODE   happy (default) | approval | resume | stream | windows-command |
-//                     mcp-elicitation | image | logged-in-stdout | logged-out | unauthorized
+//                     mcp-elicitation | mcp-elicitation-no-tool | image |
+//                     logged-in-stdout | logged-out | unauthorized
 //   FAKE_CODEX_DUMP   path to write {argv, env, calls, decision} as JSON
 //
 // Keep this file dependency-free — it runs as a bare `node` subprocess.
@@ -182,16 +183,18 @@ process.stdin.on("data", (chunk) => {
           : "ls -la";
         notify("item/started", { item: { id: "i1", type: "commandExecution", command } });
         notify("item/started", { item: { id: "w1", type: "webSearch", query: "OpenMausBot" } });
-        if (mode === "mcp-elicitation") {
+        if (mode === "mcp-elicitation" || mode === "mcp-elicitation-no-tool") {
           out({
             jsonrpc: "2.0",
             id: 101,
             method: "mcpServer/elicitation/request",
             params: {
-              serverName: "agents",
+              serverName: mode === "mcp-elicitation-no-tool" ? "openmausbot_connectors" : "agents",
               mode: "form",
               _meta: { codex_approval_kind: "mcp_tool_call", tool_params: {} },
-              message: 'Allow the agents MCP server to run tool "list_bots"?',
+              message: mode === "mcp-elicitation-no-tool"
+                ? "Allow this connected-app request?"
+                : 'Allow the agents MCP server to run tool "list_bots"?',
               requestedSchema: { type: "object", properties: {} },
             },
           });

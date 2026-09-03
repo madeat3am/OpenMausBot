@@ -136,6 +136,7 @@ describe("autoDecision", () => {
     "COMPOSIO_MANAGE_CONNECTIONS",
     "mcp__composio__COMPOSIO_MULTI_EXECUTE_TOOL",
     "mcp__openmausbot_connectors__COMPOSIO_MANAGE_CONNECTIONS",
+    "mcp__openmausbot_connectors__unknown",
     "COMPOSIO_REMOTE_WORKBENCH",
     "mcp__composio__GMAIL_SEND_EMAIL",
     "mcp__openmausbot_connectors__SLACK_SEND_MESSAGE",

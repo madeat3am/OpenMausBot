@@ -449,6 +449,21 @@ describe("CodexDriver turns (fake app-server)", () => {
     expect(JSON.parse(readFileSync(dump, "utf8")).decision).toEqual({ action: "accept", content: {} });
   });
 
+  it("preserves the connector server identity when the display text omits a tool name", async () => {
+    await create({ mode: "mcp-elicitation-no-tool" });
+
+    await instance.adapter.sendTurn({ threadId: "t-mcp-unknown-tool", text: "use a connected app" });
+    const opened = await recorder.until((e) => e.type === "request.opened");
+    expect(opened).toMatchObject({
+      requestType: "permission",
+      tool: "mcp__openmausbot_connectors__unknown",
+      summary: "Allow this connected-app request?",
+    });
+
+    await instance.adapter.respondToRequest("t-mcp-unknown-tool", opened.requestId!, { behavior: "deny" });
+    await recorder.until((e) => e.type === "turn.completed");
+  });
+
   it("stamps approvalScope on cards only when the turn controls this Mac", async () => {
     await create({ mode: "approval" });
 

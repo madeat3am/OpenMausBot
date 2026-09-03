@@ -302,7 +302,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
           : undefined;
         const tool =
           isMcpElicitation
-            ? (mcpServer && mcpTool ? `mcp__${mcpServer}__${mcpTool}` : (mcpTool ?? "mcp"))
+            ? (mcpServer ? `mcp__${mcpServer}__${mcpTool ?? "unknown"}` : (mcpTool ?? "mcp"))
             : method === "item/fileChange/requestApproval" || method === "applyPatchApproval"
             ? "edit"
             : isQuestion
