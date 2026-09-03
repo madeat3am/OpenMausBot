@@ -84,6 +84,12 @@ Upgrade with `docker compose pull omb && docker compose up -d` (or
 `git pull && docker compose up -d --build`). State (chats, routines,
 engine logins, paired sessions) is on the `data` volume; back that up.
 
+If you migrate by copying that data directory or volume to another host,
+stop the old server before starting the copy. The stable environment identity
+is part of the data, so running both copies creates two authorities with the
+same identity. A desktop app may start its Local server as soon as it opens;
+leave it closed until its saved remote profile is ready.
+
 ## From source
 
 Requirements: Node 24+, pnpm, and at least one agent CLI installed and
