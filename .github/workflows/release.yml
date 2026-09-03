@@ -136,7 +136,13 @@ jobs:
           rm "$RUNNER_TEMP/cert.p12"
 
       - name: Package both architectures
-        run: pnpm package:mac
+        run: pnpm package:mac -- --config.extraMetadata.buildRevision="${{ needs.prepare.outputs.sha }}"
+
+      - name: "Gate: both packaged apps carry the pinned revision"
+        run: >-
+          node scripts/verify-packaged-revision.mjs "${{ needs.prepare.outputs.sha }}"
+          release/mac-arm64/OpenMausBot.app/Contents/Resources/app.asar
+          release/mac/OpenMausBot.app/Contents/Resources/app.asar
 
       - name: "Gate: both packaged apps use the canonical updater feed"
         run: |
@@ -272,7 +278,10 @@ jobs:
       - name: Clean generated output
         shell: bash
         run: rm -rf dist dist-server release
-      - run: pnpm package:win
+      - run: pnpm package:win -- --config.extraMetadata.buildRevision="${{ needs.prepare.outputs.sha }}"
+        shell: bash
+      - run: node scripts/verify-packaged-revision.mjs "${{ needs.prepare.outputs.sha }}" release/win-unpacked/resources/app.asar
+        shell: bash
       - name: Verify the packaged tree and start the packaged server
         shell: bash
         run: |
@@ -346,7 +355,8 @@ jobs:
         run: pnpm build:cua:linux
       - name: Prove overlay-free X11 input routing
         run: dbus-run-session -- xvfb-run -a pnpm smoke:cua-x11-input
-      - run: pnpm package:linux
+      - run: pnpm package:linux -- --config.extraMetadata.buildRevision="${{ needs.prepare.outputs.sha }}"
+      - run: node scripts/verify-packaged-revision.mjs "${{ needs.prepare.outputs.sha }}" release/linux-unpacked/resources/app.asar
       - name: Verify the packaged updater target
         run: |
           update=release/linux-unpacked/resources/app-update.yml

@@ -13,6 +13,8 @@ services:
       context: ..
       args:
         ENGINES: ${ENGINES:-}
+        OMB_APP_VERSION: ${OMB_APP_VERSION:-unknown}
+        OMB_APP_REVISION: ${OMB_APP_REVISION:-unknown}
     # prebuilt on every main push; `docker compose up --build` builds from source instead
     image: ghcr.io/milind-soni/openmausbot:latest
     restart: unless-stopped
@@ -24,6 +26,8 @@ services:
     environment:
       OMB_PORT: "8799"
       OMB_WEBHOOK_PORT: "8800"
+      # operator-facing identity; keep stable across container recreation
+      OMB_ENVIRONMENT_LABEL: ${OMB_ENVIRONMENT_LABEL:-openmausbot}
       # what the app prints as hook URLs — Caddy passes /hooks/* straight through
       OMB_WEBHOOK_PUBLIC_URL: https://${DOMAIN}
       # pairing links for remote clients point here (docs/self-hosting.md)

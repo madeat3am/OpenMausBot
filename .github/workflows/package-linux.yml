@@ -38,6 +38,8 @@ jobs:
           sudo apt-get update && sudo apt-get install -y
           at-spi2-core dbus-x11 desktop-file-utils libxi6 libxkbcommon0 squashfs-tools x11-utils xdotool xvfb
       - run: pnpm install --frozen-lockfile
+      - id: revision
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Clean generated output
         run: pnpm clean
       - name: Stage the pinned CUA runtime
@@ -45,7 +47,8 @@ jobs:
       - name: Prove overlay-free X11 input routing
         run: dbus-run-session -- xvfb-run -a pnpm smoke:cua-x11-input
       - name: Package from the verified offline CUA stage
-        run: pnpm package:linux:offline
+        run: pnpm package:linux:offline -- --config.extraMetadata.buildRevision="${{ steps.revision.outputs.sha }}"
+      - run: node scripts/verify-packaged-revision.mjs "${{ steps.revision.outputs.sha }}" release/linux-unpacked/resources/app.asar
       - name: Verify package contents and metadata
         run: node scripts/verify-linux-package.mjs
       - name: Match a normal Ubuntu package parent on the ephemeral runner

@@ -61,6 +61,8 @@ import { buildApplicationMenu } from "./menu.mjs";
 const { desktopCapabilities, nativeDesktopActions } = capabilitiesModule;
 const nativeActions = nativeDesktopActions(process.platform);
 const require = createRequire(import.meta.url);
+const { packagedBuildRevision } = require("./build-revision.cjs");
+const APP_BUILD_REVISION = packagedBuildRevision(require("../package.json"));
 const { createDisplayMediaGuard, invokeDisplayMediaCallback, selectCaptureSource } = require(
   "./screen-preview.cjs",
 );
@@ -864,6 +866,7 @@ async function startServerOn(port) {
     OMB_PORT: String(port),
     // the server advertises this to remote clients so version skew is visible
     OMB_APP_VERSION: app.getVersion(),
+    OMB_APP_REVISION: APP_BUILD_REVISION,
     OMB_USER_DATA: app.getPath("userData"),
     ...(secureCredentials.composioApiKey
       ? { COMPOSIO_API_KEY: secureCredentials.composioApiKey }
@@ -1389,8 +1392,9 @@ ipcMain.on("desktop:unread-count", (event, value) => {
 // The saved profile pins each origin to the server-provided environmentId;
 // the session credential is the
 // HttpOnly cookie /pair set for that origin, kept by Chromium's cookie jar.
-const { LOCAL_ID, activeEnvironment, allowedOrigins, parseEnvironments, parsePairingLink, serializeEnvironments, withActive, withEnvironment, withEnvironmentIdentity, withoutEnvironment } = environmentsModule;
+const { LOCAL_ID, activeEnvironment, allowedOrigins, createEnvironmentSwitchEpoch, parseEnvironments, parsePairingLink, serializeEnvironments, withActive, withEnvironment, withEnvironmentIdentity, withoutEnvironment } = environmentsModule;
 let environmentsState = { environments: [], activeId: LOCAL_ID };
+const environmentSwitches = createEnvironmentSwitchEpoch();
 
 function environmentsFile() {
   return path.join(app.getPath("userData"), "environments.json");
@@ -1469,6 +1473,7 @@ function navigateMainWindow(url) {
 async function readRemoteEnvironment(origin) {
   const response = await fetch(`${origin}/.well-known/openmausbot/environment`, {
     headers: { accept: "application/json" },
+    redirect: "error",
     signal: AbortSignal.timeout(8_000),
   });
   if (!response.ok) throw new Error(`environment descriptor returned HTTP ${response.status}`);
@@ -1501,6 +1506,7 @@ function remoteVerificationDetail(result) {
 }
 
 async function switchEnvironment(id) {
+  const epoch = environmentSwitches.begin();
   if (id === LOCAL_ID) {
     persistEnvironments(withActive(environmentsState, LOCAL_ID));
     navigateMainWindow(activeOrigin());
@@ -1509,6 +1515,7 @@ async function switchEnvironment(id) {
   const environment = environmentsState.environments.find((entry) => entry.id === id);
   if (!environment) return;
   const verified = await verifyRemoteEnvironment(environment);
+  if (!environmentSwitches.isCurrent(epoch)) return;
   if (!verified.ok) {
     const identityChanged = verified.code === "identity_changed";
     await dialog.showMessageBox({

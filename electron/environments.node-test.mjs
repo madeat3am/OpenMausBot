@@ -5,6 +5,14 @@ import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 const env = require("./environments.cjs");
 
+test("only the latest asynchronous server selection may commit", () => {
+  const switches = env.createEnvironmentSwitchEpoch();
+  const first = switches.begin();
+  const second = switches.begin();
+  assert.equal(switches.isCurrent(second), true);
+  assert.equal(switches.isCurrent(first), false);
+});
+
 test("origins are bare http(s) origins, nothing else", () => {
   assert.equal(env.normalizeOrigin("https://mini.tail1234.ts.net/pair#code=x"), "https://mini.tail1234.ts.net");
   assert.equal(env.normalizeOrigin("http://192.168.1.20:8799"), "http://192.168.1.20:8799");

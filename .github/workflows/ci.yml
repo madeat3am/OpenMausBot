@@ -105,7 +105,8 @@ jobs:
       - name: Prove overlay-free X11 input routing
         run: dbus-run-session -- xvfb-run -a pnpm smoke:cua-x11-input
       - name: Package from the verified offline CUA stage
-        run: pnpm package:linux:offline
+        run: pnpm package:linux:offline -- --config.extraMetadata.buildRevision="$GITHUB_SHA"
+      - run: node scripts/verify-packaged-revision.mjs "$GITHUB_SHA" release/linux-unpacked/resources/app.asar
       - run: node scripts/verify-linux-package.mjs
       - name: Match a normal Ubuntu package parent on the ephemeral runner
         run: |

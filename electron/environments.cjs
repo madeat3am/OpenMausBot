@@ -10,6 +10,14 @@
 const LOCAL_ID = "local";
 const MAX_NAME = 60;
 
+function createEnvironmentSwitchEpoch() {
+  let current = 0;
+  return {
+    begin: () => ++current,
+    isCurrent: (epoch) => epoch === current,
+  };
+}
+
 function normalizeEnvironmentId(input) {
   return typeof input === "string" && /^[0-9a-f-]{36}$/i.test(input.trim()) ? input.trim().toLowerCase() : null;
 }
@@ -158,6 +166,7 @@ module.exports = {
   LOCAL_ID,
   activeEnvironment,
   allowedOrigins,
+  createEnvironmentSwitchEpoch,
   normalizeOrigin,
   normalizeEnvironmentId,
   parseEnvironments,
