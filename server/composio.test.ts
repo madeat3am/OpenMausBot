@@ -46,7 +46,12 @@ beforeAll(async () => {
       return res.end(JSON.stringify({
         session_id: "trs_test",
         mcp: { type: "http", url: "https://app.composio.dev/tool_router/v3/trs_test/mcp" },
-        config: { user_id: body.user_id, multi_account: body.multi_account, auth_configs: sessionAuthConfigs },
+        config: {
+          user_id: body.user_id,
+          sandbox: body.sandbox,
+          multi_account: body.multi_account,
+          auth_configs: sessionAuthConfigs,
+        },
       }));
     }
     if (req.method === "GET" && url.pathname === "/api/v3.1/tool_router/session/trs_test") {
@@ -56,6 +61,7 @@ beforeAll(async () => {
         mcp: { type: "http", url: "https://app.composio.dev/tool_router/v3/trs_test/mcp" },
         config: {
           user_id: "openmausbot_existing",
+          sandbox: { enable: false },
           multi_account: {
             enable: true,
             max_accounts_per_toolkit: 5,
@@ -219,6 +225,7 @@ describe.sequential("Composio Sessions", () => {
     });
     expect(calls.filter((call) => call.method === "POST" && call.path.endsWith("/session")).at(-1)?.body).toEqual({
       user_id: "openmausbot_existing",
+      sandbox: { enable: false },
       manage_connections: {
         enable: true,
         enable_wait_for_connections: true,
@@ -252,6 +259,7 @@ describe.sequential("Composio Sessions", () => {
     });
     expect(calls.filter((call) => call.method === "POST" && call.path.endsWith("/session")).at(-1)?.body).toMatchObject({
       user_id: "openmausbot_legacy",
+      sandbox: { enable: false },
       multi_account: {
         enable: true,
         max_accounts_per_toolkit: 5,

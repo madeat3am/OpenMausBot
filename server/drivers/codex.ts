@@ -297,9 +297,12 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
         const mcpTool = isMcpElicitation
           ? String(params.message ?? "").match(/tool \"([^\"]+)\"/)?.[1]
           : undefined;
+        const mcpServer = isMcpElicitation && typeof params.serverName === "string"
+          ? params.serverName
+          : undefined;
         const tool =
           isMcpElicitation
-            ? (mcpTool ?? "mcp")
+            ? (mcpServer && mcpTool ? `mcp__${mcpServer}__${mcpTool}` : (mcpTool ?? "mcp"))
             : method === "item/fileChange/requestApproval" || method === "applyPatchApproval"
             ? "edit"
             : isQuestion

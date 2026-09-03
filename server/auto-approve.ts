@@ -65,8 +65,12 @@ const COMMAND_TOOLS = new Set(["bash", "shell", "execute", "run_command", "compu
 // presents the native approval card. Discovery helpers are pre-approved by
 // the drivers and do not reach this path.
 function isComposioAction(tool: string): boolean {
+  const lower = tool.toLowerCase();
   const name = tool.split("__").at(-1)?.toUpperCase() ?? "";
-  return name.startsWith("COMPOSIO_") && ![
+  const connectorServer = lower.startsWith("mcp__composio__")
+    || lower.startsWith("mcp__openmausbot_connectors__");
+  if (!connectorServer && !name.startsWith("COMPOSIO_")) return false;
+  return ![
     "COMPOSIO_SEARCH_TOOLS",
     "COMPOSIO_GET_TOOL_SCHEMAS",
     "COMPOSIO_WAIT_FOR_CONNECTIONS",

@@ -137,6 +137,8 @@ describe("autoDecision", () => {
     "mcp__composio__COMPOSIO_MULTI_EXECUTE_TOOL",
     "mcp__openmausbot_connectors__COMPOSIO_MANAGE_CONNECTIONS",
     "COMPOSIO_REMOTE_WORKBENCH",
+    "mcp__composio__GMAIL_SEND_EMAIL",
+    "mcp__openmausbot_connectors__SLACK_SEND_MESSAGE",
   ])("never auto-approves a connected-app action: %s", (tool) => {
     const bot = { autoApprove: true, alwaysAllow: [tool] };
     expect(autoDecision(bot, tool, "perform the requested provider action")).toBeNull();

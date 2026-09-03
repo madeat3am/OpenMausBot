@@ -20,6 +20,8 @@ const sessionResponseSchema = z.object({
   mcp: z.object({ type: z.enum(["http", "sse"]), url: z.string().min(1) }),
   config: z.object({
     user_id: z.string().optional(),
+    sandbox: z.object({ enable: z.boolean().optional() }).optional(),
+    workbench: z.object({ enable: z.boolean().optional() }).optional(),
     multi_account: z.object({
       enable: z.boolean().optional(),
       max_accounts_per_toolkit: z.number().optional(),
@@ -112,6 +114,7 @@ const MULTI_ACCOUNT_CONFIG = {
 
 interface SessionCreateRequest {
   user_id: string;
+  sandbox: { enable: false };
   manage_connections: { enable: boolean; enable_wait_for_connections: boolean; enable_connection_removal: boolean };
   multi_account: typeof MULTI_ACCOUNT_CONFIG;
   /** toolkit slug → the project's own auth config id; named only when the
@@ -356,6 +359,13 @@ function sessionCoversAuthConfigs(session: SessionResponse, wanted: AuthConfigMa
   return Object.entries(wanted).every(([slug, id]) => haveLower[slug] === id);
 }
 
+/** OMB approves provider calls one at a time. Composio's remote sandbox can
+ * execute nested provider calls behind one workbench tool approval, so only a
+ * Session that explicitly disables that native capability is safe to reuse. */
+function sessionDisablesSandbox(session: SessionResponse): boolean {
+  return session.config?.sandbox?.enable === false || session.config?.workbench?.enable === false;
+}
+
 function authConfigsKey(sessionId: string, wanted: AuthConfigMap): string {
   return `${sessionId}:${JSON.stringify(wanted)}`;
 }
@@ -382,6 +392,7 @@ export async function prepareProjectSession(
     if (
       existing
       && supportsMultiAccount(existing)
+      && sessionDisablesSandbox(existing)
       && (sessionCoversAuthConfigs(existing, authConfigs)
         || authConfigUpgradeAttempted.has(authConfigsKey(existing.session_id, authConfigs)))
     ) {
@@ -400,6 +411,7 @@ export async function prepareProjectSession(
   const userId = priorUserId ?? `openmausbot_${randomUUID()}`;
   const sessionRequest: SessionCreateRequest = {
     user_id: userId,
+    sandbox: { enable: false },
     manage_connections: {
       enable: true,
       enable_wait_for_connections: true,

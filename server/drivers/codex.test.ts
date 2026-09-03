@@ -440,7 +440,7 @@ describe("CodexDriver turns (fake app-server)", () => {
     const opened = await recorder.until((e) => e.type === "request.opened");
     expect(opened).toMatchObject({
       requestType: "permission",
-      tool: "list_bots",
+      tool: "mcp__agents__list_bots",
       summary: 'Allow the agents MCP server to run tool "list_bots"?',
     });
 
