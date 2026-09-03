@@ -32,6 +32,10 @@ let nextCreatedSafety: {
   sandbox?: { enable?: boolean };
   workbench?: { enable?: boolean };
 } | undefined;
+let nextReadbackSafety: {
+  sandbox?: { enable?: boolean };
+  workbench?: { enable?: boolean };
+} | undefined;
 
 beforeAll(async () => {
   api = createServer(async (req, res) => {
@@ -65,14 +69,17 @@ beforeAll(async () => {
       }));
     }
     if (req.method === "GET" && url.pathname === "/api/v3.1/tool_router/session/trs_test") {
+      const readbackSandbox = nextReadbackSafety?.sandbox ?? sessionSandbox;
+      const readbackWorkbench = nextReadbackSafety?.workbench ?? sessionWorkbench;
+      nextReadbackSafety = undefined;
       res.writeHead(200, { "content-type": "application/json" });
       return res.end(JSON.stringify({
         session_id: "trs_test",
         mcp: { type: "http", url: "https://app.composio.dev/tool_router/v3/trs_test/mcp" },
         config: {
           user_id: "openmausbot_existing",
-          sandbox: sessionSandbox,
-          workbench: sessionWorkbench,
+          sandbox: readbackSandbox,
+          workbench: readbackWorkbench,
           multi_account: {
             enable: true,
             max_accounts_per_toolkit: 5,
@@ -283,6 +290,15 @@ describe.sequential("Composio Sessions", () => {
     await expect(prepareProjectSession("ak_test", { userId: "openmausbot_existing" }))
       .rejects.toThrow(/did not confirm a sandbox-disabled Session/i);
 
+    sessionSandbox = { enable: false };
+    sessionWorkbench = undefined;
+  });
+
+  it("fails before returning settings when the created Session GET readback is unsafe", async () => {
+    nextReadbackSafety = { sandbox: { enable: false }, workbench: { enable: true } };
+    await expect(prepareProjectSession("ak_test", { userId: "openmausbot_existing" }))
+      .rejects.toThrow(/did not confirm a sandbox-disabled Session/i);
+    expect(nextReadbackSafety).toBeUndefined();
     sessionSandbox = { enable: false };
     sessionWorkbench = undefined;
   });

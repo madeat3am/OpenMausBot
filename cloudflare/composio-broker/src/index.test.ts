@@ -23,7 +23,7 @@ function session(id: string, userId: string, configured = true) {
   return {
     session_id: id,
     mcp: { url: `https://mcp.composio.dev/${id}` },
-    config: { user_id: userId, ...(configured ? { multi_account: multiAccount } : {}) },
+    config: { user_id: userId, sandbox: { enable: false }, ...(configured ? { multi_account: multiAccount } : {}) },
   };
 }
 
@@ -75,6 +75,7 @@ describe("connected-apps broker boundaries", () => {
       headers: { "x-session": "one" },
       userId: undefined,
       multiAccountConfigured: false,
+      sandboxDisabled: false,
     });
     expect(() => parseSession({ session_id: "session-1", mcp: { url: "https://attacker.example/mcp" } })).toThrow(/untrusted/i);
     expect(() => parseSession({ session_id: "session-1", mcp: { url: "http://mcp.composio.dev/session" } })).toThrow(/untrusted/i);
@@ -98,8 +99,10 @@ describe("connected-apps broker boundaries", () => {
     });
     expect(JSON.parse(String(fetchCalls[0].init?.body))).toMatchObject({
       user_id: "omb_user",
+      sandbox: { enable: false },
       multi_account: multiAccount,
     });
+    expect(fetchCalls.some((call) => call.url.endsWith("/tool_router/session/trs_new") && !call.init?.method)).toBe(true);
   });
 
   it("upgrades a legacy Session without changing the installation's Composio user", async () => {
@@ -109,6 +112,7 @@ describe("connected-apps broker boundaries", () => {
       const url = String(input);
       fetchCalls.push({ url, init });
       if (init?.method === "POST") return Response.json(session("trs_new", "omb_stable"), { status: 201 });
+      if (url.endsWith("/trs_new")) return Response.json(session("trs_new", "omb_stable"));
       return Response.json(session("trs_legacy", "omb_stable", false));
     });
 
@@ -121,6 +125,54 @@ describe("connected-apps broker boundaries", () => {
     const creation = fetchCalls.find((call) => call.init?.method === "POST");
     expect(JSON.parse(String(creation?.init?.body))).toMatchObject({ user_id: "omb_stable", multi_account: multiAccount });
     expect(dbRuns.some((run) => run.values[0] === "trs_new" && run.values[2] === "install-1")).toBe(true);
+  });
+
+  it("recreates an unsafe Session and persists only a verified sandbox-disabled replacement", async () => {
+    const fetchCalls: Array<{ url: string; init?: RequestInit }> = [];
+    const { env, ctx, dbRuns } = testEnv(fetchCalls);
+    vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      fetchCalls.push({ url, init });
+      if (init?.method === "POST") return Response.json(session("trs_safe", "omb_stable"), { status: 201 });
+      if (url.endsWith("/trs_unsafe")) {
+        const unsafe = session("trs_unsafe", "omb_stable");
+        unsafe.config.sandbox = { enable: true };
+        return Response.json(unsafe);
+      }
+      return Response.json(session("trs_safe", "omb_stable"));
+    });
+
+    await expect(ensureSession({
+      id: "install-1",
+      composio_user_id: "omb_stable",
+      session_id: "trs_unsafe",
+      disabled_at: null,
+    }, env as never, ctx as never)).resolves.toMatchObject({ sessionId: "trs_safe", sandboxDisabled: true });
+    expect(dbRuns.some((run) => run.values[0] === "trs_safe" && run.values[2] === "install-1")).toBe(true);
+  });
+
+  it("does not persist a replacement when its GET readback is unsafe", async () => {
+    const fetchCalls: Array<{ url: string; init?: RequestInit }> = [];
+    const { env, ctx, dbRuns } = testEnv(fetchCalls);
+    vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      fetchCalls.push({ url, init });
+      if (init?.method === "POST") return Response.json(session("trs_new", "omb_stable"), { status: 201 });
+      if (url.endsWith("/trs_new")) {
+        const unsafe = session("trs_new", "omb_stable");
+        (unsafe.config as typeof unsafe.config & { workbench?: { enable: boolean } }).workbench = { enable: true };
+        return Response.json(unsafe);
+      }
+      return Response.json(session("trs_legacy", "omb_stable", false));
+    });
+
+    await expect(ensureSession({
+      id: "install-1",
+      composio_user_id: "omb_stable",
+      session_id: "trs_legacy",
+      disabled_at: null,
+    }, env as never, ctx as never)).rejects.toThrow(/did not confirm a sandbox-disabled Session/i);
+    expect(dbRuns).toHaveLength(0);
   });
 
   it("returns every account and deletes only an owned account ID", async () => {

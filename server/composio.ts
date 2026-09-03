@@ -437,6 +437,9 @@ export async function prepareProjectSession(
   });
   if (!res.ok) throw new Error(await responseError(res, `Composio rejected this key (HTTP ${res.status})`));
   const session = requireSandboxDisabled(parseSessionResponse(sessionResponseSchema.parse(await res.json())));
+  const verified = await getProjectSession(trimmed, session.session_id);
+  if (!verified) throw new Error("Composio Session disappeared after creation");
+  requireSandboxDisabled(verified);
   // If Composio does not echo the configs back, a later check would ask for
   // the same creation again — remember this attempt so it happens once.
   authConfigUpgradeAttempted.add(authConfigsKey(session.session_id, authConfigs));
