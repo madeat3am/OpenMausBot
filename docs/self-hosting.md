@@ -70,8 +70,10 @@ What the stack does, so you can adapt it:
 - [`Dockerfile`](../Dockerfile) builds the UI and the self-contained
   server bundle, and runs them as an unprivileged user with `HOME=/data`.
   `--build-arg ENGINES="…"` (or `ENGINES=` in `.env`) bakes engine CLIs
-  into the image. Source builds also require the exact version and full Git
-  revision through `OMB_APP_VERSION` and `OMB_APP_REVISION`.
+  into the image. `SYSTEM_PACKAGES=` adds OS packages needed by mounted local
+  stdio MCP commands (for example, `python3` for a Python MCP script). Source
+  builds also require the exact version and full Git revision through
+  `OMB_APP_VERSION` and `OMB_APP_REVISION`.
 - [`deploy/docker-compose.yml`](../deploy/docker-compose.yml) runs Caddy
   **in the server's network namespace**, so Caddy reaches the server on
   `127.0.0.1` and the server never binds anything public.

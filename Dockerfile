@@ -32,8 +32,9 @@ RUN pnpm build:server && pnpm exec vite build
 
 FROM node:24-bookworm-slim
 # git + curl: agent CLIs shell out to git; curl backs the healthcheck
+ARG SYSTEM_PACKAGES=""
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl git \
+  && apt-get install -y --no-install-recommends ca-certificates curl git $SYSTEM_PACKAGES \
   && rm -rf /var/lib/apt/lists/* \
   && useradd --create-home --home-dir /data --shell /bin/bash maus
 WORKDIR /app

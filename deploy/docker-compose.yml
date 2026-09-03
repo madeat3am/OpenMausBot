@@ -13,6 +13,7 @@ services:
       context: ..
       args:
         ENGINES: ${ENGINES:-}
+        SYSTEM_PACKAGES: ${SYSTEM_PACKAGES:-}
         OMB_APP_VERSION: ${OMB_APP_VERSION:-unknown}
         OMB_APP_REVISION: ${OMB_APP_REVISION:-unknown}
     # prebuilt on every main push; `docker compose up --build` builds from source instead
