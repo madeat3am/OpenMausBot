@@ -187,7 +187,7 @@ object SearchPolicy {
  * with a task list get the same task controls as an agent. Exporting is not a
  * bot idea — a room has a transcript like anything else.
  */
-enum class ChatActionId { NEW_TASK, TASKS, WATCH_COMPUTER, SETTINGS, SHARE_MARKDOWN, SHARE_JSON, INTERRUPT }
+enum class ChatActionId { PHOTOS, FILES, NEW_TASK, TASKS, SETTINGS, WATCH_COMPUTER, SHARE_MARKDOWN, SHARE_JSON, INTERRUPT }
 
 data class ChatAction(
     val id: ChatActionId,
@@ -207,9 +207,24 @@ object ChatActions {
      * fresh thread over the one question on screen that only a person can
      * answer.
      */
-    fun sheet(chat: Chat, hasPendingApproval: Boolean): List<ChatAction> {
+    fun sheet(chat: Chat, hasPendingApproval: Boolean, canAddAttachment: Boolean): List<ChatAction> {
         val bot = (chat as? Chat.BotChat)?.bot
         val out = mutableListOf<ChatAction>()
+        // Attachments first, for a bot and a room alike — the order of iOS's
+        // `plusActions`. [canAddAttachment] is false at the four-item cap and
+        // while a send or an import is in flight.
+        out += ChatAction(
+            id = ChatActionId.PHOTOS,
+            title = "Photo Library",
+            subtitle = "Add a photo to this message",
+            enabled = canAddAttachment,
+        )
+        out += ChatAction(
+            id = ChatActionId.FILES,
+            title = "Choose File",
+            subtitle = "Add a document from Files",
+            enabled = canAddAttachment,
+        )
         if (bot != null) {
             out += ChatAction(
                 id = ChatActionId.NEW_TASK,
@@ -667,9 +682,11 @@ object ComposerAccessories {
         busy: Boolean,
         pendingApproval: Boolean,
         hasQuickReplies: Boolean,
+        /** A pending attachment is half a message too; a chip would send without it. */
+        hasAttachments: Boolean,
     ): ComposerAccessory = when {
         hudOpen -> ComposerAccessory.HUD
-        draft.isEmpty() && !busy && !pendingApproval && hasQuickReplies -> ComposerAccessory.CHIPS
+        draft.isEmpty() && !hasAttachments && !busy && !pendingApproval && hasQuickReplies -> ComposerAccessory.CHIPS
         else -> ComposerAccessory.NONE
     }
 }

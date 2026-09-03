@@ -19,11 +19,14 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.LinkInteractionListener
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
@@ -61,14 +64,25 @@ fun MarkdownText(
      * in a list item.
      */
     caret: Boolean = false,
+    /**
+     * Where a tapped link goes. Null hands every link to the system; a chat
+     * supplies this so a bot's desktop path is fetched through the computer
+     * instead of handed to a browser that cannot reach it.
+     */
+    openLink: ((String) -> Unit)? = null,
 ) {
     val blocks = Markdown.blocks(source)
-    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        blocks.forEachIndexed { index, block ->
-            MarkdownBlockView(block, tail = caret && index == blocks.lastIndex)
+    CompositionLocalProvider(LocalLinkOpener provides openLink) {
+        Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            blocks.forEachIndexed { index, block ->
+                MarkdownBlockView(block, tail = caret && index == blocks.lastIndex)
+            }
         }
     }
 }
+
+/** The opener [MarkdownText] was given, reachable from every block's inline run. */
+private val LocalLinkOpener = compositionLocalOf<((String) -> Unit)?> { null }
 
 @Composable
 private fun MarkdownBlockView(block: MarkdownBlock, tail: Boolean) {
@@ -166,6 +180,7 @@ private fun MarkerRow(symbol: String, indent: Int, text: String, tail: Boolean, 
 @Composable
 private fun inline(text: String, tail: Boolean, muted: Color): AnnotatedString {
     val linkColor = MaterialTheme.colorScheme.primary
+    val opener = LocalLinkOpener.current
     return buildAnnotatedString {
         for (span in InlineMarkdown.parse(text)) {
             val style = SpanStyle(
@@ -190,6 +205,8 @@ private fun inline(text: String, tail: Boolean, muted: Color): AnnotatedString {
                                 textDecoration = TextDecoration.Underline,
                             ),
                         ),
+                        // With an opener the UriHandler is never consulted.
+                        linkInteractionListener = opener?.let { open -> LinkInteractionListener { open(url) } },
                     ),
                 ) { append(span.text) }
             }

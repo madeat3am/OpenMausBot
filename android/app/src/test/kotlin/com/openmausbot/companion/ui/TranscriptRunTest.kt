@@ -110,6 +110,8 @@ class ChatActionsTest {
         val actions = sheet(Chat.BotChat(bot(name = "Scout")))
         assertEquals(
             listOf(
+                ChatActionId.PHOTOS,
+                ChatActionId.FILES,
                 ChatActionId.NEW_TASK,
                 ChatActionId.TASKS,
                 ChatActionId.SETTINGS,
@@ -119,18 +121,22 @@ class ChatActionsTest {
             ),
             actions.map { it.id },
         )
-        assertEquals("New task", actions[0].title)
-        assertEquals("Start a fresh thread with Scout", actions[0].subtitle)
-        assertEquals("Tasks", actions[1].title)
-        assertEquals("Switch, rename or remove one", actions[1].subtitle)
-        assertEquals("Bot settings", actions[2].title)
-        assertEquals("Model, profile, voice and notifications", actions[2].subtitle)
-        assertEquals("Watch computer", actions[3].title)
-        assertEquals("Live view of what Scout is doing", actions[3].subtitle)
-        assertEquals("Share transcript", actions[4].title)
-        assertEquals("This chat as Markdown", actions[4].subtitle)
-        assertEquals("Share as JSON", actions[5].title)
-        assertEquals("Structured transcript data", actions[5].subtitle)
+        assertEquals("Photo Library", actions[0].title)
+        assertEquals("Add a photo to this message", actions[0].subtitle)
+        assertEquals("Choose File", actions[1].title)
+        assertEquals("Add a document from Files", actions[1].subtitle)
+        assertEquals("New task", actions[2].title)
+        assertEquals("Start a fresh thread with Scout", actions[2].subtitle)
+        assertEquals("Tasks", actions[3].title)
+        assertEquals("Switch, rename or remove one", actions[3].subtitle)
+        assertEquals("Bot settings", actions[4].title)
+        assertEquals("Model, profile, voice and notifications", actions[4].subtitle)
+        assertEquals("Watch computer", actions[5].title)
+        assertEquals("Live view of what Scout is doing", actions[5].subtitle)
+        assertEquals("Share transcript", actions[6].title)
+        assertEquals("This chat as Markdown", actions[6].subtitle)
+        assertEquals("Share as JSON", actions[7].title)
+        assertEquals("Structured transcript data", actions[7].subtitle)
     }
 
     @Test
@@ -160,24 +166,26 @@ class ChatActionsTest {
         // above it asks only `bot.busy == true`.
         val channel = Chat.RoomChat(taskCapableRoom())
         assertFalse(
-            ChatActions.sheet(channel, hasPendingApproval = true)
+            ChatActions.sheet(channel, hasPendingApproval = true, canAddAttachment = true)
                 .single { it.id == ChatActionId.NEW_TASK }.enabled,
         )
         assertTrue(
-            ChatActions.sheet(channel, hasPendingApproval = false)
+            ChatActions.sheet(channel, hasPendingApproval = false, canAddAttachment = true)
                 .single { it.id == ChatActionId.NEW_TASK }.enabled,
         )
         assertTrue(
-            ChatActions.sheet(Chat.BotChat(bot()), hasPendingApproval = true)
+            ChatActions.sheet(Chat.BotChat(bot()), hasPendingApproval = true, canAddAttachment = true)
                 .single { it.id == ChatActionId.NEW_TASK }.enabled,
         )
     }
 
     @Test
     fun `a pending approval leaves the rest of a channel's sheet alone`() {
-        val actions = ChatActions.sheet(Chat.RoomChat(taskCapableRoom()), hasPendingApproval = true)
+        val actions = ChatActions.sheet(Chat.RoomChat(taskCapableRoom()), hasPendingApproval = true, canAddAttachment = true)
         assertEquals(
             listOf(
+                ChatActionId.PHOTOS,
+                ChatActionId.FILES,
                 ChatActionId.NEW_TASK,
                 ChatActionId.TASKS,
                 ChatActionId.SHARE_MARKDOWN,
@@ -194,7 +202,7 @@ class ChatActionsTest {
         // channel branch is the only one that adds them.
         val dm = Chat.RoomChat(taskCapableRoom().copy(dm = true))
         assertEquals(
-            listOf(ChatActionId.SHARE_MARKDOWN, ChatActionId.SHARE_JSON),
+            listOf(ChatActionId.PHOTOS, ChatActionId.FILES, ChatActionId.SHARE_MARKDOWN, ChatActionId.SHARE_JSON),
             sheet(dm).map { it.id },
         )
     }
@@ -203,7 +211,7 @@ class ChatActionsTest {
     fun `a legacy room has no tasks, no computer and nothing to interrupt`() {
         val busyRoom = Chat.RoomChat(room().copy(busyBotId = "bot-1"))
         assertEquals(
-            listOf(ChatActionId.SHARE_MARKDOWN, ChatActionId.SHARE_JSON),
+            listOf(ChatActionId.PHOTOS, ChatActionId.FILES, ChatActionId.SHARE_MARKDOWN, ChatActionId.SHARE_JSON),
             sheet(busyRoom).map { it.id },
         )
     }
@@ -214,6 +222,8 @@ class ChatActionsTest {
         val actions = sheet(room)
         assertEquals(
             listOf(
+                ChatActionId.PHOTOS,
+                ChatActionId.FILES,
                 ChatActionId.NEW_TASK,
                 ChatActionId.TASKS,
                 ChatActionId.SHARE_MARKDOWN,
@@ -241,7 +251,7 @@ class ChatActionsTest {
     }
 
     /** The sheet with nothing waiting on an answer, which is most of these cases. */
-    private fun sheet(chat: Chat) = ChatActions.sheet(chat, hasPendingApproval = false)
+    private fun sheet(chat: Chat) = ChatActions.sheet(chat, hasPendingApproval = false, canAddAttachment = true)
 
     private fun taskCapableRoom(): Room =
         room().copy(tasks = listOf(BotTask("thread-room-1", "Plan", 0.0)))

@@ -9,4 +9,11 @@
     <cache-path
         name="shared-transcripts"
         path="shared-transcripts/" />
+    <!--
+      Files a bot linked, downloaded for viewing. FilePreviews keeps at most
+      the most recent one, in its own directory, and empties the rest.
+    -->
+    <cache-path
+        name="file-previews"
+        path="file-previews/" />
 </paths>

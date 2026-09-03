@@ -261,6 +261,7 @@ class ComposerAccessoriesTest {
                 busy = false,
                 pendingApproval = false,
                 hasQuickReplies = true,
+                hasAttachments = false,
             ),
         )
     }
@@ -294,6 +295,7 @@ class ComposerAccessoriesTest {
                 busy = true,
                 pendingApproval = true,
                 hasQuickReplies = true,
+                hasAttachments = false,
             ),
         )
     }
@@ -316,7 +318,8 @@ class ComposerAccessoriesTest {
         busy: Boolean = false,
         pendingApproval: Boolean = false,
         hasQuickReplies: Boolean = true,
-    ) = ComposerAccessories.accessory(hudOpen, draft, busy, pendingApproval, hasQuickReplies)
+        hasAttachments: Boolean = false,
+    ) = ComposerAccessories.accessory(hudOpen, draft, busy, pendingApproval, hasQuickReplies, hasAttachments)
 
     private fun card(pending: Boolean): Message = Message(
         id = if (pending) "pending" else "answered",

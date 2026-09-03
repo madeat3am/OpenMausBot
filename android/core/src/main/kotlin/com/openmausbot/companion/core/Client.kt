@@ -237,6 +237,39 @@ class CompanionClient(
         return raw.data
     }
 
+    /**
+     * Fetch an app-owned file mentioned by one transcript message. The path
+     * still names the file on the paired computer, so it is sent in an
+     * authenticated JSON body rather than placed in the URL. The server
+     * verifies both message provenance and its attachment roots.
+     */
+    suspend fun downloadFile(threadId: String, messageId: String, path: String): DownloadedFile {
+        val link = LocalMessageLink.resolve(path) as? LocalMessageLink.DesktopFile ?: throw APIError.BadUrl
+        val raw = perform(
+            makeRequest(
+                "POST",
+                "/api/threads/${safeRouteId(threadId)}/messages/${safeRouteId(messageId)}/file",
+                body = jsonBody("path" to link.path),
+            ),
+        )
+        check(raw)
+        val declared = raw.headers["Content-Length"]?.trim()?.toLongOrNull() ?: -1L
+        if (declared > MAXIMUM_FILE_DOWNLOAD_BYTES || raw.data.size > MAXIMUM_FILE_DOWNLOAD_BYTES) {
+            throw APIError.Transport("That file is larger than 25 MB.")
+        }
+        val rawContentType = raw.headers["Content-Type"].orEmpty()
+        val contentType = if (AttachmentPolicy.validMime(rawContentType)) {
+            AttachmentPolicy.normalizedMime(rawContentType)
+        } else {
+            "application/octet-stream"
+        }
+        return DownloadedFile(
+            data = raw.data,
+            filename = downloadFilename(raw.headers["Content-Disposition"], link.path),
+            contentType = contentType,
+        )
+    }
+
     suspend fun avatar(path: String): ByteArray {
         if (!validAvatarPath(path)) throw APIError.BadUrl
         val raw = perform(makeRequest("GET", path))
@@ -658,6 +691,39 @@ class CompanionClient(
         private const val STREAM_IDLE_TIMEOUT_SECONDS = 90L
         private const val AVATAR_MAX_BYTES = 10 * 1_024 * 1_024
         const val SHARE_FILE_MAX_BYTES = 25 * 1_024 * 1_024
+        const val MAXIMUM_FILE_DOWNLOAD_BYTES = AttachmentPolicy.MAXIMUM_FILE_BYTES
+
+        /**
+         * The name to show a downloaded file under: `filename*=` first, then
+         * `filename=`, then the last segment of the requested path — reduced to
+         * a basename, with control and bidi-override characters blanked so a
+         * server-chosen name cannot disguise itself.
+         */
+        internal fun downloadFilename(disposition: String?, fallbackPath: String): String {
+            val parameters = disposition.orEmpty().split(';').map(String::trim)
+            val encoded = parameters.firstOrNull { it.startsWith("filename*=", ignoreCase = true) }
+                ?.drop("filename*=".length)
+            val ordinary = parameters.firstOrNull { it.startsWith("filename=", ignoreCase = true) }
+                ?.drop("filename=".length)
+            val decodedEncoded = encoded?.let { value ->
+                val unquoted = value.trim('"')
+                val payload = unquoted.split('\'', limit = 3)
+                val encodedValue = if (payload.size == 3) payload[2] else unquoted
+                runCatching { java.net.URLDecoder.decode(encodedValue.replace("+", "%2B"), "UTF-8") }.getOrNull()
+            }
+            val candidate = decodedEncoded
+                ?: ordinary?.trim('"')
+                ?: fallbackPath.split('/', '\\').lastOrNull { it.isNotEmpty() }
+                ?: "file"
+            val basename = candidate.split('/', '\\').lastOrNull { it.isNotEmpty() } ?: "file"
+            val cleaned = basename.map { character ->
+                val code = character.code
+                val bidiControl = code in 0x202A..0x202E || code in 0x2066..0x2069
+                if (character.isISOControl() || bidiControl) ' ' else character
+            }.joinToString("").trim()
+            val shortened = cleaned.take(180)
+            return if (shortened.isEmpty() || shortened == "." || shortened == "..") "file" else shortened
+        }
         private val AVATAR_MIME_TYPES = setOf("image/png", "image/jpeg", "image/gif", "image/webp")
         private val JSON_MEDIA_TYPE = "application/json".toMediaType()
         private val EMPTY_BODY: RequestBody = ByteArray(0).toRequestBody(null)

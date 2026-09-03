@@ -94,7 +94,13 @@ private const val MESSAGE_CLIP_LABEL = "OpenMausMobile message"
  * never has to look at its neighbours.
  */
 @Composable
-fun MessageRow(chat: Chat, message: Message, endsRun: Boolean = true) {
+fun MessageRow(
+    chat: Chat,
+    message: Message,
+    endsRun: Boolean = true,
+    /** Where a tapped link in a bot reply goes; null leaves it to the system. */
+    openLink: ((String, Message) -> Unit)? = null,
+) {
     val session = LocalCompanion.current.session
     val scope = rememberCoroutineScope()
     val haptics = rememberHaptics()
@@ -127,7 +133,7 @@ fun MessageRow(chat: Chat, message: Message, endsRun: Boolean = true) {
             horizontalAlignment = if (mine) Alignment.End else Alignment.Start,
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            MessageContent(chat = chat, message = message, endsRun = endsRun, haptics = haptics)
+            MessageContent(chat = chat, message = message, endsRun = endsRun, haptics = haptics, openLink = openLink)
 
             message.comm?.let {
                 Text(
@@ -357,9 +363,15 @@ private fun SelectableTextDialog(text: String, onDismiss: () -> Unit) {
 }
 
 @Composable
-private fun MessageContent(chat: Chat, message: Message, endsRun: Boolean, haptics: Haptics) {
+private fun MessageContent(
+    chat: Chat,
+    message: Message,
+    endsRun: Boolean,
+    haptics: Haptics,
+    openLink: ((String, Message) -> Unit)?,
+) {
     when (message.kind) {
-        Message.Kind.TEXT -> TextBubble(message, endsRun)
+        Message.Kind.TEXT -> TextBubble(message, endsRun, openLink)
         Message.Kind.OPTIONS -> CardView(chat, message, haptics)
         Message.Kind.ACTIVITY -> ActivityChip(message.tool)
         Message.Kind.SCREEN -> ScreenShot(chat.threadId, message)
@@ -368,12 +380,12 @@ private fun MessageContent(chat: Chat, message: Message, endsRun: Boolean, hapti
         // always better than a gap in the transcript. When there is nothing to
         // show, show nothing — a placeholder saying "unsupported" is a worse gap
         // than the gap.
-        Message.Kind.UNKNOWN -> if (!message.text.isNullOrEmpty()) TextBubble(message, endsRun)
+        Message.Kind.UNKNOWN -> if (!message.text.isNullOrEmpty()) TextBubble(message, endsRun, openLink)
     }
 }
 
 @Composable
-private fun TextBubble(message: Message, endsRun: Boolean) {
+private fun TextBubble(message: Message, endsRun: Boolean, openLink: ((String, Message) -> Unit)?) {
     val mine = message.role == Message.Role.USER
     val tail = TranscriptLayout.tail(message, endsRun)
     // A reply that is *entirely* a patch or a table is drawn as one. The gate is
@@ -451,7 +463,10 @@ private fun TextBubble(message: Message, endsRun: Boolean) {
                             }
                         }
                     } else {
-                        MarkdownText(source = message.text.orEmpty())
+                        MarkdownText(
+                            source = message.text.orEmpty(),
+                            openLink = openLink?.let { open -> { url -> open(url, message) } },
+                        )
                     }
                 }
             }
