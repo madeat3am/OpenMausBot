@@ -44,7 +44,7 @@ jobs:
       - name: clean build outputs
         shell: bash
         run: rm -rf dist dist-server release
-      - run: pnpm package:win -- --config.extraMetadata.buildRevision="${{ steps.revision.outputs.sha }}"
+      - run: pnpm package:win --config.extraMetadata.buildRevision="${{ steps.revision.outputs.sha }}"
         shell: bash
       - run: node scripts/verify-packaged-revision.mjs "${{ steps.revision.outputs.sha }}" release/win-unpacked/resources/app.asar
         shell: bash
