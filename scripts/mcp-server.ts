@@ -2,6 +2,9 @@
 // Model Context Protocol (MCP) Server for OpenMausBot
 // Standard JSON-RPC 2.0 stdio transport for external agent orchestration (Hermes, Claude Desktop, Cursor, etc.).
 import readline from "node:readline";
+import { createHash, randomUUID } from "node:crypto";
+import { link, open, unlink } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 
 export function validateBaseUrl(url: string): string {
   const trimmed = url.replace(/\/+$/, "");
@@ -77,6 +80,22 @@ async function fetchJson(url: string, options: RequestInit = {}): Promise<any> {
   }
 }
 
+export async function requestResponse(path: string, options: RequestInit = {}, baseUrl?: string): Promise<Response> {
+  const target = baseUrl ? validateBaseUrl(baseUrl) : await resolveBaseUrl();
+  const timeout = AbortSignal.timeout(requestTimeoutMs());
+  const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
+  const response = await fetch(`${target}${path}`, {
+    ...options,
+    signal,
+    headers: requestHeaders(options),
+  });
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`OpenMausBot API error (${response.status}): ${text || response.statusText}`);
+  }
+  return response;
+}
+
 export async function probeBaseUrls(candidates: string[]): Promise<string> {
   const failures: string[] = [];
   for (const unvalidated of candidates) {
@@ -134,6 +153,29 @@ const ADDITIVE = { readOnlyHint: false, destructiveHint: false, idempotentHint: 
 const MUTATING = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false } as const;
 const DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false } as const;
 const AGENT_ACTION = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true } as const;
+const MESSAGE_FILE_MAX_BYTES = 25 * 1024 * 1024;
+
+async function readBoundedResponse(response: Response, maximumBytes: number): Promise<Buffer> {
+  if (!response.body) return Buffer.alloc(0);
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let received = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received += value.byteLength;
+      if (received > maximumBytes) {
+        await reader.cancel("OpenMausBot file exceeded the download limit").catch(() => undefined);
+        throw new Error(`OpenMausBot file exceeds ${maximumBytes} bytes`);
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks, received);
+}
 
 export const TOOLS: McpToolDefinition[] = [
   {
@@ -170,6 +212,22 @@ export const TOOLS: McpToolDefinition[] = [
       additionalProperties: false,
     },
     annotations: READ_ONLY,
+  },
+  {
+    name: "download_message_file",
+    description: "Download one file linked by an exact stored bot message. The destination must not already exist.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task_id: { type: "string", description: "The bot or channel task/thread ID containing the message." },
+        message_id: { type: "string", description: "The exact bot message ID that links to the file." },
+        path: { type: "string", description: "The exact local-file link target shown in that bot message." },
+        output_path: { type: "string", description: "Destination path on this MCP client's machine. Its parent directory must exist." },
+      },
+      required: ["task_id", "message_id", "path", "output_path"],
+      additionalProperties: false,
+    },
+    annotations: ADDITIVE,
   },
   {
     name: "send_bot_message",
@@ -742,6 +800,7 @@ export async function handleToolCall(
   args: Record<string, unknown>,
   baseFetcher: (path: string, options?: RequestInit) => Promise<any> = request,
   signal?: AbortSignal,
+  responseFetcher: (path: string, options?: RequestInit) => Promise<Response> = requestResponse,
 ): Promise<unknown> {
   const fetcher = signal
     ? (path: string, options: RequestInit = {}) => baseFetcher(path, { ...options, signal: options.signal ?? signal })
@@ -778,6 +837,57 @@ export async function handleToolCall(
         taskId,
         messages: records(page.messages).map(projectMessage),
         hasMore: Boolean(page.hasMore),
+      };
+    }
+
+    case "download_message_file": {
+      const taskId = idArg(args, "task_id");
+      const messageId = idArg(args, "message_id");
+      const linkedPath = stringArg(args, "path", { trim: false, max: 8_192 });
+      const outputPath = resolve(stringArg(args, "output_path", { trim: false, max: 32_768 }));
+      const response = await responseFetcher(
+        `/api/threads/${encodeURIComponent(taskId)}/messages/${encodeURIComponent(messageId)}/file`,
+        {
+          method: "POST",
+          body: JSON.stringify({ path: linkedPath }),
+          ...(signal ? { signal } : {}),
+        },
+      );
+      const rawLength = response.headers.get("content-length");
+      const declaredBytes = rawLength === null ? Number.NaN : Number(rawLength);
+      if (!Number.isSafeInteger(declaredBytes) || declaredBytes < 0) {
+        await response.body?.cancel().catch(() => undefined);
+        throw new Error("OpenMausBot file response did not include a valid content length");
+      }
+      if (declaredBytes > MESSAGE_FILE_MAX_BYTES) {
+        await response.body?.cancel().catch(() => undefined);
+        throw new Error(`OpenMausBot file exceeds ${MESSAGE_FILE_MAX_BYTES} bytes`);
+      }
+      const bytes = await readBoundedResponse(response, MESSAGE_FILE_MAX_BYTES);
+      if (bytes.byteLength !== declaredBytes) {
+        throw new Error(`OpenMausBot file length mismatch: expected ${declaredBytes}, received ${bytes.byteLength}`);
+      }
+
+      const temporaryPath = join(dirname(outputPath), `.${basename(outputPath)}.openmausbot-${randomUUID()}.partial`);
+      let handle;
+      try {
+        handle = await open(temporaryPath, "wx", 0o600);
+        await handle.writeFile(bytes);
+        await handle.sync();
+        await handle.close();
+        handle = undefined;
+        await link(temporaryPath, outputPath);
+      } finally {
+        await handle?.close().catch(() => undefined);
+        await unlink(temporaryPath).catch(() => undefined);
+      }
+
+      return {
+        success: true,
+        outputPath,
+        bytes: bytes.byteLength,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        contentType: response.headers.get("content-type") ?? "application/octet-stream",
       };
     }
 

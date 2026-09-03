@@ -7,6 +7,7 @@ OpenMausBot team while the desktop app and its harness are running.
 
 - list bots and channels, including their active task and current activity;
 - read bounded transcript pages and search local transcripts without returning screenshot pixels;
+- download a file only when an exact stored bot message links to it, writing it to a new local path with a size and digest readback;
 - create and safely edit bot profiles, channels, and separate task conversations;
 - send work to a bot or channel, wait for either conversation to settle or need help, and interrupt its active turn;
 - list configured model instances and switch an idle bot to an exact available model.
@@ -72,6 +73,7 @@ local ports. `OPENMAUSBOT_MCP_TIMEOUT_MS` can set an HTTP timeout between 1,000 
 | Purpose | Tools |
 |---|---|
 | Inspect | `get_system_health`, `list_bots`, `list_channels`, `get_bot_messages`, `get_channel_messages`, `search_messages`, `list_available_models` |
+| Receive files | `download_message_file` |
 | Create and organize | `create_bot`, `update_bot_profile`, `create_channel`, `update_channel`, `create_task`, `switch_task`, `rename_task` |
 | Run work | `send_bot_message`, `send_channel_message`, `wait_for_conversation`, `interrupt_conversation`, `set_bot_model` |
 
@@ -83,6 +85,19 @@ small redacted transcript tail. MCP cancellation is honored while a tool is wait
 Transcript reads are paged and capped at 200 messages. Search is capped at 100 hits. Screenshot pixels and
 permission grant keys are removed from MCP results. Tool schemas reject unknown fields and malformed values,
 and model changes are refused while a bot is working.
+
+`download_message_file` accepts the task ID, message ID, and exact file-link target from a bot's text response.
+The server independently verifies that the stored message authored by that bot links to the file and that the
+file remains inside the conversation's allowed roots. The MCP client caps the response at 25 MiB, never
+overwrites an existing destination, and returns the received byte count and SHA-256 digest.
+
+The repository verification adapter exposes the same operation as:
+
+```sh
+pnpm control:omb download --task TASK_ID --message MESSAGE_ID \
+  --path '/path/from/the-bot-message.pdf' --output '/new/local/path.pdf' \
+  --url http://127.0.0.1:PORT
+```
 
 The harness itself is local-first and normally binds to loopback. If you expose it through a reverse proxy,
 authentication and TLS at that proxy are part of your deployment's security boundary.
