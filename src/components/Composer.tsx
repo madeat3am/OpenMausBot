@@ -159,7 +159,7 @@ function PermissionModeSelector({ bot, onSetAuto }: { bot: Bot; onSetAuto: (auto
                   {on && <Check size={14} />}
                 </div>
                 <div className="text-[13px] text-ink-secondary">
-                  Keep going automatically; destructive and sensitive actions still ask
+                  Run assigned and enabled-routine actions automatically; webhooks, destructive and sensitive actions still ask
                 </div>
               </div>
             </button>
