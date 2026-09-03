@@ -550,10 +550,22 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
       child.on("close", (code) => {
         if (abandoned) return;
         if (!state.settled) {
+          if (stopRequested) {
+            settle(false, "interrupted");
+            return;
+          }
+          const actionableStderr = stderr
+            .split(/\r?\n/)
+            .filter((line) =>
+              !line.includes("Codex could not find bubblewrap on PATH.")
+              && !line.includes("Codex will use the bundled bubblewrap in the meantime."),
+            )
+            .join("\n")
+            .trim();
           emit({
             ...base(threadId, turnId),
             type: "runtime.error",
-            message: `codex exited ${code} before turn/completed${stderr ? `: ${stderr.trim().slice(-300)}` : ""}`,
+            message: `codex exited ${code} before turn/completed${actionableStderr ? `: ${actionableStderr.slice(-300)}` : ""}`,
           });
           settle(false, "exit_before_result");
         }
