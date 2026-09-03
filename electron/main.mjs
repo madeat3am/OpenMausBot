@@ -1392,20 +1392,27 @@ ipcMain.on("desktop:unread-count", (event, value) => {
 // The saved profile pins each origin to the server-provided environmentId;
 // the session credential is the
 // HttpOnly cookie /pair set for that origin, kept by Chromium's cookie jar.
-const { LOCAL_ID, activeEnvironment, allowedOrigins, createEnvironmentSwitchEpoch, parseEnvironments, parsePairingLink, serializeEnvironments, withActive, withEnvironment, withEnvironmentIdentity, withoutEnvironment } = environmentsModule;
+const { LOCAL_ID, activeEnvironment, allowedOrigins, createEnvironmentSwitchEpoch, createRemoteReconnectSupervisor, loadEnvironmentProfile, parsePairingLink, remoteFailurePolicy, remoteLoadFailureIsRetryable, remoteVerificationFailureCode, serializeEnvironments, withActive, withEnvironment, withEnvironmentIdentity, withoutEnvironment } = environmentsModule;
 let environmentsState = { environments: [], activeId: LOCAL_ID };
+let environmentProfileUnavailable = null;
 const environmentSwitches = createEnvironmentSwitchEpoch();
+const remoteReconnect = createRemoteReconnectSupervisor({
+  retry: (id) => switchEnvironment(id, { reconnect: true }),
+});
 
 function environmentsFile() {
   return path.join(app.getPath("userData"), "environments.json");
 }
 
 function readEnvironments() {
-  try {
-    return parseEnvironments(fs.readFileSync(environmentsFile(), "utf8"));
-  } catch {
+  const profile = loadEnvironmentProfile(() => fs.readFileSync(environmentsFile(), "utf8"));
+  if (profile.status === "unavailable") {
+    environmentProfileUnavailable = profile.error;
+    slog(`environments profile unavailable: ${profile.error}`);
     return { environments: [], activeId: LOCAL_ID };
   }
+  environmentProfileUnavailable = null;
+  return profile.state;
 }
 
 function writeEnvironments(state) {
@@ -1460,6 +1467,7 @@ function refreshApplicationMenu() {
 }
 
 function persistEnvironments(next) {
+  environmentProfileUnavailable = null;
   environmentsState = next;
   writeEnvironments(environmentsState);
   refreshApplicationMenu();
@@ -1476,7 +1484,11 @@ async function readRemoteEnvironment(origin) {
     redirect: "error",
     signal: AbortSignal.timeout(8_000),
   });
-  if (!response.ok) throw new Error(`environment descriptor returned HTTP ${response.status}`);
+  if (!response.ok) {
+    const error = new Error(`environment descriptor returned HTTP ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
   const descriptor = await response.json();
   if (typeof descriptor?.environmentId !== "string") throw new Error("environment descriptor has no environmentId");
   return descriptor;
@@ -1487,7 +1499,14 @@ async function verifyRemoteEnvironment(environment, state = environmentsState) {
   try {
     descriptor = await readRemoteEnvironment(environment.origin);
   } catch (error) {
-    return { ok: false, code: "unreachable", error: error?.message ?? String(error) };
+    return {
+      ok: false,
+      code: remoteVerificationFailureCode({
+        status: error?.status,
+        causeCode: error?.cause?.code,
+      }),
+      error: error?.message ?? String(error),
+    };
   }
   const bound = withEnvironmentIdentity(state, {
     origin: environment.origin,
@@ -1502,30 +1521,50 @@ function remoteVerificationDetail(result) {
     return "The saved origin is pinned to another OpenMausBot environment. Verify the server and pair it as a new environment if this replacement was intentional.";
   }
   if (result.code === "unreachable") return `${result.error}. The saved connection was not opened.`;
+  if (result.code === "auth") return `${result.error}. Re-pair this desktop with the server.`;
   return "The server returned an invalid OpenMausBot environment identity. The saved connection was not opened.";
 }
 
-async function switchEnvironment(id) {
+function buildRemoteUnavailablePage(environment, detail, { retrying = false } = {}) {
+  return (
+    "data:text/html;charset=utf-8," +
+    encodeURIComponent(
+      `<body style="margin:0;display:flex;align-items:center;justify-content:center;height:100vh;background:#070707;color:#fcfcfc;font:15px -apple-system,system-ui"><div style="text-align:center;max-width:420px"><div style="font-size:40px">🐭</div><h2 style="font-weight:600;margin:12px 0 6px">${escapeHtml(environment.name)} is unavailable</h2><p style="color:#fcfcfc99;line-height:1.5">${escapeHtml(detail)} The server remains selected so this computer cannot silently start a separate local conversation. ${retrying ? "Reconnecting automatically…" : "Choose it again from the Server menu after checking the saved server."}</p></div></body>`,
+    )
+  );
+}
+
+async function switchEnvironment(id, { reconnect = false, startup = false } = {}) {
   const epoch = environmentSwitches.begin();
   if (id === LOCAL_ID) {
+    remoteReconnect.cancel();
     persistEnvironments(withActive(environmentsState, LOCAL_ID));
     navigateMainWindow(activeOrigin());
     return;
   }
   const environment = environmentsState.environments.find((entry) => entry.id === id);
   if (!environment) return;
+  if (!reconnect) remoteReconnect.select(id);
   const verified = await verifyRemoteEnvironment(environment);
   if (!environmentSwitches.isCurrent(epoch)) return;
   if (!verified.ok) {
     const identityChanged = verified.code === "identity_changed";
-    await dialog.showMessageBox({
-      type: "warning",
-      message: identityChanged ? `${environment.name} has a different server identity` : `Could not verify ${environment.name}`,
-      detail: remoteVerificationDetail(verified),
+    if (!reconnect && !startup) {
+      await dialog.showMessageBox({
+        type: "warning",
+        message: identityChanged ? `${environment.name} has a different server identity` : `Could not verify ${environment.name}`,
+        detail: remoteVerificationDetail(verified),
+      });
+    }
+    const failure = remoteFailurePolicy(environmentsState, {
+      phase: "verification",
+      environmentId: id,
+      code: verified.code,
     });
-    if (identityChanged || !mainWindow?.webContents.getURL()) {
-      persistEnvironments(withActive(environmentsState, LOCAL_ID));
-      navigateMainWindow(activeOrigin());
+    if (failure.handled) {
+      const retryable = verified.code === "unreachable";
+      remoteReconnect.failed(id, { retryable });
+      navigateMainWindow(buildRemoteUnavailablePage(environment, remoteVerificationDetail(verified), { retrying: retryable }));
     }
     return;
   }
@@ -1569,6 +1608,7 @@ async function addServerFromClipboard() {
     return;
   }
   next = withActive(verified.state, added.id);
+  remoteReconnect.select(added.id);
   persistEnvironments(next);
   navigateMainWindow(link.url);
 }
@@ -1585,6 +1625,7 @@ async function forgetEnvironment(id) {
     detail: "This app signs out of that server. The server keeps its own session list; revoke it there too if the device is gone.",
   });
   if (response !== 0) return;
+  if (environmentsState.activeId === id) remoteReconnect.cancel();
   persistEnvironments(withoutEnvironment(environmentsState, id));
   try {
     await session.defaultSession.clearStorageData({ origin: env.origin, storages: ["cookies", "localstorage", "indexdb", "serviceworkers", "cachestorage"] });
@@ -1659,22 +1700,34 @@ function createWindow() {
   win.webContents.on("will-redirect", guardNavigation);
   win.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
     if (!isMainFrame || errorCode === -3) return; // -3: aborted by a newer navigation
+    const failure = remoteFailurePolicy(environmentsState, {
+      phase: "load",
+      origin: validatedURL,
+      code: "unreachable",
+    });
+    if (!failure.handled) return;
+    const remote = activeEnvironment(environmentsState);
+    slog(`remote server unreachable (${errorDescription}); retaining ${remote.name}`);
+    const reconnectState = remoteReconnect.snapshot();
+    if (reconnectState.attempt === 0 && !reconnectState.retryPending) {
+      void dialog.showMessageBox({
+        type: "warning",
+        message: `${remote.name} is not reachable`,
+        detail: `${errorDescription}. The selected server remains active and will reconnect automatically when it is back.`,
+      });
+    }
+    const retryable = remoteLoadFailureIsRetryable(errorCode);
+    remoteReconnect.failed(remote.id, { retryable });
+    navigateMainWindow(buildRemoteUnavailablePage(remote, errorDescription, { retrying: retryable }));
+  });
+  win.webContents.on("did-finish-load", () => {
+    deliverPackageInstall(win);
     const remote = activeEnvironment(environmentsState);
     if (!remote) return;
-    let origin = null;
     try {
-      origin = new URL(validatedURL).origin;
+      if (new URL(win.webContents.getURL()).origin === remote.origin) remoteReconnect.connected(remote.id);
     } catch {}
-    if (origin !== remote.origin) return;
-    slog(`remote server unreachable (${errorDescription}); back to Local`);
-    void dialog.showMessageBox({
-      type: "warning",
-      message: `${remote.name} is not reachable`,
-      detail: `${errorDescription}. Showing the local server instead; choose it again from the Server menu when it is back.`,
-    });
-    void switchEnvironment(LOCAL_ID);
   });
-  win.webContents.on("did-finish-load", () => deliverPackageInstall(win));
 
   // Native context menu for text inputs — without this, right-click does
   // nothing in the Electron window (no Cut/Copy/Paste/Select All).
@@ -1816,8 +1869,15 @@ function createWindow() {
   }
 
   const remote = activeEnvironment(environmentsState);
-  if (remote) {
-    void switchEnvironment(remote.id);
+  if (environmentProfileUnavailable) {
+    win.loadURL(
+      buildRemoteUnavailablePage(
+        { name: "Saved server profile" },
+        environmentProfileUnavailable,
+      ),
+    );
+  } else if (remote) {
+    void switchEnvironment(remote.id, { startup: true });
   } else if (app.isPackaged) {
     win.loadURL(serverReady ? `http://127.0.0.1:${SERVER_PORT}` : buildErrorPage({ allPortsOccupied: serverStartConflictOnly }));
   } else {

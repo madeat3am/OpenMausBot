@@ -104,3 +104,133 @@ test("adding the same server twice updates the name instead of duplicating; forg
   assert.deepEqual(state, { environments: [], activeId: "local" });
   assert.equal(env.activeEnvironment(state), null);
 });
+
+test("startup verification failure retains the saved remote preference", () => {
+  const state = {
+    environments: [{ id: "mau", name: "MAU", origin: "https://mau.example" }],
+    activeId: "mau",
+  };
+  assert.deepEqual(
+    env.remoteFailurePolicy(state, {
+      phase: "verification",
+      environmentId: "mau",
+      code: "unreachable",
+    }),
+    { handled: true, activeId: "mau" },
+  );
+  assert.equal(state.activeId, "mau");
+});
+
+test("a failed load retains only the matching active remote", () => {
+  const state = {
+    environments: [{ id: "mau", name: "MAU", origin: "https://mau.example" }],
+    activeId: "mau",
+  };
+  assert.deepEqual(
+    env.remoteFailurePolicy(state, {
+      phase: "load",
+      origin: "https://mau.example/chat",
+      code: "unreachable",
+    }),
+    { handled: true, activeId: "mau" },
+  );
+  assert.deepEqual(
+    env.remoteFailurePolicy(state, {
+      phase: "load",
+      origin: "https://other.example/chat",
+      code: "unreachable",
+    }),
+    { handled: false },
+  );
+  assert.equal(state.activeId, "mau");
+});
+
+test("Local remains an explicit persisted selection", () => {
+  const state = {
+    environments: [{ id: "mau", name: "MAU", origin: "https://mau.example" }],
+    activeId: "mau",
+  };
+  const local = env.withActive(state, env.LOCAL_ID);
+  assert.equal(local.activeId, env.LOCAL_ID);
+  assert.equal(env.activeEnvironment(local), null);
+  assert.deepEqual(
+    env.remoteFailurePolicy(local, {
+      phase: "load",
+      origin: "https://mau.example",
+      code: "unreachable",
+    }),
+    { handled: false },
+  );
+});
+
+test("only a missing profile is a safe first-run Local profile", () => {
+  const missing = new Error("missing");
+  missing.code = "ENOENT";
+  assert.deepEqual(env.loadEnvironmentProfile(() => { throw missing; }), {
+    status: "empty",
+    state: { environments: [], activeId: "local" },
+  });
+  assert.equal(env.loadEnvironmentProfile(() => "{broken").status, "unavailable");
+  assert.equal(env.loadEnvironmentProfile(() => JSON.stringify({ environments: [], activeId: "remote" })).status, "unavailable");
+  assert.equal(
+    env.loadEnvironmentProfile(() => JSON.stringify({
+      version: 2,
+      environments: [{ id: "mau", name: "MAU", origin: "http://127.0.0.1:8799" }],
+      activeId: "mau",
+    })).status,
+    "unavailable",
+  );
+});
+
+test("remote reconnect uses one bounded ladder and resets after a stable load", async () => {
+  const timers = [];
+  const retries = [];
+  const supervisor = env.createRemoteReconnectSupervisor({
+    retry: async (id) => retries.push(id),
+    setTimer(callback, delay) {
+      const timer = { callback, delay, cleared: false, unref() {} };
+      timers.push(timer);
+      return timer;
+    },
+    clearTimer(timer) { timer.cleared = true; },
+  });
+  supervisor.select("mau");
+  assert.deepEqual(supervisor.failed("mau", { retryable: true }), { scheduled: true, delay: 3_000 });
+  assert.deepEqual(supervisor.failed("mau", { retryable: true }), { scheduled: false, delay: null });
+  await timers[0].callback();
+  assert.deepEqual(retries, ["mau"]);
+  assert.deepEqual(supervisor.failed("mau", { retryable: true }), { scheduled: true, delay: 4_000 });
+  await timers[1].callback();
+  assert.deepEqual(supervisor.failed("mau", { retryable: true }), { scheduled: true, delay: 8_000 });
+  await timers[2].callback();
+  assert.deepEqual(supervisor.failed("mau", { retryable: true }), { scheduled: true, delay: 16_000 });
+  await timers[3].callback();
+  assert.deepEqual(supervisor.failed("mau", { retryable: true }), { scheduled: true, delay: 16_000 });
+  supervisor.connected("mau");
+  const stableTimer = timers.at(-1);
+  assert.equal(stableTimer.delay, 30_000);
+  supervisor.connected("mau");
+  assert.equal(timers.at(-1), stableTimer);
+  stableTimer.callback();
+  assert.equal(supervisor.snapshot().attempt, 0);
+});
+
+test("identity and policy failures do not reconnect", () => {
+  const timers = [];
+  const supervisor = env.createRemoteReconnectSupervisor({
+    retry: async () => {},
+    setTimer(callback, delay) {
+      const timer = { callback, delay, unref() {} };
+      timers.push(timer);
+      return timer;
+    },
+    clearTimer() {},
+  });
+  supervisor.select("mau");
+  assert.deepEqual(supervisor.failed("mau", { retryable: false }), { scheduled: false });
+  assert.equal(timers.length, 0);
+  assert.equal(env.remoteLoadFailureIsRetryable(-102), true);
+  assert.equal(env.remoteLoadFailureIsRetryable(-3), false);
+  assert.equal(env.remoteVerificationFailureCode({ status: 401 }), "auth");
+  assert.equal(env.remoteVerificationFailureCode({ status: 503 }), "unreachable");
+});
