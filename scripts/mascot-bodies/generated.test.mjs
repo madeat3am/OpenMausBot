@@ -19,6 +19,7 @@ const root = fileURLToPath(new URL("../../", import.meta.url));
 // builds) — see swift-catalog.test.mjs.
 const TS_PATH = "../../shared/mascot-bodies.ts";
 const SWIFT_PATH = "../../ios/Sources/CompanionCore/MausBodies.swift";
+const KOTLIN_PATH = "../../android/app/src/main/kotlin/com/openmausbot/companion/ui/MausBodies.kt";
 
 // Normalised to LF. .gitattributes pins both catalogs to LF so this should be a
 // no-op, but a clone whose git config disagrees would otherwise fail this guard
@@ -52,6 +53,7 @@ describe("generated catalogs", () => {
     const before = {
       ts: read(TS_PATH),
       swift: read(SWIFT_PATH),
+      kotlin: read(KOTLIN_PATH),
     };
 
     try {
@@ -65,7 +67,7 @@ describe("generated catalogs", () => {
       throw new Error(
         `Running \`pnpm gen:bodies\` failed while checking the catalogs for drift. ` +
           `The working tree may now hold a partially-written or reverted file — run ` +
-          `\`git status\` / \`git diff -- shared/mascot-bodies.ts ios/Sources/CompanionCore/MausBodies.swift\` ` +
+          `\`git status\` / \`git diff -- shared/mascot-bodies.ts ios/Sources/CompanionCore/MausBodies.swift android/app/src/main/kotlin/com/openmausbot/companion/ui/MausBodies.kt\` ` +
           `before trusting either file. Original error:\n${err.stderr?.toString() ?? err.message}`
       );
     }
@@ -73,6 +75,7 @@ describe("generated catalogs", () => {
     const after = {
       ts: read(TS_PATH),
       swift: read(SWIFT_PATH),
+      kotlin: read(KOTLIN_PATH),
     };
 
     // The generator just rewrote both tracked files in place. Whether this assertion
@@ -81,10 +84,12 @@ describe("generated catalogs", () => {
     // dirty `git status` they have to go discover on their own.
     write(TS_PATH, before.ts);
     write(SWIFT_PATH, before.swift);
+    write(KOTLIN_PATH, before.kotlin);
 
     const drifts = [
       describeDrift("shared/mascot-bodies.ts", before.ts, after.ts),
       describeDrift("ios/Sources/CompanionCore/MausBodies.swift", before.swift, after.swift),
+      describeDrift("android/app/src/main/kotlin/com/openmausbot/companion/ui/MausBodies.kt", before.kotlin, after.kotlin),
     ].filter(Boolean);
 
     if (drifts.length > 0) {

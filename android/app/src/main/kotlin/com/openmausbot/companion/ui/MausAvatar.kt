@@ -54,6 +54,8 @@ import kotlinx.coroutines.flow.collectLatest
 @Composable
 internal fun MausAvatar(
     color: String,
+    /** Which catalog body to draw; null and unknown ids fall back to the cursor. */
+    bodyId: String? = MausSilhouette.defaultBody,
     size: Dp = 52.dp,
     state: MausState = MausState.IDLE,
     /** Off draws the state's resting face, still. For lists of many. */
@@ -63,8 +65,9 @@ internal fun MausAvatar(
     val engine = remember { MausFaceEngine() }
     val geometry = remember { MausFaceGeometry() }
     val clock = remember { MausFrameClock() }
-    val body = remember(color) {
-        val bounds = MausSilhouette.faceBoxBounds
+    val body = remember(color, bodyId) {
+        // The gradient runs corner to corner of the body's own bounds.
+        val bounds = MausSilhouette.faceBoxBounds(bodyId)
         Brush.linearGradient(
             colorStops = MausPalette.gradient(color)
                 .map { (position, argb) -> position to Color(argb) }
@@ -105,7 +108,7 @@ internal fun MausAvatar(
         val live = moving
         engine.setState(state, now)
         if (live) engine.advance(now) else engine.rest()
-        drawMaus(engine, geometry, body, live, now)
+        drawMaus(engine, geometry, body, bodyId, live, now)
     }
 }
 
@@ -197,12 +200,6 @@ private class MausFaceGeometry {
     }
 }
 
-/**
- * The silhouette in the desktop's face box, parsed and mapped once — the shape
- * never changes, and only the fit below depends on the size it is drawn at.
- */
-private val faceBoxBody: Path = MausSilhouette.faceBoxPath
-
 /** One instance, shared: the mouth is the same 7.5-unit round stroke every frame. */
 private val mouthStroke = Stroke(width = MausFaceData.MOUTH_STROKE, cap = StrokeCap.Round)
 
@@ -210,6 +207,7 @@ private fun DrawScope.drawMaus(
     engine: MausFaceEngine,
     geometry: MausFaceGeometry,
     body: Brush,
+    bodyId: String?,
     live: Boolean,
     nowNanos: Long,
 ) {
@@ -241,7 +239,7 @@ private fun DrawScope.drawMaus(
                 scale(pose.squashX, pose.squashY, Offset(centre, MausFaceData.FACE_BOX))
             }
         }) {
-            drawBody(engine, geometry, body, nowNanos)
+            drawBody(engine, geometry, body, bodyId, nowNanos)
         }
 
         if (trail != null) drawComets(geometry, front = true)
@@ -252,15 +250,20 @@ private fun DrawScope.drawBody(
     engine: MausFaceEngine,
     geometry: MausFaceGeometry,
     body: Brush,
+    bodyId: String?,
     nowNanos: Long,
 ) {
-    drawPath(faceBoxBody, body)
+    // Parsed and placed once per body, inside [MausSilhouette]; this is a lookup.
+    val silhouette = MausSilhouette.inFaceBox(bodyId)
+    val anchor = MausSilhouette.anchor(bodyId)
+    drawPath(silhouette, body)
 
-    // The face is painted on the body: clipped to it, anchored in it.
-    clipPath(faceBoxBody) {
+    // The face is painted on the body: clipped to it, anchored in it — where the
+    // generator solved the anchor for this body.
+    clipPath(silhouette) {
         withTransform({
-            translate(MausFaceData.ANCHOR_X, MausFaceData.ANCHOR_Y)
-            scale(MausFaceData.ANCHOR_SCALE, MausFaceData.ANCHOR_SCALE, Offset.Zero)
+            translate(anchor.x, anchor.y)
+            scale(anchor.scale, anchor.scale, Offset.Zero)
             translate(-MausFaceData.FACE_CENTRE_X, -MausFaceData.FACE_CENTRE_Y)
         }) {
             val left = engine.ring(0)

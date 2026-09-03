@@ -95,6 +95,7 @@ internal fun BotAvatar(
     } else {
         MausAvatar(
             color = bot.color,
+            bodyId = bot.mascotBody,
             size = size,
             state = state,
             animated = animated,

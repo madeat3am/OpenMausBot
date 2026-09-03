@@ -1,111 +1,89 @@
 package com.openmausbot.companion.ui
 
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Matrix
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.vector.PathParser
-import androidx.compose.ui.geometry.Rect
 
 /**
- * The mascot silhouette, as an SVG path — the same artwork the desktop draws
- * (`src/components/CursorAvatar.tsx`, `SHAPE.body`) and the same string
- * `ios/App/MausAvatar.swift` carries, verbatim.
+ * The mascot's body, as geometry: the per-body cache that turns [MausBodies] into
+ * something a canvas can fill — the port of `MausSilhouette` in
+ * `ios/Sources/CompanionCore/MausSilhouette.swift`.
  *
- * Verbatim is the point: redrawing it by eye starts close and drifts every time
- * either side is touched. Copied rather than generated because the phone app has
- * no build step that could read the web source, and a 4KB string is a cheap
- * thing to keep in sync by hand — it has changed once in the life of the project.
+ * This used to carry one hardcoded path, copied verbatim from the desktop. It now
+ * reads ten generated ones from the catalog `scripts/gen-mascot-bodies.ts` emits,
+ * which is what stops the phone's placement drifting from the desktop's: the face
+ * anchor per body is solved once and written into all three renderers.
  *
- * The face the body wears is [MausFaceData]; this is only the shape it is painted
- * on. Compose parses the SVG path and Android supplies its bounds; both paths are
- * created once rather than rebuilt while the roster scrolls.
+ * The caching is the point. These are multi-kilobyte strings and a
+ * character-at-a-time parser, and the shape each one produces never changes — but
+ * a roster is hundreds of avatars, each redrawn on scroll. What is left per draw is
+ * the affine fit into the rect, which is the only part that depends on where the
+ * avatar is. The face the body wears is [MausFaceData]; this is only the shape it is
+ * painted on.
  */
-object MausSilhouette {
-    const val PATH: String =
-        """
-        M0 0 C1.12815992 0.94880479 2.25705591 1.89673511 3.38671875 2.84375 C5.57657936 4.68528228
-        7.75793952 6.53624249 9.93359375 8.39453125 C13.5602214 11.48647103 17.25022962 14.49819427
-        20.9453125 17.5078125 C25.41301487 21.15281776 29.86103386 24.8215994 34.31054688 28.48876953
-        C38.00933931 31.5370903 41.70951059 34.58367973 45.4140625 37.625 C52.50037463 43.44570076
-        59.55669812 49.29508834 66.54003906 55.23901367 C70.43289872 58.54377434 74.40406577 61.73568847
-        78.40625 64.90625 C82.05401433 67.85083084 85.6145398 70.89451533 89.18359375 73.93359375
-        C92.41424312 76.67774533 95.67698054 79.36747809 99 82 C103.47931906 85.54855146 107.83340036
-        89.22936876 112.18359375 92.93359375 C115.41424312 95.67774533 118.67698054 98.36747809 122 101
-        C125.9014198 104.09073517 129.71091352 107.27378506 133.5 110.5 C137.99002543 114.32092614
-        142.53350963 118.0537239 147.15234375 121.71875 C156.74255328 129.40144186 166.1812645
-        137.27326897 175.53833008 145.23754883 C179.4317456 148.54281661 183.40347641 151.73522157
-        187.40625 154.90625 C191.05401433 157.85083084 194.6145398 160.89451533 198.18359375
-        163.93359375 C201.41424312 166.67774533 204.67698054 169.36747809 208 172 C236.43637507
-        194.63776677 236.43637507 194.63776677 238.27050781 209.13867188 C239.19944445 221.27193361
-        237.57124038 231.13444436 230 241 C223.66050278 247.82715086 215.75482398 254.47140646
-        206.04764748 255.13307858 C205.3615811 255.13693349 204.67551472 255.1407884 203.96865845
-        255.14476013 C203.17563324 255.15165863 202.38260803 255.15855713 201.56555176 255.16566467
-        C200.27360901 255.16958473 200.27360901 255.16958473 198.95556641 255.17358398 C198.04112762
-        255.180271 197.12668884 255.18695801 196.18453979 255.19384766 C194.19843498 255.20789156
-        192.21231409 255.21978771 190.22618484 255.22979546 C187.07149762 255.24625057 183.91692738
-        255.26949556 180.76229858 255.29469299 C171.79227585 255.36530712 162.82220292 255.42526708
-        153.85205078 255.47680664 C148.36195434 255.5088283 142.87198905 255.55017011 137.38199997
-        255.59700203 C135.30028042 255.61289593 133.21853066 255.62527474 131.13676834 255.63390923
-        C104.46972494 255.74602279 80.75351522 259.19455182 60.52978516 278.41845703 C55.75259196
-        283.35727885 51.81217213 289.04473423 47.77441406 294.5859375 C44.62107661 298.87600364
-        41.36381878 303.08685058 38.125 307.3125 C32.82026548 314.26649347 27.55386673 321.24815866
-        22.3125 328.25 C21.07690581 329.89589556 19.84122979 331.5417297 18.60546875 333.1875
-        C16.22002164 336.36552908 13.84996009 339.55428087 11.48828125 342.75 C3.0450311 354.10095576
-        -5.25712203 365.22607871 -20 368 C-33.42903027 368.85957067 -44.2929604 367.90032788 -55
-        358.9140625 C-63.51513963 350.76480778 -67.79688328 340.99527428 -68.37686157 329.29350281
-        C-68.43541887 328.1487851 -68.49397617 327.00406738 -68.55430794 325.82466125 C-68.61453573
-        324.57243271 -68.67476353 323.32020416 -68.73681641 322.0300293 C-68.80423726 320.68369989
-        -68.87198477 319.33738681 -68.94003105 317.99108887 C-69.12569162 314.29881586 -69.30666938
-        310.60632592 -69.48688698 306.91378379 C-69.68142908 302.94481208 -69.88036562 298.97606035
-        -70.07873535 295.00727844 C-70.55465828 285.46711948 -71.02377004 275.92663022 -71.49235249
-        266.3861084 C-71.71278092 261.90166682 -71.93398876 257.41726373 -72.1552124 252.93286133
-        C-72.22122149 251.59460763 -72.22122149 251.59460763 -72.28856409 250.2293185 C-72.37783973
-        248.41936974 -72.46711776 246.6094211 -72.55639815 244.79947257 C-72.7821203 240.22326204
-        -73.00777832 235.64704836 -73.23336792 231.0708313 C-73.2783997 230.15734865 -73.32343148
-        229.24386601 -73.36982787 228.30270207 C-73.64581049 222.70253299 -73.92113412 217.10233189
-        -74.19602597 211.50210917 C-75.35713101 187.85146938 -76.54638525 164.20245932 -77.76320994
-        140.55462319 C-78.3174362 129.77404232 -78.86176258 118.9929594 -79.40472984 108.2118063
-        C-79.83986282 99.58021501 -80.28322749 90.94912395 -80.73695588 82.31848997 C-81.04621068
-        76.42094211 -81.34513355 70.52292566 -81.63612723 64.62444884 C-81.8031421 61.24551841
-        -81.97612174 57.86718776 -82.15861511 54.48903847 C-84.29931862 14.73242483 -84.29931862
-        14.73242483 -72.03125 -1.625 C-50.89854752 -24.96559677 -21.34867451 -18.24899383 0 0 Z
-        """
-
+internal object MausSilhouette {
     /** The desktop's viewBox is `-15 -15 258.541 258.541`: room to bob and sway. */
     const val FACE_MARGIN: Float = 15f
 
     /**
-     * Tight visible bounds of this immutable artwork. Android's native path bounds
-     * are the wider cubic control hull, so these four values stay with [PATH] to
-     * keep the desktop/iOS gradient endpoints pixel-for-pixel aligned.
+     * The desktop's face box: the square every body's fit is solved into and every
+     * face coordinate — the eye anchor, the mouth — is expressed in. Mirrors
+     * [MausFaceData.FACE_BOX], which is the same box seen from the artwork's side.
      */
-    val tightBounds = Rect(
-        left = -83.2342606f,
-        top = -16.5631847f,
-        right = 238.5062866f,
-        bottom = 368.2512207f,
-    )
+    const val FACE_BOX: Float = MausFaceData.FACE_BOX
+
+    /** The shipped mascot, and what anything unrecognised falls back to. */
+    val defaultBody: String get() = MausBodies.DEFAULT_ID
+
+    /** Where the face sits on a body, in face-box units — solved by the generator. */
+    data class Anchor(val x: Float, val y: Float, val scale: Float)
+
+    /** One body, parsed and placed, with the bounds the gradient runs across. */
+    private class Placed(val path: Path, val bounds: Rect, val anchor: Anchor)
+
+    private val cache = HashMap<String, Placed>()
+    private val lock = Any()
+
+    /** The chosen body in the desktop's face box, parsed once per body. */
+    fun inFaceBox(id: String?): Path = placed(id).path
 
     /**
-     * Artwork → the desktop's face box: `translate(210, 80)`, `scale(0.593899)`,
-     * `translate(-56.5564, -37.6751)` — the same affine map the SVG applies.
+     * The body's own bounds inside the face box, for the gradient's corners. These
+     * come from the catalog rather than the path: Android's native path bounds are
+     * the cubic control hull, wider than the drawn shape, and the gradient has to
+     * end on the shape to match the desktop and iOS pixel for pixel.
      */
-    val faceBoxPath: Path by lazy {
-        parsePath().apply {
-            transform(faceBoxTransform)
+    fun faceBoxBounds(id: String?): Rect = placed(id).bounds
+
+    /** Where the face sits on this body. One catalog feeds every renderer. */
+    fun anchor(id: String?): Anchor = placed(id).anchor
+
+    private fun placed(id: String?): Placed {
+        val body = MausBodies.body(id)
+        synchronized(lock) {
+            cache[body.id]?.let { return it }
+            // Scale first, then translate — the same order the generator solved.
+            val fit = Matrix().apply {
+                this[0, 0] = body.fitScale
+                this[1, 1] = body.fitScale
+                this[3, 0] = body.fitTx
+                this[3, 1] = body.fitTy
+            }
+            val path = parse(body.path).apply { transform(fit) }
+            val placed = Placed(
+                path = path,
+                bounds = Rect(body.left, body.top, body.right, body.bottom),
+                anchor = Anchor(body.anchorX, body.anchorY, body.anchorScale),
+            )
+            cache[body.id] = placed
+            return placed
         }
     }
 
-    /** The body's own bounds inside the face box, for the gradient. */
-    val faceBoxBounds by lazy { faceBoxTransform.map(tightBounds) }
-
-    private const val FACE_BOX_SCALE = 0.593899f
-
-    private val faceBoxTransform = Matrix().apply {
-        this[0, 0] = FACE_BOX_SCALE
-        this[1, 1] = FACE_BOX_SCALE
-        this[3, 0] = 210f * FACE_BOX_SCALE - 56.5564f
-        this[3, 1] = 80f * FACE_BOX_SCALE - 37.6751f
-    }
-
-    private fun parsePath(): Path = PathParser().parsePathString(PATH).toPath()
+    /**
+     * SVG path data into a [Path]. The catalog is absolute `M`, `C` and `Z` with
+     * newlines as separators, all of which Compose's parser reads.
+     */
+    internal fun parse(data: String): Path = PathParser().parsePathString(data).toPath()
 }

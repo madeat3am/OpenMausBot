@@ -249,6 +249,13 @@ interface Baked {
   d: string
   anchor: Anchor
   clearance: number
+  /**
+   * Tight bounds of the fitted outline in the face box, measured on the flattened curve.
+   * Only the Kotlin catalog carries them: Android's native path bounds are the cubic
+   * control hull, which is wider than the drawn shape, and the gradient's corners have to
+   * sit on the shape — the desktop reads `getBBox()` and iOS `boundingBoxOfPath`, both tight.
+   */
+  bounds: { minX: number; minY: number; maxX: number; maxY: number }
 }
 
 function emit(bodies: Baked[]): string {
@@ -434,6 +441,102 @@ ${entries}
 `
 }
 
+/* ----------------------------------------------------------- emitting (Android) */
+
+/** A Kotlin `Float` literal. JS prints integers bare and small values in exponent form; both are valid with an `f` suffix. */
+const kotlinFloat = (n: number) => `${n}f`
+
+/**
+ * Emits the same solved catalog as a Kotlin source file for the Android app.
+ *
+ * Plain Kotlin, no Compose: the data is parsed into a `Path` by `MausSilhouette`, which
+ * is also where the per-body cache lives. Like the Swift, the fit is numbers rather than
+ * the SVG transform string. Unlike the Swift, each body also carries its tight bounds —
+ * see `Baked.bounds` for why Android cannot measure them from the path it draws.
+ */
+function emitKotlin(bodies: Baked[]): string {
+  const order = bodies.map(s => quote(s.id)).join(", ")
+
+  const entries = bodies
+    .map(body => {
+      const path = indent(wrapPathTokens(body.d), 16)
+      return [
+        `        ${quote(body.id)} to Body(`,
+        `            id = ${quote(body.id)},`,
+        `            name = ${quote(body.name)},`,
+        `            path =`,
+        `                """`,
+        `${path}`,
+        `                """,`,
+        `            fitScale = ${kotlinFloat(body.fit.scale)},`,
+        `            fitTx = ${kotlinFloat(body.fit.tx)},`,
+        `            fitTy = ${kotlinFloat(body.fit.ty)},`,
+        `            left = ${kotlinFloat(body.bounds.minX)},`,
+        `            top = ${kotlinFloat(body.bounds.minY)},`,
+        `            right = ${kotlinFloat(body.bounds.maxX)},`,
+        `            bottom = ${kotlinFloat(body.bounds.maxY)},`,
+        `            anchorX = ${kotlinFloat(body.anchor.x)},`,
+        `            anchorY = ${kotlinFloat(body.anchor.y)},`,
+        `            anchorScale = ${kotlinFloat(body.anchor.scale)},`,
+        `        ),`,
+      ].join("\n")
+    })
+    .join("\n")
+
+  return `package com.openmausbot.companion.ui
+
+/**
+ * The mascot bodies a bot can wear — the Android half of the same solve that bakes
+ * \`shared/mascot-bodies.ts\` and \`ios/Sources/CompanionCore/MausBodies.swift\`.
+ *
+ * GENERATED FILE — do not hand-edit. Run \`pnpm gen:bodies\` to rebuild it from
+ * \`scripts/gen-mascot-bodies.ts\`, which solves each face placement against the real
+ * expression geometry and verifies that nothing clips. One solve, three writers, so the
+ * three renderers cannot drift apart the way desktop's 0.74 and iOS's 0.84 already did once.
+ *
+ * Plain Kotlin, no Compose: [MausSilhouette] parses the path and caches the result per
+ * body. The fit is numbers, not an SVG transform string. The bounds are the tight bounds
+ * of the fitted outline: Android's native path bounds are the cubic control hull, which is
+ * wider than the drawn shape, and the gradient's corners have to sit on the shape.
+ *
+ * Path data is absolute \`M\`, \`C\`, \`Z\` only, with newlines as separators.
+ */
+internal object MausBodies {
+    data class Body(
+        val id: String,
+        val name: String,
+        val path: String,
+        val fitScale: Float,
+        val fitTx: Float,
+        val fitTy: Float,
+        val left: Float,
+        val top: Float,
+        val right: Float,
+        val bottom: Float,
+        val anchorX: Float,
+        val anchorY: Float,
+        val anchorScale: Float,
+    )
+
+    /** Every selectable body id, in the order the picker shows them. */
+    val order: List<String> = listOf(${order})
+
+    /** The shipped mascot, and the fallback for any unrecognised value. */
+    const val DEFAULT_ID: String = "cursor"
+
+    val all: Map<String, Body> = mapOf(
+${entries}
+    )
+
+    /**
+     * Looks up a body by id, falling back to [DEFAULT_ID] for anything unrecognised
+     * (including a null id, e.g. an untrusted persisted or streamed value).
+     */
+    fun body(id: String?): Body = id?.let { all[it] } ?: all.getValue(DEFAULT_ID)
+}
+`
+}
+
 /* ---------------------------------------------------------------------- main */
 
 function main(): void {
@@ -472,6 +575,7 @@ function main(): void {
       const aim = AIMS[i]
       clipped.push(`${body.def.id} aim (${aim.x}, ${aim.y}): expressions ${expressions.join(", ")}`)
     })
+    const fitted = boundsOf(applyFit(flatten(body.def.d), body.fit))
     baked.push({
       id: body.def.id,
       name: body.def.name,
@@ -479,6 +583,12 @@ function main(): void {
       d: body.def.d,
       anchor,
       clearance: clearanceAt(body.sdf, anchor),
+      bounds: {
+        minX: round(fitted.minX, 4),
+        minY: round(fitted.minY, 4),
+        maxX: round(fitted.maxX, 4),
+        maxY: round(fitted.maxY, 4),
+      },
     })
   }
 
@@ -509,6 +619,14 @@ function main(): void {
   )
   writeFileSync(swiftOut, emitSwift(baked))
   console.log(`wrote ${swiftOut}`)
+
+  // The Android app module: its JVM unit tests (Robolectric) can parse the catalog the
+  // way `swift test` can for CompanionCore, so the same drift guard covers it.
+  const kotlinOut = fileURLToPath(
+    new URL("../android/app/src/main/kotlin/com/openmausbot/companion/ui/MausBodies.kt", import.meta.url)
+  )
+  writeFileSync(kotlinOut, emitKotlin(baked))
+  console.log(`wrote ${kotlinOut}`)
 }
 
 try {

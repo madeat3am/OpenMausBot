@@ -88,9 +88,6 @@ internal object MausFaceData {
     const val FACE_CENTRE_X: Float = 120f
     const val FACE_CENTRE_Y: Float = 122.5f
     const val MOUTH_STROKE: Float = 7.5f
-    const val ANCHOR_X: Float = 87.04f
-    const val ANCHOR_Y: Float = 98.65f
-    const val ANCHOR_SCALE: Float = 0.84f
     const val EXPRESSION_COUNT: Int = 25
     const val POINTS_PER_RING: Int = 48
     /** Interleaved x, y — so a ring is [POINTS_PER_RING] * 2 floats. */

@@ -61,33 +61,18 @@ class MausAvatarTest {
     }
 
     @Test
-    fun `the silhouette parses into a non-empty native path`() {
-        val path = MausSilhouette.faceBoxPath
-        assertFalse(path.isEmpty)
-        assertTrue(path.getBounds().width > 0f)
-        assertTrue(path.getBounds().height > 0f)
-    }
-
-    @Test
-    fun `the silhouette keeps the fixed tight artwork bounds`() {
-        val bounds = MausSilhouette.tightBounds
-        assertEquals(-83.234f, bounds.left, 0.01f)
-        assertEquals(-16.563f, bounds.top, 0.01f)
-        assertEquals(238.506f, bounds.right, 0.01f)
-        assertEquals(368.251f, bounds.bottom, 0.01f)
-    }
-
-    @Test
-    fun `the silhouette lands in the desktop's face box`() {
+    fun `the shipped cursor body keeps the fixed tight artwork bounds in the face box`() {
         // Which is what puts the eyes and the mouth on the body rather than beside
-        // it: every face coordinate is expressed in this box.
-        val bounds = MausSilhouette.faceBoxBounds
+        // it: every face coordinate is expressed in this box. The numbers are the
+        // ones this file carried by hand before the catalog was generated.
+        val bounds = MausSilhouette.faceBoxBounds("cursor")
         assertEquals(0f, bounds.top, 0.01f)
         assertEquals(MausFaceData.FACE_BOX, bounds.bottom, 0.01f)
         assertEquals(18.73f, bounds.left, 0.01f)
         assertEquals(209.81f, bounds.right, 0.01f)
         // the eye anchor sits inside the body it is painted on
-        assertTrue(MausFaceData.ANCHOR_X in bounds.left..bounds.right)
-        assertTrue(MausFaceData.ANCHOR_Y in bounds.top..bounds.bottom)
+        val anchor = MausSilhouette.anchor("cursor")
+        assertTrue(anchor.x in bounds.left..bounds.right)
+        assertTrue(anchor.y in bounds.top..bounds.bottom)
     }
 }

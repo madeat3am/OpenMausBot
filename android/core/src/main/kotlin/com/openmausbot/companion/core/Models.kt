@@ -237,6 +237,11 @@ data class Bot(
     val speakReplies: Boolean? = null,
     val voice: String? = null,
     val mascotExpression: String? = null,
+    /**
+     * Which body from the mascot body catalog this bot wears. Absent (an older
+     * harness included) means the shipped `cursor` silhouette.
+     */
+    val mascotBody: String? = null,
     val tasks: List<BotTask>? = null,
     val messages: List<Message>? = null,
     val activeLeafId: String? = null,

@@ -369,9 +369,6 @@ class MausCatalogueGoldenTest {
         assertEquals(120f, MausFaceData.FACE_CENTRE_X)
         assertEquals(122.5f, MausFaceData.FACE_CENTRE_Y)
         assertEquals(7.5f, MausFaceData.MOUTH_STROKE)
-        assertEquals(87.04f, MausFaceData.ANCHOR_X)
-        assertEquals(98.65f, MausFaceData.ANCHOR_Y)
-        assertEquals(0.84f, MausFaceData.ANCHOR_SCALE)
         assertEquals(25, MausFaceData.EXPRESSION_COUNT)
         assertEquals(48, MausFaceData.POINTS_PER_RING)
         // MausAvatar.swift:122 — the viewBox's margin around that box
