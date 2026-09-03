@@ -134,7 +134,7 @@ type SkillRecordingPayload = {
           localOrigin: string;
           remote: boolean;
           activeId: string;
-          environments: Array<{ id: string; name: string; origin: string }>;
+          environments: Array<{ id: string; name: string; origin: string; environmentId?: string }>;
         }>;
         switch: (id: string) => Promise<void>;
         addFromLink: (link: string) => Promise<void>;

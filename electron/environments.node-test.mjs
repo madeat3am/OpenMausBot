@@ -27,7 +27,7 @@ test("persisted state parses defensively and never resurrects Local as a remote"
   const parsed = env.parseEnvironments(
     JSON.stringify({
       environments: [
-        { id: "a1", name: "  Cab   mini ", origin: "https://mini.example/" },
+        { id: "a1", name: "  Cab   mini ", origin: "https://mini.example/", environmentId: "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA" },
         { id: "local", name: "sneaky", origin: "https://evil.example" },
         { id: "dup", name: "again", origin: "https://mini.example" },
         { id: "b2", origin: "http://10.0.0.5:8799" },
@@ -39,7 +39,7 @@ test("persisted state parses defensively and never resurrects Local as a remote"
   );
   assert.deepEqual(parsed, {
     environments: [
-      { id: "a1", name: "Cab mini", origin: "https://mini.example" },
+      { id: "a1", name: "Cab mini", origin: "https://mini.example", environmentId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
       { id: "b2", name: "10.0.0.5:8799", origin: "http://10.0.0.5:8799" },
     ],
     activeId: "b2",
@@ -47,6 +47,37 @@ test("persisted state parses defensively and never resurrects Local as a remote"
   assert.deepEqual(env.parseEnvironments("{not json"), { environments: [], activeId: "local" });
   assert.deepEqual(env.parseEnvironments({ environments: [], activeId: "ghost" }), { environments: [], activeId: "local" });
   assert.deepEqual(env.parseEnvironments(env.serializeEnvironments(parsed)), parsed);
+});
+
+test("a saved origin is pinned to the server-provided environment identity", () => {
+  let state = {
+    environments: [{ id: "id1", name: "Cab mini", origin: "https://mini.example" }],
+    activeId: "id1",
+  };
+  const first = env.withEnvironmentIdentity(state, {
+    origin: "https://mini.example",
+    environmentId: "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+  });
+  assert.equal(first.ok, true);
+  state = first.state;
+  assert.equal(state.environments[0].environmentId, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+
+  const same = env.withEnvironmentIdentity(state, {
+    origin: "https://mini.example/",
+    environmentId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  });
+  assert.equal(same.ok, true);
+  assert.equal(same.state, state);
+
+  const changed = env.withEnvironmentIdentity(state, {
+    origin: "https://mini.example",
+    environmentId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  });
+  assert.equal(changed.ok, false);
+  assert.equal(changed.code, "identity_changed");
+  assert.equal(changed.state, state);
+  assert.equal(changed.expectedEnvironmentId, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+  assert.equal(changed.actualEnvironmentId, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
 });
 
 test("adding the same server twice updates the name instead of duplicating; forgetting the active one falls back to Local", () => {

@@ -2,11 +2,17 @@
 //
 // Local is the server this app spawns; a remote environment is a server the
 // user paired with. The app switches by loading that server's own UI, so an
-// environment is just {id, name, origin}. The session credential is the
+// environment is {id, name, origin, environmentId}. The client-local `id`
+// drives the menu; `environmentId` is the server's stable identity and pins a
+// saved origin so DNS or proxy drift cannot silently replace it. The credential is the
 // HttpOnly cookie the /pair page set for that origin, held by Chromium's
 // cookie jar, never by this file.
 const LOCAL_ID = "local";
 const MAX_NAME = 60;
+
+function normalizeEnvironmentId(input) {
+  return typeof input === "string" && /^[0-9a-f-]{36}$/i.test(input.trim()) ? input.trim().toLowerCase() : null;
+}
 
 /** `https://host[:port]` — a bare origin, no path, no credentials. */
 function normalizeOrigin(input) {
@@ -73,14 +79,20 @@ function parseEnvironments(raw) {
     if (!origin || !id || id === LOCAL_ID || seen.has(id) || seen.has(origin)) continue;
     seen.add(id);
     seen.add(origin);
-    environments.push({ id, name: cleanName(entry?.name, nameFromOrigin(origin)), origin });
+    const environmentId = normalizeEnvironmentId(entry?.environmentId);
+    environments.push({
+      id,
+      name: cleanName(entry?.name, nameFromOrigin(origin)),
+      origin,
+      ...(environmentId ? { environmentId } : {}),
+    });
   }
   const activeId = typeof value?.activeId === "string" && environments.some((e) => e.id === value.activeId) ? value.activeId : LOCAL_ID;
   return { environments, activeId };
 }
 
 function serializeEnvironments(state) {
-  return JSON.stringify({ version: 1, environments: state.environments, activeId: state.activeId }, null, 2) + "\n";
+  return JSON.stringify({ version: 2, environments: state.environments, activeId: state.activeId }, null, 2) + "\n";
 }
 
 /** Add or update by origin (re-pairing the same server keeps one entry). */
@@ -96,6 +108,31 @@ function withEnvironment(state, input, makeId) {
   const id = makeId();
   const environments = [...state.environments, { id, name: cleanName(input?.name, nameFromOrigin(origin)), origin }];
   return { ...state, environments };
+}
+
+/** Bind a server-provided identity to its saved origin. Legacy profiles are
+ * pinned on their first successful descriptor read; a later identity change
+ * is rejected without modifying the saved profile. */
+function withEnvironmentIdentity(state, input) {
+  const origin = normalizeOrigin(input?.origin);
+  const environmentId = normalizeEnvironmentId(input?.environmentId);
+  if (!origin || !environmentId) return { ok: false, code: "invalid_identity", state };
+  const existing = state.environments.find((environment) => environment.origin === origin);
+  if (!existing) return { ok: false, code: "unknown_origin", state };
+  if (existing.environmentId && existing.environmentId !== environmentId) {
+    return {
+      ok: false,
+      code: "identity_changed",
+      expectedEnvironmentId: existing.environmentId,
+      actualEnvironmentId: environmentId,
+      state,
+    };
+  }
+  if (existing.environmentId === environmentId) return { ok: true, state };
+  const environments = state.environments.map((environment) =>
+    environment === existing ? { ...environment, environmentId } : environment,
+  );
+  return { ok: true, state: { ...state, environments } };
 }
 
 function withoutEnvironment(state, id) {
@@ -122,10 +159,12 @@ module.exports = {
   activeEnvironment,
   allowedOrigins,
   normalizeOrigin,
+  normalizeEnvironmentId,
   parseEnvironments,
   parsePairingLink,
   serializeEnvironments,
   withActive,
   withEnvironment,
+  withEnvironmentIdentity,
   withoutEnvironment,
 };

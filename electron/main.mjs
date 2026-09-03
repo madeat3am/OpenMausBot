@@ -1386,9 +1386,10 @@ ipcMain.on("desktop:unread-count", (event, value) => {
 
 // ── environments: this computer's server, or a paired remote one ──────
 // The app switches by loading the chosen server's own UI (electron/menu.mjs).
-// Only {id, name, origin} is stored here; the session credential is the
+// The saved profile pins each origin to the server-provided environmentId;
+// the session credential is the
 // HttpOnly cookie /pair set for that origin, kept by Chromium's cookie jar.
-const { LOCAL_ID, activeEnvironment, allowedOrigins, parseEnvironments, parsePairingLink, serializeEnvironments, withActive, withEnvironment, withoutEnvironment } = environmentsModule;
+const { LOCAL_ID, activeEnvironment, allowedOrigins, parseEnvironments, parsePairingLink, serializeEnvironments, withActive, withEnvironment, withEnvironmentIdentity, withoutEnvironment } = environmentsModule;
 let environmentsState = { environments: [], activeId: LOCAL_ID };
 
 function environmentsFile() {
@@ -1465,8 +1466,63 @@ function navigateMainWindow(url) {
   void mainWindow.loadURL(url);
 }
 
-function switchEnvironment(id) {
-  persistEnvironments(withActive(environmentsState, id));
+async function readRemoteEnvironment(origin) {
+  const response = await fetch(`${origin}/.well-known/openmausbot/environment`, {
+    headers: { accept: "application/json" },
+    signal: AbortSignal.timeout(8_000),
+  });
+  if (!response.ok) throw new Error(`environment descriptor returned HTTP ${response.status}`);
+  const descriptor = await response.json();
+  if (typeof descriptor?.environmentId !== "string") throw new Error("environment descriptor has no environmentId");
+  return descriptor;
+}
+
+async function verifyRemoteEnvironment(environment, state = environmentsState) {
+  let descriptor;
+  try {
+    descriptor = await readRemoteEnvironment(environment.origin);
+  } catch (error) {
+    return { ok: false, code: "unreachable", error: error?.message ?? String(error) };
+  }
+  const bound = withEnvironmentIdentity(state, {
+    origin: environment.origin,
+    environmentId: descriptor.environmentId,
+  });
+  if (!bound.ok) return bound;
+  return { ok: true, state: bound.state };
+}
+
+function remoteVerificationDetail(result) {
+  if (result.code === "identity_changed") {
+    return "The saved origin is pinned to another OpenMausBot environment. Verify the server and pair it as a new environment if this replacement was intentional.";
+  }
+  if (result.code === "unreachable") return `${result.error}. The saved connection was not opened.`;
+  return "The server returned an invalid OpenMausBot environment identity. The saved connection was not opened.";
+}
+
+async function switchEnvironment(id) {
+  if (id === LOCAL_ID) {
+    persistEnvironments(withActive(environmentsState, LOCAL_ID));
+    navigateMainWindow(activeOrigin());
+    return;
+  }
+  const environment = environmentsState.environments.find((entry) => entry.id === id);
+  if (!environment) return;
+  const verified = await verifyRemoteEnvironment(environment);
+  if (!verified.ok) {
+    const identityChanged = verified.code === "identity_changed";
+    await dialog.showMessageBox({
+      type: "warning",
+      message: identityChanged ? `${environment.name} has a different server identity` : `Could not verify ${environment.name}`,
+      detail: remoteVerificationDetail(verified),
+    });
+    if (identityChanged || !mainWindow?.webContents.getURL()) {
+      persistEnvironments(withActive(environmentsState, LOCAL_ID));
+      navigateMainWindow(activeOrigin());
+    }
+    return;
+  }
+  persistEnvironments(withActive(verified.state, id));
   navigateMainWindow(activeOrigin());
 }
 
@@ -1495,7 +1551,17 @@ async function addServerFromClipboard() {
   if (response !== 0) return;
   let next = withEnvironment(environmentsState, { origin: link.origin, name: host }, () => randomUUID());
   const added = next.environments.find((e) => e.origin === link.origin);
-  next = withActive(next, added.id);
+  const verified = await verifyRemoteEnvironment(added, next);
+  if (!verified.ok) {
+    const identityChanged = verified.code === "identity_changed";
+    await dialog.showMessageBox({
+      type: "warning",
+      message: identityChanged ? `${host} has a different server identity` : `Could not verify ${host}`,
+      detail: remoteVerificationDetail(verified),
+    });
+    return;
+  }
+  next = withActive(verified.state, added.id);
   persistEnvironments(next);
   navigateMainWindow(link.url);
 }
@@ -1599,7 +1665,7 @@ function createWindow() {
       message: `${remote.name} is not reachable`,
       detail: `${errorDescription}. Showing the local server instead; choose it again from the Server menu when it is back.`,
     });
-    switchEnvironment(LOCAL_ID);
+    void switchEnvironment(LOCAL_ID);
   });
   win.webContents.on("did-finish-load", () => deliverPackageInstall(win));
 
@@ -1744,7 +1810,7 @@ function createWindow() {
 
   const remote = activeEnvironment(environmentsState);
   if (remote) {
-    win.loadURL(remote.origin);
+    void switchEnvironment(remote.id);
   } else if (app.isPackaged) {
     win.loadURL(serverReady ? `http://127.0.0.1:${SERVER_PORT}` : buildErrorPage({ allPortsOccupied: serverStartConflictOnly }));
   } else {
