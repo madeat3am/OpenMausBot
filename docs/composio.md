@@ -15,6 +15,12 @@ The Connected tab lists every account separately. **Disconnect** revokes only th
 
 The desktop app validates the key before saving it. The key is encrypted using Electron's operating-system-backed `safeStorage`; the local JSON configuration stores only the non-secret Composio user and Session identifiers.
 
+## Action approvals and Auto mode
+
+Connected-app discovery is read-only and does not open approval cards. Provider actions ask by default. Turning on **Auto** for a bot explicitly authorizes that bot to execute connected-app actions during a person-started turn and during routines the operator enabled. This is the appropriate mode for an action-oriented personal-assistant bot whose routine prompt clearly names its permitted work.
+
+Webhook-originated turns do not inherit Auto mode, because their payload is supplied by an external sender rather than the operator. Generic Composio execution tools also cannot be granted permanently with **Always allow**; use the bot-level Auto setting so the authority is visible and can be withdrawn in one place. Action receipts remain in the conversation and decision log.
+
 ## Scoped key permissions
 
 A default project API key works without additional configuration. For a least-privilege scoped key, grant:

@@ -140,9 +140,10 @@ describe("autoDecision", () => {
     "COMPOSIO_REMOTE_WORKBENCH",
     "mcp__composio__GMAIL_SEND_EMAIL",
     "mcp__openmausbot_connectors__SLACK_SEND_MESSAGE",
-  ])("never auto-approves a connected-app action: %s", (tool) => {
-    const bot = { autoApprove: true, alwaysAllow: [tool] };
-    expect(autoDecision(bot, tool, "perform the requested provider action")).toBeNull();
+  ])("auto-approves a connected-app action only in explicit Auto mode: %s", (tool) => {
+    expect(autoDecision({ alwaysAllow: [tool] }, tool, "perform the requested provider action")).toBeNull();
+    expect(autoDecision({ autoApprove: true }, tool, "perform the requested provider action"))
+      .toBe(`auto-approved ${tool}`);
   });
 });
 
@@ -155,6 +156,14 @@ describe("unattended turns", () => {
 
   it("does not inherit an always-allow grant either", () => {
     expect(autoDecision(bot, "Bash", "git log", { unattended: true })).toBeNull();
+  });
+
+  it("does not inherit connected-app Auto mode from a webhook turn", () => {
+    expect(
+      autoDecision(bot, "mcp__openmausbot_connectors__COMPOSIO_MULTI_EXECUTE_TOOL", "update Todoist", {
+        unattended: true,
+      }),
+    ).toBeNull();
   });
 
   it("still auto-approves the same action when a person started the turn", () => {
