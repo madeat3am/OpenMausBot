@@ -157,6 +157,9 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
       let stopRequested = false;
       const { threadId } = turn;
       if (active.has(threadId)) throw new Error("a turn is already running on this thread");
+      if (turn.integrations?.composio && config.fullAuto) {
+        throw new Error("connected apps require interactive approval; disable fullAuto");
+      }
       const turnId = newId();
       // a retry relaunches the whole app-server; the backoff is scaled down in
       // tests so a fake's transient failures don't stall real seconds

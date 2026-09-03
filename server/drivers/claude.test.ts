@@ -146,6 +146,26 @@ describe("ClaudeDriver.decodeConfig", () => {
     await bypass.dispose();
   });
 
+  it("refuses connected apps when bypassPermissions would suppress approval cards", async () => {
+    const bypass = await ClaudeDriver.create({
+      instanceId: "claude-bypass-composio",
+      displayName: "Claude Bypass Composio",
+      environment: {},
+      enabled: true,
+      config: { cli: FAKE_CLI, permissionMode: "bypassPermissions" },
+    });
+    await expect(
+      bypass.adapter.sendTurn({
+        threadId: "t-bypass-composio",
+        text: "send mail",
+        integrations: {
+          composio: { command: process.execPath, args: ["/tmp/connector-proxy.js"], env: {} },
+        },
+      }),
+    ).rejects.toThrow(/connected apps require the interactive approval broker/);
+    await bypass.dispose();
+  });
+
   it("gives each collision test a distinct broker pipe path", () => {
     const paths = COLLISION_THREAD_IDS.map(permissionSocketPath);
     expect(new Set(paths).size).toBe(COLLISION_THREAD_IDS.length);

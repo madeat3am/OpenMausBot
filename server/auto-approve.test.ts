@@ -130,6 +130,17 @@ describe("autoDecision", () => {
       }),
     ).toBeNull();
   });
+
+  it.each([
+    "COMPOSIO_MULTI_EXECUTE_TOOL",
+    "COMPOSIO_MANAGE_CONNECTIONS",
+    "mcp__composio__COMPOSIO_MULTI_EXECUTE_TOOL",
+    "mcp__openmausbot_connectors__COMPOSIO_MANAGE_CONNECTIONS",
+    "COMPOSIO_REMOTE_WORKBENCH",
+  ])("never auto-approves a connected-app action: %s", (tool) => {
+    const bot = { autoApprove: true, alwaysAllow: [tool] };
+    expect(autoDecision(bot, tool, "perform the requested provider action")).toBeNull();
+  });
 });
 
 describe("unattended turns", () => {

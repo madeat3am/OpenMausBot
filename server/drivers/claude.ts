@@ -647,6 +647,9 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       const { threadId } = turn;
       if (active.has(threadId)) throw new Error("a turn is already running on this thread");
       const controlsHost = turn.integrations?.localComputer?.scope === "local-computer";
+      if (turn.integrations?.composio && config.permissionMode === "bypassPermissions") {
+        throw new Error("connected apps require the interactive approval broker");
+      }
       if (controlsHost && config.permissionMode === "bypassPermissions") {
         throw new Error("local computer control requires the interactive approval broker");
       }

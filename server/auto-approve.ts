@@ -58,6 +58,21 @@ export function looksDestructive(text: string): boolean {
  * client so the two sides can never disagree about what was granted. */
 const COMMAND_TOOLS = new Set(["bash", "shell", "execute", "run_command", "computer_exec", "terminal"]);
 
+// Composio exposes provider reads and writes through generic MCP tools. The
+// summary is model-authored and is not a safe basis for deciding whether an
+// email, message, event, or account change is harmless. Keep these calls out
+// of both bot Auto mode and remembered "Always allow" grants so OMB always
+// presents the native approval card. Discovery helpers are pre-approved by
+// the drivers and do not reach this path.
+function isComposioAction(tool: string): boolean {
+  const name = tool.split("__").at(-1)?.toUpperCase() ?? "";
+  return name.startsWith("COMPOSIO_") && ![
+    "COMPOSIO_SEARCH_TOOLS",
+    "COMPOSIO_GET_TOOL_SCHEMAS",
+    "COMPOSIO_WAIT_FOR_CONNECTIONS",
+  ].includes(name);
+}
+
 export function approvalKey(tool: string, summary: string, scope?: "local-computer"): string {
   const bare = tool.replace(/^mcp__[^_]+__/, "").toLowerCase();
   if (!COMMAND_TOOLS.has(bare)) return scope ? `${scope}:${tool}` : tool;
@@ -114,6 +129,7 @@ export function autoVerdict(
     scope?: "local-computer";
   },
 ): AutoVerdict {
+  if (isComposioAction(tool)) return { approve: null, source: "no-grant" };
   // the guards outrank the grants, so an "always allow" can never widen
   // into them
   const destructive = matchFirst(DESTRUCTIVE, summary) ?? matchFirst(DESTRUCTIVE, tool);

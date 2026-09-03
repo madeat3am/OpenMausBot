@@ -219,6 +219,19 @@ describe("CodexDriver turns (fake app-server)", () => {
     expect(argv).not.toContain("tools.COMPOSIO_MULTI_EXECUTE_TOOL.approval_mode");
   });
 
+  it("refuses connected apps when fullAuto would suppress approval cards", async () => {
+    await create({ fullAuto: true });
+    await expect(
+      instance.adapter.sendTurn({
+        threadId: "t-full-auto-composio",
+        text: "send mail",
+        integrations: {
+          composio: { command: process.execPath, args: ["/tmp/connector-proxy.js"], env: {} },
+        },
+      }),
+    ).rejects.toThrow(/connected apps require interactive approval/);
+  });
+
   it("mounts custom MCP servers on-request while built-ins stay pre-quieted", async () => {
     await create();
     const dump = join(scratch, "custom-mcp.json");
