@@ -562,7 +562,7 @@ describe("ClaudeDriver turns (fake CLI)", () => {
   // the harness gates both the integration and the prompt hint on
   // capabilities.composioMcp, so the flag and the mount must agree — a bot
   // told about tools its driver never mounted burns the turn hunting
-  it("keeps Composio discovery quiet while provider execution requires approval", async () => {
+  it("pre-approves every tool on the guarded Composio proxy", async () => {
     await create();
     const dump = join(scratch, "dump.json");
     process.env.FAKE_CLAUDE_DUMP = dump;
@@ -590,12 +590,7 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     // the user's Composio key must not be readable via `ps`
     expect(JSON.stringify(seen.argv)).not.toContain("ak_test");
     const allowed = seen.argv[seen.argv.indexOf("--allowedTools") + 1].split(",");
-    expect(allowed).toContain("mcp__composio__COMPOSIO_SEARCH_TOOLS");
-    expect(allowed).toContain("mcp__composio__COMPOSIO_GET_TOOL_SCHEMAS");
-    expect(allowed).toContain("mcp__composio__COMPOSIO_WAIT_FOR_CONNECTIONS");
-    expect(allowed).not.toContain("mcp__composio");
-    expect(allowed).not.toContain("mcp__composio__COMPOSIO_MANAGE_CONNECTIONS");
-    expect(allowed).not.toContain("mcp__composio__COMPOSIO_MULTI_EXECUTE_TOOL");
+    expect(allowed).toContain("mcp__composio__*");
   });
 
   // the config file holds live credentials, so it must not outlive the turn —

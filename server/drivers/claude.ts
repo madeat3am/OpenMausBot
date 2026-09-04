@@ -91,16 +91,6 @@ function claudeEnvironment(
 
 const DRIVER_KIND = "claudeAgent";
 
-// Composio's catalog/auth helpers do not run provider tools. Keep that
-// discovery path quiet, but leave execution and remote-workbench tools out so
-// they flow through OpenMausBot's existing permission broker one call at a
-// time.
-const QUIET_COMPOSIO_TOOLS = [
-  "COMPOSIO_SEARCH_TOOLS",
-  "COMPOSIO_GET_TOOL_SCHEMAS",
-  "COMPOSIO_WAIT_FOR_CONNECTIONS",
-] as const;
-
 export interface ClaudeConfig {
   cli: string;
   permissionMode: "acceptEdits" | "auto" | "bypassPermissions";
@@ -697,7 +687,10 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       const allowed: string[] = [];
       if (turn.integrations?.composio) {
         mcpServers.composio = { ...turn.integrations.composio };
-        allowed.push(...QUIET_COMPOSIO_TOOLS.map((tool) => `mcp__composio__${tool}`));
+        // The MCP server here is OpenMausBot's guarded connector proxy. The
+        // proxy is the authorization boundary and returns terminal denials;
+        // Claude must not create a second, human-waiting approval layer.
+        allowed.push("mcp__composio__*");
       }
       if (turn.integrations?.computer) {
         mcpServers.computer = {

@@ -19,6 +19,14 @@ import {
 } from "../shared/credential-request.ts";
 
 import { approvalKey, autoVerdict } from "./auto-approve.ts";
+import { AutonomyDatabase } from "./autonomy-db.ts";
+import {
+  actionsFromMcpPayload,
+  AutonomyAuthority,
+  AUTONOMY_DECISION_SCHEMA,
+  type AutonomyDecision,
+  type ToolAction,
+} from "./autonomy-policy.ts";
 import { requestReview, resolveAutoReviewMode, shouldReview } from "./auto-review.ts";
 import { updateClaudeCli } from "./claude-update.ts";
 import {
@@ -62,6 +70,12 @@ import { RoomTurnDeadline, RoomTurnStallRegistry, roomTurnTimeoutMessage } from 
 import * as box from "./box.ts";
 import { cloudBackendChangeError, vpsAliasChangeError } from "./cloud-backend.ts";
 import * as composio from "./composio.ts";
+import {
+  composioEventMaterialDigest,
+  composioWakePrompt,
+  routeComposioWebhook,
+  verifyComposioWebhook,
+} from "./composio-webhook.ts";
 import { chiefOfStaffSystemPrompt } from "./chief-of-staff.ts";
 import { openMausStatusSystemPrompt } from "./openmaus-status-capsule.ts";
 import {
@@ -121,6 +135,7 @@ import {
   parseStoredMcpServer,
 } from "./mcp-registry.ts";
 import { probeMcpServer } from "./mcp-probe.ts";
+import { mcpSecretsDiagnostic } from "./mcp-secrets.ts";
 import {
   GROUP_GOAL_MAX_TURNS,
   groupGoalAssignmentKey,
@@ -287,6 +302,8 @@ const MIME: Record<string, string> = {
 };
 
 ensureDirs();
+const autonomyAuthority = new AutonomyAuthority();
+const autonomyDb = new AutonomyDatabase(DATA_DIR);
 // Only after ensureDirs(): it performs the one-time rename of the legacy data
 // dir, which must not find a freshly created ~/.openmausbot already there.
 // Remote clients (server/request-auth.ts, server/sessions.ts): a stable identity
@@ -651,12 +668,25 @@ function phoneIntegration() {
   return { command: process.execPath, args: [phoneProxyPath], env };
 }
 
-function connectedAppsIntegration(botId: string, threadId: string) {
+function connectedAppsIntegration(
+  botId: string,
+  threadId: string,
+  wakeKind: "operator" | "routine" | "webhook" = "operator",
+  authorityId?: string,
+) {
+  const autonomyCapability = autonomyAuthority.issue({
+    botId,
+    threadId,
+    wakeKind,
+    ...(wakeKind === "routine" && authorityId ? { routineId: authorityId } : {}),
+    ...(wakeKind === "webhook" && authorityId ? { triggerId: authorityId } : {}),
+  });
   return composio.mcpIntegration(cfg, {
     harnessUrl: `http://127.0.0.1:${PORT}`,
     commsToken: COMMS_TOKEN,
     botId,
     threadId,
+    ...(autonomyCapability ? { autonomyCapability } : {}),
   });
 }
 
@@ -2884,6 +2914,8 @@ async function startTurn(
     /** Lets the system prompt put externally supplied payloads behind an
      * explicit untrusted-data boundary without changing ordinary chat. */
     automationSource?: RoutineRunTrigger;
+    /** Owning routine id or policy trigger id for a bounded capability. */
+    authorityId?: string;
     /** the caller was already running unattended, so this turn is too */
     unattended?: boolean;
     /** Resume an agent after the user completed an inline connection or credential card.
@@ -3060,7 +3092,12 @@ async function startTurn(
       // this engine can reach them — and only to a bot the user has not
       // switched off: the key is workspace-wide, the grant is per bot.
       if (bot.composio !== false && composio.configured(cfg) && instance.adapter.capabilities.composioMcp === true) {
-        const connection = await connectedAppsIntegration(bot.id, threadId);
+        const wakeKind = opts?.automationSource === "webhook"
+          ? "webhook"
+          : opts?.automationSource === "schedule" || opts?.automationSource === "manual"
+            ? "routine"
+            : "operator";
+        const connection = await connectedAppsIntegration(bot.id, threadId, wakeKind, opts?.authorityId);
         if (connection) integrations.composio = connection;
       }
       // user-configured MCP servers (config.json mcpServers): same rule as
@@ -3650,8 +3687,8 @@ routines = new RoutineManager({
     return task;
   },
   createGoalTask: (groupId, title) => store.createGroupTask(groupId, title, false),
-  startTurn: (botId, threadId, prompt, runOn, triggerSource, onDispatchError) =>
-    startTurn(botId, prompt, { threadId, runOn, automationSource: triggerSource, onDispatchError })
+  startTurn: (botId, threadId, prompt, runOn, triggerSource, authorityId, onDispatchError) =>
+    startTurn(botId, prompt, { threadId, runOn, automationSource: triggerSource, authorityId, onDispatchError })
       .then(() => undefined),
   startGoal: async (groupId, threadId, prompt, coordinatorBotId, runId, _onDispatchError) => {
     startGroupTurn(groupId, prompt, undefined, undefined, "goal", undefined, {
@@ -4076,7 +4113,11 @@ async function runGroupMemberTurn(
   }
   try {
     if (bot.composio !== false && composio.configured(cfg) && instance.adapter.capabilities.composioMcp === true) {
-      const connection = await connectedAppsIntegration(bot.id, threadId);
+      const connection = await connectedAppsIntegration(
+        bot.id,
+        threadId,
+        isUnattended(bot.id) ? "webhook" : "operator",
+      );
       if (connection) integrations.composio = connection;
     }
   } catch (error) {
@@ -5718,6 +5759,12 @@ function configStatus() {
       configured: composio.configured(cfg),
       mode: composio.connectionMode(cfg),
     },
+    autonomy: {
+      status: autonomyAuthority.state.status,
+      revision: autonomyAuthority.state.revision,
+      digest: autonomyAuthority.state.digest,
+    },
+    mcpSecrets: mcpSecretsDiagnostic(cfg.mcpServers),
     box: { configured: Boolean(cfg.box?.token) },
     vps: { configured: Boolean(vpsSshAlias(cfg)), sshAlias: vpsSshAlias(cfg) ?? "" },
     opencodeGo: { configured: Boolean(cfg.opencodeGo?.apiKey) },
@@ -5880,6 +5927,67 @@ function readBody(req: IncomingMessage): Promise<any> {
   });
 }
 
+function readRawBody(req: IncomingMessage, maximum = 256 * 1_024): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    let done = false;
+    const fail = (status: number, message: string) => {
+      if (done) return;
+      done = true;
+      reject(Object.assign(new Error(message), { status }));
+    };
+    req.on("data", (chunk) => {
+      if (done) return;
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      bytes += buffer.length;
+      if (bytes > maximum) return fail(413, "body too large");
+      chunks.push(buffer);
+    });
+    req.on("end", () => {
+      if (done) return;
+      done = true;
+      resolve(Buffer.concat(chunks));
+    });
+    req.on("error", (error) => fail(400, error instanceof Error ? error.message : String(error)));
+  });
+}
+
+function providerReceiptId(bytes: Uint8Array): string | undefined {
+  const text = Buffer.from(bytes).toString("utf8");
+  const match = text.match(/"(?:log_id|execution_id|result_id)"\s*:\s*"([^"\\]{1,300})"/);
+  return match?.[1];
+}
+
+function composioWebhookSecret(): string | undefined {
+  const file = process.env.COMPOSIO_WEBHOOK_SECRET_FILE?.trim();
+  if (!file) return process.env.COMPOSIO_WEBHOOK_SECRET;
+  try {
+    return readFileSync(file, "utf8").trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function deniedMcpResponse(id: unknown, decisions: AutonomyDecision[]) {
+  return {
+    jsonrpc: "2.0",
+    id,
+    result: {
+      isError: true,
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          schema: AUTONOMY_DECISION_SCHEMA,
+          outcome: "denied",
+          approvalCardCreated: false,
+          decisions,
+        }),
+      }],
+    },
+  };
+}
+
 // Loopback-only enforcement: the harness runs on 127.0.0.1 but accepts
 // requests from any loopback connection and any web page that DNS-rebinds
 // onto it. Reject non-loopback Hosts outright (defeats rebinding) and
@@ -5917,6 +6025,50 @@ const server = createServer(async (req, res) => {
         return json(res, 200, { session: result.session, environment });
       }
       return json(res, 200, { token: result.token, session: result.session, environment });
+    }
+    if (method === "POST" && path === "/api/webhooks/composio") {
+      const rawBody = await readRawBody(req);
+      const webhookSecret = composioWebhookSecret();
+      if (!webhookSecret) return json(res, 503, { accepted: false, error: "Composio webhook ingress is not configured" });
+      let event;
+      try {
+        event = verifyComposioWebhook({
+          rawBody,
+          webhookId: Array.isArray(req.headers["webhook-id"]) ? req.headers["webhook-id"][0] : req.headers["webhook-id"],
+          webhookTimestamp: Array.isArray(req.headers["webhook-timestamp"])
+            ? req.headers["webhook-timestamp"][0]
+            : req.headers["webhook-timestamp"],
+          webhookSignature: Array.isArray(req.headers["webhook-signature"])
+            ? req.headers["webhook-signature"][0]
+            : req.headers["webhook-signature"],
+          secret: webhookSecret,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return json(res, 401, { accepted: false, error: message });
+      }
+      const route = routeComposioWebhook(autonomyAuthority.state.policy, event);
+      if (!route) return json(res, 202, { accepted: false, outcome: "unrouted" });
+      const eventId = event.metadata.log_id ?? event.id;
+      const receivedAt = Date.now();
+      const outcome = autonomyDb.acceptComposioEvent({
+        eventId,
+        receivedAt,
+        materialDigest: composioEventMaterialDigest(event),
+        triggerSlug: event.metadata.trigger_slug,
+        accountAlias: event.metadata.connected_account_id,
+      });
+      if (outcome !== "accepted") return json(res, 200, { accepted: false, outcome });
+      const run = routines!.enqueueWebhook({
+        webhookId: route.id,
+        webhookName: `Composio: ${event.metadata.trigger_slug}`,
+        prompt: composioWakePrompt(event),
+        botId: route.botId,
+        runOn: route.runOn ?? "maus",
+        deliveryId: eventId,
+        receivedAt,
+      });
+      return json(res, 202, { accepted: true, outcome: "queued", runId: run.id });
     }
     const gate = resolveRequestAuth(req, { sessions, cookieName: SESSION_COOKIE, streamPath: "/api/events", url });
     if (!gate.auth) return json(res, gate.status, { error: gate.error });
@@ -6487,6 +6639,35 @@ const server = createServer(async (req, res) => {
       }
       if (method === "POST" && path === "/api/internal/connectors/mcp") {
         const body = await readBody(req);
+        const extracted = actionsFromMcpPayload(body);
+        const capability = Array.isArray(req.headers["x-openmaus-autonomy-capability"])
+          ? req.headers["x-openmaus-autonomy-capability"][0]
+          : req.headers["x-openmaus-autonomy-capability"];
+        if (extracted.error) {
+          const action: ToolAction = {
+            transport: "composio",
+            server: "composio",
+            tool: String(body?.params?.name ?? "unknown"),
+            arguments: {},
+          };
+          const decision: AutonomyDecision = {
+            schema: AUTONOMY_DECISION_SCHEMA,
+            allowed: false,
+            code: "malformed-action",
+            reason: extracted.error,
+            tool: action.tool,
+          };
+          autonomyDb.recordDecision(decision, action);
+          return json(res, 200, deniedMcpResponse(body?.id, [decision]));
+        }
+        const decisions = extracted.actions.map((action) => autonomyAuthority.authorize(capability, action));
+        if (decisions.some((decision) => !decision.allowed)) {
+          const rejected = decisions.map((decision): AutonomyDecision => decision.allowed
+            ? { ...decision, allowed: false, code: "mixed-batch-denied", reason: "the entire batch was denied before execution" }
+            : decision);
+          rejected.forEach((decision, index) => autonomyDb.recordDecision(decision, extracted.actions[index]!));
+          return json(res, 200, deniedMcpResponse(body?.id, rejected));
+        }
         const upstream = await composio.relayMcp(
           cfg,
           body,
@@ -6494,6 +6675,8 @@ const server = createServer(async (req, res) => {
             ? req.headers["mcp-session-id"][0]
             : req.headers["mcp-session-id"],
         );
+        const providerId = providerReceiptId(upstream.bytes);
+        decisions.forEach((decision, index) => autonomyDb.recordDecision(decision, extracted.actions[index]!, providerId));
         const headers: Record<string, string> = {
           "content-type": upstream.contentType,
           "cache-control": "no-store",

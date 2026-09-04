@@ -1,0 +1,39 @@
+{
+  "schema": "openmausbot.autonomy-policy.v1",
+  "revision": "replace-with-private-revision",
+  "rules": [
+    {
+      "id": "personal-admin-todoist",
+      "botId": "replace-with-bot-id",
+      "wakeKinds": ["operator", "routine", "webhook"],
+      "triggerIds": ["todoist-events"],
+      "transport": "composio",
+      "server": "composio",
+      "tools": ["TODOIST_UPSERT_TASK", "TODOIST_GET_TASKS"],
+      "accountAliases": ["replace-with-private-alias"],
+      "effect": "todoist_upsert"
+    },
+    {
+      "id": "communications-origin-thread",
+      "botId": "replace-with-bot-id",
+      "wakeKinds": ["operator", "routine"],
+      "transport": "composio",
+      "server": "composio",
+      "tools": ["SLACK_SEND_MESSAGE"],
+      "accountAliases": ["replace-with-private-alias"],
+      "effect": "thread_reply",
+      "constraints": {
+        "recipientAliases": ["replace-with-private-recipient-alias"]
+      }
+    }
+  ],
+  "webhooks": [
+    {
+      "id": "gmail-events",
+      "triggerSlugs": ["GMAIL_NEW_MESSAGE"],
+      "botId": "replace-with-bot-id",
+      "connectedAccountIds": ["replace-with-private-connected-account-id"],
+      "runOn": "maus"
+    }
+  ]
+}

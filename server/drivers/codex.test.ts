@@ -185,7 +185,7 @@ describe("CodexDriver turns (fake app-server)", () => {
     expect(JSON.parse(readFileSync(dump, "utf8")).env.CODEX_HOME).toBe(codexHome);
   });
 
-  it("keeps Composio discovery quiet while provider execution requires approval", async () => {
+  it("pre-approves the guarded Composio proxy without exposing its token", async () => {
     await create();
     const dump = join(scratch, "composio.json");
     process.env.FAKE_CODEX_DUMP = dump;
@@ -212,25 +212,17 @@ describe("CodexDriver turns (fake app-server)", () => {
     expect(seen.argv.join(" ")).not.toContain("per-boot-token");
     expect(seen.env.OMB_COMMS_TOKEN).toBe("per-boot-token");
     const argv = seen.argv.join(" ");
-    expect(argv).toContain('mcp_servers.openmausbot_connectors.default_tools_approval_mode="prompt"');
-    expect(argv).toContain('mcp_servers.openmausbot_connectors.tools.COMPOSIO_SEARCH_TOOLS.approval_mode="approve"');
-    expect(argv).toContain('mcp_servers.openmausbot_connectors.tools.COMPOSIO_GET_TOOL_SCHEMAS.approval_mode="approve"');
-    expect(argv).toContain('mcp_servers.openmausbot_connectors.tools.COMPOSIO_WAIT_FOR_CONNECTIONS.approval_mode="approve"');
-    expect(argv).not.toContain("tools.COMPOSIO_MANAGE_CONNECTIONS.approval_mode");
-    expect(argv).not.toContain("tools.COMPOSIO_MULTI_EXECUTE_TOOL.approval_mode");
+    expect(argv).toContain('mcp_servers.openmausbot_connectors.default_tools_approval_mode="auto"');
   });
 
-  it("refuses connected apps when fullAuto would suppress approval cards", async () => {
+  it("allows the guarded connector proxy in fullAuto mode", async () => {
     await create({ fullAuto: true });
-    await expect(
-      instance.adapter.sendTurn({
-        threadId: "t-full-auto-composio",
-        text: "send mail",
-        integrations: {
-          composio: { command: process.execPath, args: ["/tmp/connector-proxy.js"], env: {} },
-        },
-      }),
-    ).rejects.toThrow(/connected apps require interactive approval/);
+    await instance.adapter.sendTurn({
+      threadId: "t-full-auto-composio",
+      text: "send mail",
+      integrations: { composio: { command: process.execPath, args: ["/tmp/connector-proxy.js"], env: {} } },
+    });
+    await recorder.until((event) => event.type === "turn.completed");
   });
 
   it("mounts custom MCP servers on-request while built-ins stay pre-quieted", async () => {
@@ -261,10 +253,10 @@ describe("CodexDriver turns (fake app-server)", () => {
     expect(argv).toContain("NOTES_TOKEN");
     expect(argv).not.toContain("tok-notes");
     expect(seen.env.NOTES_TOKEN).toBe("tok-notes");
-    // the connector server prompts by default, with only its safe helper
-    // tools pre-quieted; the custom server also stays on-request
+    // the connector is guarded and pre-approved; the custom server stays
+    // on-request until custom-MCP policy enforcement is installed
     expect(argv).toContain('mcp_servers.openmausbot_connectors.default_tools_approval_mode');
-    expect(argv).toContain('mcp_servers.openmausbot_connectors.default_tools_approval_mode="prompt"');
+    expect(argv).toContain('mcp_servers.openmausbot_connectors.default_tools_approval_mode="auto"');
     expect(argv).not.toContain('mcp_servers.notes.default_tools_approval_mode');
   });
 

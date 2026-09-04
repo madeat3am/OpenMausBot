@@ -22,11 +22,33 @@ The same registry lives in `~/.openmausbot/config.json`:
     "notes": {
       "command": "npx",
       "args": ["-y", "@example/notes-mcp"],
-      "env": { "NOTES_TOKEN": "…" }
+      "env": { "NOTES_TOKEN": "" }
     }
   }
 }
 ```
+
+Put the corresponding values in an owner-controlled mode-0600 file and set
+`OMB_MCP_SECRETS_FILE=/run/openmausbot/mcp-secrets.json`:
+
+```json
+{
+  "schema": "openmausbot.mcp-secrets.v1",
+  "servers": { "notes": { "NOTES_TOKEN": "replace-on-host" } }
+}
+```
+
+The external value wins over a legacy inline value, and only the selected
+server's subtree is passed to that MCP child. Set
+`OMB_MCP_INLINE_SECRETS=reject` after migration; in that mode any remaining
+inline value makes the server fail closed. Diagnostics expose only
+`resolved`, `missing`, or `invalid`.
+
+Externalization alone does not isolate the resolved child environment from a
+shell-capable engine running as the same operating-system user. Do not enable
+unattended custom-MCP mutations until the deployment also supplies the
+host-owned sandbox and guarded custom-MCP proxy. The policy boundary described
+for Connected Apps does not yet authorize custom MCPs.
 
 If you edit the file by hand, restart OpenMausBot. Every bot whose engine can
 mount custom MCP servers gets the enabled tools on its next task.
@@ -45,13 +67,12 @@ mount custom MCP servers gets the enabled tools on its next task.
 - **One bad entry never takes the fleet down.** Invalid entries are skipped
   with a logged reason; the rest still mount.
 - **Credentials are write-only in the UI.** The API returns environment names,
-  never their values. Leaving an existing value blank keeps it saved; removing
-  its line deletes it.
+  never their values. Headless acceptance uses the external file above.
 - **Credentials stay off argv.** `env` values travel in the child
   environment (Codex argv carries env *names* only; Claude uses the private
   0600 mcp-config file; ACP passes them in the session payload with the
-  wire log redacted). They do persist as plaintext in the 0600 config file —
-  prefer tokens scoped to the one server.
+  wire log redacted). Legacy inline values are compatibility-only and must be
+  removed before enabling external-only mode.
 - **Testing is bounded.** The test command is stopped after the handshake (or
   eight seconds), its output is capped, and its stderr is never sent to the UI.
   It inherits none of OpenMausBot's workspace or provider credentials; only

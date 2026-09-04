@@ -15,11 +15,19 @@ The Connected tab lists every account separately. **Disconnect** revokes only th
 
 The desktop app validates the key before saving it. The key is encrypted using Electron's operating-system-backed `safeStorage`; the local JSON configuration stores only the non-secret Composio user and Session identifiers.
 
-## Action approvals and Auto mode
+## Policy-bounded autonomous actions
 
-Connected-app discovery is read-only and does not open approval cards. Provider actions ask by default. Turning on **Auto** for a bot explicitly authorizes that bot to execute connected-app actions during a person-started turn and during routines the operator enabled. This is the appropriate mode for an action-oriented personal-assistant bot whose routine prompt clearly names its permitted work.
+Set `OMB_AUTONOMY_POLICY_PATH` to an owner-controlled, read-only policy file matching `openmausbot.autonomy-policy.v1`. The checked-in `autonomy-policy.example.json` contains no account or recipient secrets. Each turn receives a short-lived capability bound to its bot, thread, wake kind, owning routine or trigger, and the policy digest.
 
-Webhook-originated turns do not inherit Auto mode, because their payload is supplied by an external sender rather than the operator. Generic Composio execution tools also cannot be granted permanently with **Always allow**; use the bot-level Auto setting so the authority is visible and can be withdrawn in one place. Action receipts remain in the conversation and decision log.
+Codex and Claude pre-approve only OpenMausBot's guarded connector proxy. The proxy sees the exact nested provider tool, account selection, and arguments before forwarding. Discovery remains available; an action runs only when one exact rule matches. Money, deletion, permission, credential, security, connection-management, remote-shell, and workbench effects fail closed with a structured terminal receipt and no approval card. A mixed `COMPOSIO_MULTI_EXECUTE_TOOL` batch is rejected in full if any nested action is denied.
+
+Missing or invalid policy and expired capabilities deny provider actions. OAuth renewal and other operator-only prerequisites are terminal blockers; connect or repair accounts from **Connected apps**, not from a bot turn. Decision storage contains rule, account alias, tool, argument digest, provider result reference, and outcome, never raw arguments.
+
+## Signed trigger wakes
+
+The hosted surface accepts Composio V3 trigger callbacks at `POST /api/webhooks/composio` when `COMPOSIO_WEBHOOK_SECRET` or `COMPOSIO_WEBHOOK_SECRET_FILE` is configured. It verifies the standard raw-body signature and timestamp with a five-minute tolerance, deduplicates stable event/log ids for 30 days, and suppresses unchanged material for 24 hours. Exact trigger-to-bot routes come from the autonomy policy.
+
+A callback is a wake, not source truth. Its bot is explicitly instructed to re-read the connected application before acting. If the published OMB address cannot receive this route, ingress is a deployment prerequisite; do not add a polling service or another broker.
 
 ## Scoped key permissions
 

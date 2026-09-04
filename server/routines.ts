@@ -183,6 +183,7 @@ export interface RoutineManagerOptions {
     prompt: string,
     runOn: RoutineRunOn,
     triggerSource: RoutineRunTrigger,
+    authorityId: string,
     onDispatchError: (message: string) => void,
   ) => Promise<void>;
   startGoal?: (
@@ -1077,6 +1078,7 @@ export class RoutineManager {
               composeExecutionPrompt(prompt, run.attachments),
               run.runOn ?? "maus",
               triggerSource,
+              run.routineId,
               (message) => this.failThread(task.threadId, message),
             );
           }

@@ -132,6 +132,36 @@ describe("nextOccurrence", () => {
       anchorAt: 8_640_000_000_000_000,
     }, 8_640_000_000_000_000)).toBeNull();
   });
+
+  it("preserves America/Chicago wall time across spring-forward", () => {
+    const previous = process.env.TZ;
+    process.env.TZ = "America/Chicago";
+    try {
+      const after = Date.parse("2026-03-08T06:00:00Z"); // midnight CST
+      const next = nextOccurrence({ type: "daily", time: "02:30", weekdays: [0] }, after);
+      // 02:30 does not exist; Date's wall-clock normalization advances it to
+      // the next representable matching minute, 03:30 CDT, exactly once.
+      expect(next).toBe(Date.parse("2026-03-08T08:30:00Z"));
+    } finally {
+      if (previous === undefined) delete process.env.TZ;
+      else process.env.TZ = previous;
+    }
+  });
+
+  it("runs only the first repeated America/Chicago wall-clock occurrence", () => {
+    const previous = process.env.TZ;
+    process.env.TZ = "America/Chicago";
+    try {
+      const schedule: RoutineSchedule = { type: "daily", time: "01:30", weekdays: [0, 1] };
+      expect(nextOccurrence(schedule, Date.parse("2026-11-01T05:00:00Z")))
+        .toBe(Date.parse("2026-11-01T06:30:00Z")); // first 01:30, still CDT
+      expect(nextOccurrence(schedule, Date.parse("2026-11-01T06:31:00Z")))
+        .toBe(Date.parse("2026-11-02T07:30:00Z")); // skip repeated 01:30 CST
+    } finally {
+      if (previous === undefined) delete process.env.TZ;
+      else process.env.TZ = previous;
+    }
+  });
 });
 
 describe("RoutineManager", () => {

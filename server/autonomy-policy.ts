@@ -1,0 +1,331 @@
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { readFileSync } from "node:fs";
+
+import { z } from "zod";
+
+export const AUTONOMY_POLICY_SCHEMA = "openmausbot.autonomy-policy.v1" as const;
+export const AUTONOMY_DECISION_SCHEMA = "openmausbot.autonomy-decision.v1" as const;
+
+export const ALLOWED_EFFECTS = [
+  "read",
+  "todoist_upsert",
+  "thread_reply",
+  "calendar_upsert",
+  "crm_note_upsert",
+  "wiki_upsert",
+  "omb_admin",
+] as const;
+
+export const DENIED_EFFECTS = ["money", "delete", "permission", "credential", "security"] as const;
+
+const wakeKindSchema = z.enum(["operator", "routine", "webhook"]);
+const transportSchema = z.enum(["composio", "custom-mcp"]);
+const effectSchema = z.enum(ALLOWED_EFFECTS);
+const shortId = z.string().trim().min(1).max(160);
+const constraintsSchema = z.object({
+  recipientAliases: z.array(shortId).max(64).optional(),
+  originatingThreadOnly: z.boolean().optional(),
+  argumentEquals: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
+}).strict().optional();
+
+const ruleSchema = z.object({
+  id: shortId,
+  botId: shortId,
+  wakeKinds: z.array(wakeKindSchema).min(1).max(3),
+  routineIds: z.array(shortId).max(100).optional(),
+  triggerIds: z.array(shortId).max(100).optional(),
+  transport: transportSchema,
+  server: shortId,
+  tools: z.array(shortId).min(1).max(200),
+  accountAliases: z.array(shortId).max(100).optional(),
+  effect: effectSchema,
+  constraints: constraintsSchema,
+}).strict();
+
+const webhookRouteSchema = z.object({
+  id: shortId,
+  triggerSlugs: z.array(shortId).min(1).max(100),
+  botId: shortId,
+  connectedAccountIds: z.array(shortId).max(100).optional(),
+  runOn: z.enum(["maus", "cloud"]).optional(),
+}).strict();
+
+const policySchema = z.object({
+  schema: z.literal(AUTONOMY_POLICY_SCHEMA),
+  revision: shortId,
+  rules: z.array(ruleSchema).max(2_000),
+  webhooks: z.array(webhookRouteSchema).max(500).optional(),
+}).strict().superRefine((policy, ctx) => {
+  const ids = new Set<string>();
+  for (const [index, rule] of policy.rules.entries()) {
+    if (ids.has(rule.id)) ctx.addIssue({ code: "custom", path: ["rules", index, "id"], message: "Rule ids must be unique" });
+    ids.add(rule.id);
+    if (rule.wakeKinds.includes("routine") && rule.routineIds?.length === 0) {
+      ctx.addIssue({ code: "custom", path: ["rules", index, "routineIds"], message: "routineIds cannot be empty" });
+    }
+    if (rule.wakeKinds.includes("webhook") && rule.triggerIds?.length === 0) {
+      ctx.addIssue({ code: "custom", path: ["rules", index, "triggerIds"], message: "triggerIds cannot be empty" });
+    }
+  }
+});
+
+export type AutonomyPolicy = Readonly<z.infer<typeof policySchema>>;
+export type WakeKind = z.infer<typeof wakeKindSchema>;
+export type AllowedEffect = z.infer<typeof effectSchema>;
+export type DeniedEffect = typeof DENIED_EFFECTS[number];
+
+export interface CapabilityContext {
+  botId: string;
+  threadId: string;
+  wakeKind: WakeKind;
+  routineId?: string;
+  triggerId?: string;
+}
+
+interface CapabilityPayload extends CapabilityContext {
+  schema: "openmausbot.autonomy-capability.v1";
+  policyDigest: string;
+  expiresAt: number;
+  nonce: string;
+}
+
+export interface ToolAction {
+  transport: "composio" | "custom-mcp";
+  server: string;
+  tool: string;
+  arguments: Record<string, unknown>;
+  accountAlias?: string;
+}
+
+export interface AutonomyDecision {
+  schema: typeof AUTONOMY_DECISION_SCHEMA;
+  allowed: boolean;
+  code: string;
+  reason: string;
+  ruleId?: string;
+  effect?: AllowedEffect | DeniedEffect;
+  tool: string;
+  accountAlias?: string;
+}
+
+export interface PolicyState {
+  policy: AutonomyPolicy | null;
+  digest: string | null;
+  revision: string | null;
+  status: "resolved" | "missing" | "invalid";
+  error?: string;
+}
+
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function deepFreeze<T>(value: T): T {
+  if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
+  Object.freeze(value);
+  for (const item of Object.values(value as Record<string, unknown>)) deepFreeze(item);
+  return value;
+}
+
+export function parseAutonomyPolicy(raw: unknown): { policy: AutonomyPolicy; digest: string } {
+  const policy = deepFreeze(policySchema.parse(raw));
+  return { policy, digest: createHash("sha256").update(canonical(policy)).digest("hex") };
+}
+
+export function loadAutonomyPolicy(path = process.env.OMB_AUTONOMY_POLICY_PATH): PolicyState {
+  if (!path?.trim()) return { policy: null, digest: null, revision: null, status: "missing" };
+  try {
+    const loaded = parseAutonomyPolicy(JSON.parse(readFileSync(path, "utf8")));
+    return { ...loaded, revision: loaded.policy.revision, status: "resolved" };
+  } catch (error) {
+    return {
+      policy: null,
+      digest: null,
+      revision: null,
+      status: "invalid",
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function encode(value: unknown): string {
+  return Buffer.from(JSON.stringify(value)).toString("base64url");
+}
+
+function decode(value: string): unknown {
+  return JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+}
+
+const capabilitySchema = z.object({
+  schema: z.literal("openmausbot.autonomy-capability.v1"),
+  botId: shortId,
+  threadId: shortId,
+  wakeKind: wakeKindSchema,
+  routineId: shortId.optional(),
+  triggerId: shortId.optional(),
+  policyDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  expiresAt: z.number().int().positive(),
+  nonce: z.string().uuid(),
+}).strict();
+
+export class AutonomyAuthority {
+  readonly state: PolicyState;
+  private readonly key: Buffer;
+
+  constructor(state = loadAutonomyPolicy(), key = randomBytes(32)) {
+    this.state = state;
+    this.key = key;
+  }
+
+  issue(context: CapabilityContext, ttlMs = 30 * 60_000, now = Date.now()): string | null {
+    if (!this.state.digest || !this.state.policy) return null;
+    const payload: CapabilityPayload = {
+      schema: "openmausbot.autonomy-capability.v1",
+      ...context,
+      policyDigest: this.state.digest,
+      expiresAt: now + Math.max(1_000, Math.min(ttlMs, 60 * 60_000)),
+      nonce: randomUUID(),
+    };
+    const body = encode(payload);
+    return `${body}.${createHmac("sha256", this.key).update(body).digest("base64url")}`;
+  }
+
+  verify(token: string | undefined, now = Date.now()): CapabilityPayload | null {
+    if (!token || !this.state.digest || !this.state.policy) return null;
+    const [body, supplied, ...extra] = token.split(".");
+    if (!body || !supplied || extra.length) return null;
+    const expected = createHmac("sha256", this.key).update(body).digest();
+    let received: Buffer;
+    try {
+      received = Buffer.from(supplied, "base64url");
+    } catch {
+      return null;
+    }
+    if (received.length !== expected.length || !timingSafeEqual(received, expected)) return null;
+    try {
+      const payload = capabilitySchema.parse(decode(body));
+      if (payload.expiresAt <= now || payload.policyDigest !== this.state.digest) return null;
+      return payload;
+    } catch {
+      return null;
+    }
+  }
+
+  authorize(token: string | undefined, action: ToolAction, now = Date.now()): AutonomyDecision {
+    const hardDenied = hardDeniedEffect(action);
+    if (hardDenied) return denied(action, "hard-deny", `${hardDenied} effects are never autonomous`, hardDenied);
+    if (isDiscoveryAction(action)) {
+      return { schema: AUTONOMY_DECISION_SCHEMA, allowed: true, code: "discovery", reason: "non-effecting discovery", effect: "read", tool: action.tool, ...(action.accountAlias ? { accountAlias: action.accountAlias } : {}) };
+    }
+    const capability = this.verify(token, now);
+    if (!capability) return denied(action, "invalid-capability", "missing, expired, or invalid autonomy capability");
+    const policy = this.state.policy;
+    if (!policy) return denied(action, "policy-unavailable", "autonomy policy is missing or invalid");
+    for (const rule of policy.rules) {
+      if (rule.botId !== capability.botId || !rule.wakeKinds.includes(capability.wakeKind)) continue;
+      if (rule.transport !== action.transport || rule.server !== action.server || !rule.tools.includes(action.tool)) continue;
+      if (capability.wakeKind === "routine" && rule.routineIds
+        && (!capability.routineId || !rule.routineIds.includes(capability.routineId))) continue;
+      if (capability.wakeKind === "webhook" && rule.triggerIds
+        && (!capability.triggerId || !rule.triggerIds.includes(capability.triggerId))) continue;
+      if (rule.accountAliases && (!action.accountAlias || !rule.accountAliases.includes(action.accountAlias))) continue;
+      if (rule.constraints?.originatingThreadOnly && !argumentMatches(action.arguments, ["threadId", "thread_id"], capability.threadId)) continue;
+      if (rule.constraints?.recipientAliases) {
+        const recipient = stringArgument(action.arguments, ["recipientAlias", "recipient_alias", "recipient", "to"]);
+        if (!recipient || !rule.constraints.recipientAliases.includes(recipient)) continue;
+      }
+      if (rule.constraints?.argumentEquals) {
+        const matches = Object.entries(rule.constraints.argumentEquals).every(([key, value]) => action.arguments[key] === value);
+        if (!matches) continue;
+      }
+      return {
+        schema: AUTONOMY_DECISION_SCHEMA,
+        allowed: true,
+        code: "policy-allowed",
+        reason: `allowed by ${rule.id}`,
+        ruleId: rule.id,
+        effect: rule.effect,
+        tool: action.tool,
+        ...(action.accountAlias ? { accountAlias: action.accountAlias } : {}),
+      };
+    }
+    return denied(action, "no-matching-rule", "no autonomy rule matches this bot, wake, account, tool, and arguments");
+  }
+}
+
+function denied(action: ToolAction, code: string, reason: string, effect?: DeniedEffect): AutonomyDecision {
+  return { schema: AUTONOMY_DECISION_SCHEMA, allowed: false, code, reason, ...(effect ? { effect } : {}), tool: action.tool, ...(action.accountAlias ? { accountAlias: action.accountAlias } : {}) };
+}
+
+function stringArgument(args: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const key of keys) if (typeof args[key] === "string" && args[key]) return args[key] as string;
+  return undefined;
+}
+
+function argumentMatches(args: Record<string, unknown>, keys: string[], expected: string): boolean {
+  return keys.some((key) => args[key] === expected);
+}
+
+function isDiscoveryAction(action: ToolAction): boolean {
+  return ["COMPOSIO_SEARCH_TOOLS", "COMPOSIO_GET_TOOL_SCHEMAS", "COMPOSIO_WAIT_FOR_CONNECTIONS"].includes(action.tool);
+}
+
+function hardDeniedEffect(action: ToolAction): DeniedEffect | null {
+  const tool = action.tool.toUpperCase();
+  if (/REMOTE_(BASH|SHELL|WORKBENCH)|WORKBENCH|CONNECTIONS?$|ACCOUNT_MANAGEMENT/.test(tool)) return "security";
+  if (/(_|^)(DELETE|REMOVE|TRASH|PURGE|CANCEL)_/.test(`${tool}_`)) return "delete";
+  if (/(_|^)(PAY|TRANSFER|CHARGE|REFUND|PURCHASE|BUY|ISSUE_INVOICE|CREATE_INVOICE)_/.test(`${tool}_`)) return "money";
+  if (/(_|^)(GRANT|REVOKE|INVITE|ADD_MEMBER|REMOVE_MEMBER|CHANGE_ROLE)_/.test(`${tool}_`)) return "permission";
+  if (/(_|^)(CREATE|ROTATE|RESET|UPDATE)_(API_?KEY|TOKEN|PASSWORD|CREDENTIAL|SECRET)/.test(tool)) return "credential";
+  if (/(_|^)(DISABLE_MFA|CHANGE_SECURITY|UPDATE_FIREWALL|CREATE_AUTH_CONFIG|MANAGE_CONNECTIONS)_/.test(`${tool}_`)) return "security";
+  return null;
+}
+
+function actionFromNested(value: unknown): ToolAction | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  const tool = [row.slug, row.tool_slug, row.tool_name, row.name].find((item): item is string => typeof item === "string" && item.length > 0);
+  if (!tool) return null;
+  const args = [row.arguments, row.args, row.input].find((item) => item && typeof item === "object" && !Array.isArray(item));
+  const argumentsRecord = (args ?? {}) as Record<string, unknown>;
+  return {
+    transport: "composio",
+    server: "composio",
+    tool,
+    arguments: argumentsRecord,
+    accountAlias: stringArgument({ ...row, ...argumentsRecord }, ["account", "account_alias", "accountAlias", "connected_account_id", "connectedAccountId"]),
+  };
+}
+
+export function actionsFromMcpPayload(payload: unknown): { actions: ToolAction[]; error?: string } {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return { actions: [], error: "invalid MCP request" };
+  const request = payload as Record<string, unknown>;
+  if (request.method !== "tools/call") return { actions: [] };
+  const params = request.params;
+  if (!params || typeof params !== "object" || Array.isArray(params)) return { actions: [], error: "invalid tools/call params" };
+  const row = params as Record<string, unknown>;
+  const tool = typeof row.name === "string" ? row.name : "";
+  const args = row.arguments && typeof row.arguments === "object" && !Array.isArray(row.arguments)
+    ? row.arguments as Record<string, unknown>
+    : {};
+  if (!tool) return { actions: [], error: "missing tool name" };
+  if (tool === "COMPOSIO_MULTI_EXECUTE_TOOL") {
+    const nested = args.tools ?? args.actions;
+    if (!Array.isArray(nested) || nested.length === 0) return { actions: [], error: "multi-execute has no recognizable actions" };
+    const actions = nested.map(actionFromNested);
+    if (actions.some((action) => action === null)) return { actions: [], error: "multi-execute contains an unrecognized action" };
+    return { actions: actions as ToolAction[] };
+  }
+  return { actions: [{ transport: "composio", server: "composio", tool, arguments: args, accountAlias: stringArgument(args, ["account", "account_alias", "accountAlias", "connected_account_id", "connectedAccountId"]) }] };
+}
+
+export function argumentDigest(action: ToolAction): string {
+  return createHash("sha256").update(canonical(action.arguments)).digest("hex");
+}
