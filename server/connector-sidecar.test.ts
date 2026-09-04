@@ -62,9 +62,11 @@ describe("connector execution sidecar", () => {
     const tokenPath = join(dir, "token");
     const brokerTokenPath = join(dir, "broker-token");
     const mcpSecretsPath = join(dir, "mcp-secrets.json");
+    const connectorConfigPath = join(dir, "connector-config.json");
     writeFileSync(tokenPath, token, { mode: 0o600 });
     writeFileSync(brokerTokenPath, "b".repeat(64), { mode: 0o600 });
     writeFileSync(keyPath, key.toString("hex"), { mode: 0o600 });
+    writeFileSync(connectorConfigPath, JSON.stringify({ mcpServers: {} }), { mode: 0o600 });
     writeFileSync(policyPath, JSON.stringify({
       schema: "openmausbot.autonomy-policy.v1",
       revision: "sidecar-test",
@@ -89,6 +91,7 @@ describe("connector execution sidecar", () => {
         OMB_AUTONOMY_POLICY_PATH: policyPath,
         OMB_AUTONOMY_SIGNING_KEY_FILE: keyPath,
         OMB_MCP_SECRETS_FILE: mcpSecretsPath,
+        OMB_CONNECTOR_CONFIG_FILE: connectorConfigPath,
         OMB_MCP_INLINE_SECRETS: "reject",
         OMB_COMPOSIO_BROKER_URL: `http://127.0.0.1:${brokerPort}`,
         OMB_COMPOSIO_BROKER_TOKEN_FILE: brokerTokenPath,
@@ -153,7 +156,7 @@ describe("connector execution sidecar", () => {
     }]);
     expect(created.response.status).toBe(200);
     expect(JSON.stringify(created.body)).not.toContain(secret);
-    const storedConfig = JSON.parse(readFileSync(join(dir, "data", "config.json"), "utf8"));
+    const storedConfig = JSON.parse(readFileSync(connectorConfigPath, "utf8"));
     expect(storedConfig.mcpServers.notes.env).toEqual({ NOTES_TOKEN: "" });
     const storedSecrets = JSON.parse(readFileSync(mcpSecretsPath, "utf8"));
     expect(storedSecrets.servers.notes).toEqual({ NOTES_TOKEN: secret });

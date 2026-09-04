@@ -1,5 +1,6 @@
-import { timingSafeEqual } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { randomUUID, timingSafeEqual } from "node:crypto";
+import { chmodSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
 import {
@@ -128,7 +129,15 @@ function resolvedStoredServer(name: string): StoredMcpServer | null {
 }
 
 function saveMcpServers(next: Record<string, unknown>): void {
-  saveConfig({ mcpServers: next });
+  const path = process.env.OMB_CONNECTOR_CONFIG_FILE?.trim();
+  if (path) {
+    const temporary = join(dirname(path), `.${randomUUID()}.tmp`);
+    writeFileSync(temporary, `${JSON.stringify({ mcpServers: next }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+    renameSync(temporary, path);
+    chmodSync(path, 0o600);
+  } else {
+    saveConfig({ mcpServers: next });
+  }
   cfg.mcpServers = next;
 }
 
