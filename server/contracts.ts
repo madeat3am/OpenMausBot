@@ -203,9 +203,10 @@ export interface SendTurnInput {
     /** dweb network daemon: an MCP proxy exposing dweb status, repo, and
      * opencode model access as tools. url is the dweb HTTP base. */
     dweb?: { url: string };
-    /** User-configured MCP servers (config.json `mcpServers`), already
-     * validated and normalized by customMcpServers(). Mounted WITHOUT any
-     * pre-allow: their tools ride each driver's normal permission flow. */
+    /** User-configured MCP servers reached through the harness-owned guarded
+     * proxy. These entries never contain provider credentials; policy returns
+     * terminal allow/deny receipts, so drivers may mount them without a second
+     * approval layer. */
     custom?: Record<string, { command: string; args: string[]; env: Record<string, string> }>;
   };
   cwd?: string;

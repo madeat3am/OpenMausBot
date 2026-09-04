@@ -24,7 +24,13 @@ import {
   installDesktopCrashListeners,
   readSafeLogTail,
 } from "./diagnostics.mjs";
-import { migrateWorkspaceCredentials, workspaceCredentialEnv } from "./workspace-credentials.mjs";
+import {
+  managedMcpSecretDocument,
+  migrateMcpCredentials,
+  migrateWorkspaceCredentials,
+  updateManagedMcpCredentials,
+  workspaceCredentialEnv,
+} from "./workspace-credentials.mjs";
 import { activateExistingWindow } from "./single-instance.mjs";
 import { pollServerIdentity } from "./server-boot-probe.mjs";
 import { packageUrlFromCommandLine, packageUrlFromDeepLink } from "./package-link.mjs";
@@ -247,10 +253,17 @@ const CREDENTIALS_FILE = path.join(app.getPath("userData"), "credentials.bin");
  * installation — keys off this rather than off an empty object. */
 let credentialStoreUnavailable = false;
 
+async function secureStorageAvailable() {
+  if (!(await safeStorage.isAsyncEncryptionAvailable())) return false;
+  // Electron documents basic_text as a hardcoded-password fallback. It is
+  // not an acceptable destination for migrated connector credentials.
+  return process.platform !== "linux" || safeStorage.getSelectedStorageBackend() !== "basic_text";
+}
+
 async function loadSecureCredentials() {
   const result = await readSecureCredentials({
     exists: () => fs.existsSync(CREDENTIALS_FILE),
-    isAvailable: () => safeStorage.isAsyncEncryptionAvailable(),
+    isAvailable: secureStorageAvailable,
     readFile: () => fs.readFileSync(CREDENTIALS_FILE),
     decrypt: (buffer) => safeStorage.decryptStringAsync(buffer),
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -271,7 +284,7 @@ async function saveSecureCredentials(credentials) {
   if (credentialStoreUnavailable) {
     throw new Error("The operating-system credential store could not be read this launch");
   }
-  if (!(await safeStorage.isAsyncEncryptionAvailable())) {
+  if (!(await secureStorageAvailable())) {
     throw new Error("The operating-system credential store is unavailable");
   }
   fs.mkdirSync(path.dirname(CREDENTIALS_FILE), { recursive: true });
@@ -328,7 +341,10 @@ async function secureWorkspaceConfig() {
   const configPath = path.join(dataDir, "config.json");
   try {
     const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
-    const migrated = migrateWorkspaceCredentials(config, secureCredentials);
+    const workspaceMigrated = migrateWorkspaceCredentials(config, secureCredentials);
+    const migrated = migrateMcpCredentials(workspaceMigrated.config, workspaceMigrated.credentials);
+    migrated.configChanged ||= workspaceMigrated.configChanged;
+    migrated.credentialsChanged ||= workspaceMigrated.credentialsChanged;
     // credentials.bin first: if the OS store cannot take the secrets, the
     // plaintext stays put and the next boot retries — losing the only copy
     // is the one unacceptable outcome
@@ -890,6 +906,25 @@ async function startServerOn(port) {
     try {
       if (receiveBrowserControlHold(message)) return;
       if (receiveBrowserLifecycleCleanup(proc, message)) return;
+      if (message?.type === "openmausbot:mcp-secrets-update") {
+        const requestId = typeof message.requestId === "string" ? message.requestId : "";
+        const name = typeof message.name === "string" ? message.name : "";
+        void updateSecureCredentialDocument((credentials) =>
+          updateManagedMcpCredentials(credentials, name, message.env ?? null)
+        ).then(
+          () => proc.postMessage({
+            type: "openmausbot:mcp-secrets-updated",
+            requestId,
+            secrets: managedMcpSecretDocument(secureCredentials),
+          }),
+          (error) => proc.postMessage({
+            type: "openmausbot:mcp-secrets-updated",
+            requestId,
+            error: error?.message ?? String(error),
+          }),
+        );
+        return;
+      }
     } catch (error) {
       slog(`browser private sync rejected: ${error?.message ?? error}`);
     }
@@ -897,6 +932,7 @@ async function startServerOn(port) {
   proc.once("spawn", () => {
     slog(`spawned pid=${proc.pid}`);
     syncBrowserConnection(proc);
+    syncManagedMcpSecrets(proc);
   });
   let exited = false;
   proc.once("exit", (code) => {
@@ -974,6 +1010,18 @@ function syncManagedComposioCredentials() {
     });
   } catch (error) {
     slog(`connected-apps credential sync failed: ${error?.message ?? error}`);
+  }
+}
+
+function syncManagedMcpSecrets(proc = serverProc) {
+  if (!proc) return;
+  try {
+    proc.postMessage({
+      type: "openmausbot:managed-mcp-secrets",
+      secrets: managedMcpSecretDocument(secureCredentials),
+    });
+  } catch (error) {
+    slog(`custom-MCP credential sync failed: ${error?.message ?? error}`);
   }
 }
 
@@ -2180,7 +2228,7 @@ ipcMain.handle("assemblyai:status", localOnly("assemblyai:status", () => ({
 
 ipcMain.handle("assemblyai:set-key", localOnly("assemblyai:set-key", async (_event, value) => {
   if (typeof value !== "string") throw new Error("Unsupported credential");
-  if (!(await safeStorage.isAsyncEncryptionAvailable())) {
+  if (!(await secureStorageAvailable())) {
     throw new Error("The operating-system credential store is unavailable");
   }
   const secret = value.trim();
@@ -2210,7 +2258,7 @@ ipcMain.handle("credential:set", localOnly("credential:set", async (_event, name
   if (!patchFor || typeof value !== "string") {
     throw new Error("Unsupported credential");
   }
-  if (app.isPackaged && !(await safeStorage.isAsyncEncryptionAvailable())) {
+  if (app.isPackaged && !(await secureStorageAvailable())) {
     throw new Error("The operating-system credential store is unavailable");
   }
   const secret = value.trim();

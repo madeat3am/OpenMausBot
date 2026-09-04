@@ -7,15 +7,11 @@
 //
 // stdout is the MCP transport. Never log there.
 import readline from "node:readline";
-import { randomUUID } from "node:crypto";
 
 type Json = Record<string, unknown>;
 
 const UPSTREAM = process.env.OMB_CONNECTOR_UPSTREAM_URL ?? "";
-const HARNESS = process.env.OMB_HARNESS_URL ?? "http://127.0.0.1:8799";
-const BOT_ID = process.env.OMB_BOT_ID ?? "";
-const THREAD_ID = process.env.OMB_THREAD_ID ?? "";
-const TOKEN = process.env.OMB_COMMS_TOKEN ?? "";
+const AUTONOMY_CAPABILITY = process.env.OMB_AUTONOMY_CAPABILITY ?? "";
 const MAX_RESPONSE_BYTES = 20 * 1024 * 1024;
 const INITIALIZE_RELAY_TIMEOUT_MS = 1_000;
 const RELAY_TIMEOUT_MS = 10 * 60_000;
@@ -105,6 +101,7 @@ async function relay(message: Json, timeoutMs = RELAY_TIMEOUT_MS): Promise<Json 
       accept: "application/json, text/event-stream",
       ...upstreamHeaders,
       ...(upstreamSessionId ? { "mcp-session-id": upstreamSessionId } : {}),
+      ...(AUTONOMY_CAPABILITY ? { "x-openmaus-autonomy-capability": AUTONOMY_CAPABILITY } : {}),
     },
     body: JSON.stringify(message),
     signal: AbortSignal.timeout(timeoutMs),
@@ -113,33 +110,6 @@ async function relay(message: Json, timeoutMs = RELAY_TIMEOUT_MS): Promise<Json 
   if (nextSession) upstreamSessionId = nextSession;
   if (!response.ok) throw new Error(`connector service returned HTTP ${response.status}`);
   return parseUpstream(await readBounded(response), message.id);
-}
-
-function connectorAdds(args: unknown): string[] {
-  if (!args || typeof args !== "object" || Array.isArray(args)) return [];
-  const toolkits = (args as { toolkits?: unknown }).toolkits;
-  if (!Array.isArray(toolkits)) return [];
-  return [...new Set(toolkits.flatMap((item) => {
-    if (typeof item === "string") return [item.toLowerCase()];
-    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
-    const row = item as { name?: unknown; toolkit?: unknown; action?: unknown };
-    const slug = typeof row.toolkit === "string" ? row.toolkit : row.name;
-    const action = String(row.action ?? "add").toLowerCase();
-    return typeof slug === "string" && ["add", "connect", "initiate"].includes(action) ? [slug.toLowerCase()] : [];
-  }))];
-}
-
-async function showConnectorCards(slugs: string[]): Promise<void> {
-  const response = await fetch(`${HARNESS}/api/internal/connectors/request`, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
-    body: JSON.stringify({ botId: BOT_ID, threadId: THREAD_ID, slugs, resumeKey: randomUUID() }),
-    signal: AbortSignal.timeout(30_000),
-  });
-  if (!response.ok) {
-    const body = (await response.json().catch(() => ({}))) as { error?: unknown };
-    throw new Error(String(body.error ?? `could not show connection card (HTTP ${response.status})`));
-  }
 }
 
 async function handle(message: Json): Promise<void> {
@@ -175,15 +145,6 @@ async function handle(message: Json): Promise<void> {
   if (method === "tools/call") {
     const params = (message.params ?? {}) as Json;
     const name = String(params.name ?? "");
-    const slugs = /MANAGE_CONNECTIONS$/i.test(name) ? connectorAdds(params.arguments) : [];
-    if (slugs.length) {
-      await showConnectorCards(slugs);
-      send(textResult(
-        id,
-        `OpenMausBot showed the user a secure connection card for ${slugs.join(", ")}. End this turn now. The app will continue the task automatically after the connection finishes.`,
-      ));
-      return;
-    }
     if (/WAIT_FOR_CONNECTIONS$/i.test(name)) {
       send(textResult(id, "OpenMausBot is handling connection completion and will continue the task automatically."));
       return;

@@ -43,22 +43,25 @@ afterEach(async () => {
 });
 
 describe("connector MCP bridge", () => {
-  it("turns agent connection requests into authenticated chat-card requests", async () => {
+  it("relays connection management to the policy boundary without creating a card", async () => {
     let received: any = null;
     const harness = await listen((request, response) => {
       let body = "";
       request.on("data", (chunk) => { body += chunk; });
       request.on("end", () => {
-        received = { authorization: request.headers.authorization, body: JSON.parse(body) };
+        received = {
+          authorization: request.headers.authorization,
+          capability: request.headers["x-openmaus-autonomy-capability"],
+          body: JSON.parse(body),
+        };
         response.writeHead(200, { "content-type": "application/json" });
-        response.end("{}");
+        response.end(JSON.stringify({ jsonrpc: "2.0", id: 7, result: { isError: true, content: [{ type: "text", text: "denied by policy" }] } }));
       });
     });
     const lines = start({
-      OMB_HARNESS_URL: harness,
-      OMB_COMMS_TOKEN: "bridge-secret",
-      OMB_BOT_ID: "bot-1",
-      OMB_THREAD_ID: "thread-1",
+      OMB_CONNECTOR_UPSTREAM_URL: harness,
+      OMB_CONNECTOR_UPSTREAM_HEADERS: JSON.stringify({ authorization: "Bearer bridge-secret" }),
+      OMB_AUTONOMY_CAPABILITY: "opaque-capability",
     });
     child!.stdin.write(`${JSON.stringify({
       jsonrpc: "2.0",
@@ -68,10 +71,10 @@ describe("connector MCP bridge", () => {
     })}\n`);
     const reply = await nextJson(lines);
     expect(reply.id).toBe(7);
-    expect(reply.result.content[0].text).toMatch(/secure connection card/i);
+    expect(reply.result.content[0].text).toMatch(/denied by policy/i);
     expect(received.authorization).toBe("Bearer bridge-secret");
-    expect(received.body).toMatchObject({ botId: "bot-1", threadId: "thread-1", slugs: ["gmail"] });
-    expect(received.body.resumeKey).toMatch(/^[\w-]{8,100}$/);
+    expect(received.capability).toBe("opaque-capability");
+    expect(received.body).toMatchObject({ method: "tools/call", params: { name: "COMPOSIO_MANAGE_CONNECTIONS" } });
   });
 
   it("answers initialize locally so a missing or failing upstream cannot fail the MCP handshake", async () => {

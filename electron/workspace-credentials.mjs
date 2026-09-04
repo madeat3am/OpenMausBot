@@ -68,3 +68,65 @@ export function workspaceCredentialEnv(credentials) {
   }
   return env;
 }
+
+const mcpSecrets = (credentials) => {
+  const raw = credentials?.customMcpSecrets;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  return structuredClone(raw);
+};
+
+/** Copy legacy custom-MCP values into safeStorage before replacing the active
+ * config values with write-only key placeholders. Empty placeholders never
+ * erase an encrypted value, making the boot migration idempotent and safe to
+ * retry after a crash between the two atomic writes. */
+export function migrateMcpCredentials(config, credentials) {
+  const nextConfig = structuredClone(config ?? {});
+  const nextCredentials = { ...credentials, customMcpSecrets: mcpSecrets(credentials) };
+  let configChanged = false;
+  let credentialsChanged = false;
+  const servers = nextConfig?.mcpServers;
+  if (!servers || typeof servers !== "object" || Array.isArray(servers)) {
+    return { config: nextConfig, credentials: nextCredentials, configChanged, credentialsChanged };
+  }
+  for (const [name, server] of Object.entries(servers)) {
+    if (!server || typeof server !== "object" || Array.isArray(server)) continue;
+    const env = server.env;
+    if (!env || typeof env !== "object" || Array.isArray(env)) continue;
+    const stored = { ...nextCredentials.customMcpSecrets[name] };
+    for (const [key, value] of Object.entries(env)) {
+      if (typeof value !== "string" || !value) continue;
+      if (stored[key] !== value) {
+        stored[key] = value;
+        credentialsChanged = true;
+      }
+      env[key] = "";
+      configChanged = true;
+    }
+    if (Object.keys(stored).length) nextCredentials.customMcpSecrets[name] = stored;
+  }
+  return { config: nextConfig, credentials: nextCredentials, configChanged, credentialsChanged };
+}
+
+export function managedMcpSecretDocument(credentials) {
+  return { schema: "openmausbot.mcp-secrets.v1", servers: mcpSecrets(credentials) };
+}
+
+export function updateManagedMcpCredentials(credentials, name, env) {
+  if (typeof name !== "string" || !/^[a-z][a-z0-9_-]{0,31}$/.test(name)) {
+    throw new TypeError("Invalid custom MCP server name");
+  }
+  const next = { ...credentials, customMcpSecrets: mcpSecrets(credentials) };
+  if (env === null) delete next.customMcpSecrets[name];
+  else {
+    if (!env || typeof env !== "object" || Array.isArray(env)) throw new TypeError("Invalid custom MCP secret document");
+    const stored = {};
+    for (const [key, value] of Object.entries(env)) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || typeof value !== "string") {
+        throw new TypeError("Invalid custom MCP secret entry");
+      }
+      if (value) stored[key] = value;
+    }
+    next.customMcpSecrets[name] = stored;
+  }
+  return next;
+}

@@ -3,7 +3,7 @@
 // ProviderSessionDirectory, recipe step 6: persist the binding from day
 // one). messages-<threadId>.json holds the folded transcript.
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, mkdirSync, rmSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, mkdirSync, rmSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
 import { writeFileAtomic } from "./atomic.ts";
@@ -20,6 +20,8 @@ import type { RoutineRequestCardData } from "../shared/routine-request.ts";
 import type { RoutineRunCardData } from "../shared/routine-run.ts";
 import type { SkillRequestCardData } from "../shared/skill-request.ts";
 import type { GroupGoalRunCardData } from "../shared/group-goal-run.ts";
+import type { OutboundProposalCardData } from "../shared/outbound-proposal.ts";
+import type { OperatorExceptionCardData } from "../shared/operator-exception.ts";
 
 export type MausColor =
   | "green"
@@ -63,6 +65,12 @@ export interface OptionCardData {
   /** A durable learned-skill proposal. The skill stays staged until the
    * user confirms this card — it never rides the prompt before that. */
   skillRequest?: SkillRequestCardData;
+  /** A communications proposal whose reviewed provider arguments remain in
+   * the protected server store. Send/Revise/Cancel are harness-native. */
+  outboundProposal?: OutboundProposalCardData;
+  /** Exact move-to-trash or non-admin collaborator proposal. The provider
+   * request remains in the protected server store until one confirmation. */
+  operatorException?: OperatorExceptionCardData;
 }
 
 export interface ConnectorCardData {
@@ -626,7 +634,13 @@ export class Store {
 
   constructor(defaultSelection: () => ModelSelection) {
     this.defaultSelection = defaultSelection;
-    mkdirSync(DATA_DIR, { recursive: true });
+    mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
+    if (process.platform !== "win32") {
+      chmodSync(DATA_DIR, 0o700);
+      for (const file of [BOTS_FILE, GROUPS_FILE]) {
+        if (existsSync(file)) chmodSync(file, 0o600);
+      }
+    }
     try {
       this.bots = JSON.parse(readFileSync(BOTS_FILE, "utf8"));
     } catch {
@@ -772,11 +786,13 @@ export class Store {
   }
 
   private saveBots(bots: BotRecord[] = this.bots) {
-    writeFileAtomic(BOTS_FILE, JSON.stringify(bots, null, 2));
+    writeFileAtomic(BOTS_FILE, JSON.stringify(bots, null, 2), { mode: 0o600 });
   }
 
   private saveGroups() {
-    writeFileAtomic(GROUPS_FILE, JSON.stringify(this.groups.map(({ busyBotId: _busyBotId, ...g }) => g), null, 2));
+    writeFileAtomic(GROUPS_FILE, JSON.stringify(this.groups.map(({ busyBotId: _busyBotId, ...g }) => g), null, 2), {
+      mode: 0o600,
+    });
   }
 
   // ── groups ────────────────────────────────────────────────────────────

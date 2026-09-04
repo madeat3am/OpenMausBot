@@ -9,6 +9,7 @@ import { z } from "zod";
 import { writeFileAtomic } from "./atomic.ts";
 import type { InstanceConfigMap } from "./contracts.ts";
 import { parseStoredMcpServer } from "./mcp-registry.ts";
+import { resolveMcpSecrets } from "./mcp-secrets.ts";
 import { parseJson, schemaIssue, type JsonObject, type JsonValue } from "./schema.ts";
 
 const optionalText = z.string().optional();
@@ -534,6 +535,15 @@ export const WORKSPACE_CREDENTIAL_ENV = [
   "OMB_OPENAI_IMAGE_KEY",
   "COMPOSIO_API_KEY",
   "OMB_COMPOSIO_BROKER_TOKEN",
+  "OMB_COMPOSIO_BROKER_TOKEN_FILE",
+  "COMPOSIO_WEBHOOK_SECRET",
+  "COMPOSIO_WEBHOOK_SECRET_FILE",
+  "OMB_AUTONOMY_POLICY_PATH",
+  "OMB_AUTONOMY_SIGNING_KEY_FILE",
+  "OMB_EXACT_NONCE_FILE",
+  "OMB_MCP_SECRETS_FILE",
+  "COMPOSIO_API_KEY_FILE",
+  "OMB_CONNECTOR_SIDECAR_TOKEN_FILE",
   // Harness-private filesystem hints are not credentials themselves, but
   // exposing them to a shell-capable agent points straight at app-owned
   // state. The built-in browser master is delivered privately in memory.
@@ -829,10 +839,15 @@ export function customMcpServers(cfg: AppConfig): Record<string, CustomMcpServer
       continue;
     }
     if (!parsed.server.enabled) continue;
+    const secrets = resolveMcpSecrets(name, parsed.server.env);
+    if (secrets.status !== "resolved") {
+      skipMcpEntry(name, `secret resolution is ${secrets.status}; configure OMB_MCP_SECRETS_FILE or compatibility mode`);
+      continue;
+    }
     out[name] = {
       command: parsed.server.command,
       args: parsed.server.args,
-      env: parsed.server.env,
+      env: secrets.env,
     };
   }
   return out;

@@ -19,6 +19,30 @@ import {
 } from "../shared/credential-request.ts";
 
 import { approvalKey, autoVerdict } from "./auto-approve.ts";
+import { AutonomyDatabase } from "./autonomy-db.ts";
+import {
+  actionsFromCustomMcpPayload,
+  actionsFromMcpPayload,
+  AutonomyAuthority,
+  AUTONOMY_DECISION_SCHEMA,
+  isOperatorException,
+  type AutonomyDecision,
+  type ToolAction,
+} from "./autonomy-policy.ts";
+import { CustomMcpManager } from "./custom-mcp-manager.ts";
+import {
+  closeCustomMcpSidecar,
+  callComposioSidecar,
+  callCustomMcpSidecar,
+  connectorSidecarConfigured,
+  relayComposioSidecar,
+  relayCustomMcpSidecar,
+  requireConnectorSidecarWhenConfigured,
+  type ExactRelayAuthorization,
+} from "./connector-sidecar-client.ts";
+import { OutboundExecutor } from "./outbound-executor.ts";
+import { OutboundProposalStore, type OutboundProposal } from "./outbound-proposals.ts";
+import { OperatorExceptionStore, type OperatorExceptionProposal } from "./operator-exceptions.ts";
 import { requestReview, resolveAutoReviewMode, shouldReview } from "./auto-review.ts";
 import { updateClaudeCli } from "./claude-update.ts";
 import {
@@ -62,6 +86,12 @@ import { RoomTurnDeadline, RoomTurnStallRegistry, roomTurnTimeoutMessage } from 
 import * as box from "./box.ts";
 import { cloudBackendChangeError, vpsAliasChangeError } from "./cloud-backend.ts";
 import * as composio from "./composio.ts";
+import {
+  composioEventMaterialDigest,
+  composioWakePrompt,
+  routeComposioWebhook,
+  verifyComposioWebhook,
+} from "./composio-webhook.ts";
 import { chiefOfStaffSystemPrompt } from "./chief-of-staff.ts";
 import { openMausStatusSystemPrompt } from "./openmaus-status-capsule.ts";
 import {
@@ -121,6 +151,7 @@ import {
   parseStoredMcpServer,
 } from "./mcp-registry.ts";
 import { probeMcpServer } from "./mcp-probe.ts";
+import { mcpSecretsDiagnostic, resolveMcpSecrets, setManagedMcpSecrets } from "./mcp-secrets.ts";
 import {
   GROUP_GOAL_MAX_TURNS,
   groupGoalAssignmentKey,
@@ -216,7 +247,7 @@ import { readCuaConnection } from "./local-computer.ts";
 import { LocalVmIdleTimer } from "./local-vm-idle.ts";
 import { LocalVmLease, LocalVmLeasePool } from "./local-vm-lease.ts";
 import { RepeatDetector, callKey } from "./repeat-detector.ts";
-import { redactSecretsInText } from "./redact.ts";
+import { redactSecrets, redactSecretsInText } from "./redact.ts";
 import * as vps from "./vps-computer.ts";
 import { RoutineManager, type RoutineRun, type RoutineRunOn, type RoutineRunTrigger } from "./routines.ts";
 import { CalendarCallManager, type CalendarCall } from "./calendar-calls.ts";
@@ -287,6 +318,10 @@ const MIME: Record<string, string> = {
 };
 
 ensureDirs();
+requireConnectorSidecarWhenConfigured();
+const autonomyAuthority = new AutonomyAuthority();
+const autonomyDb = new AutonomyDatabase(DATA_DIR);
+const customMcpManager = new CustomMcpManager();
 // Only after ensureDirs(): it performs the one-time rename of the legacy data
 // dir, which must not find a freshly created ~/.openmausbot already there.
 // Remote clients (server/request-auth.ts, server/sessions.ts): a stable identity
@@ -298,6 +333,65 @@ const DESKTOP_MANAGED = process.env.OMB_DESKTOP_PARENT === "1";
 // Where remote clients reach this server (a proxy's public address); pairing URLs use it.
 const PUBLIC_URL = process.env.OMB_PUBLIC_URL?.trim().replace(/\/+$/, "") || null;
 const cfg = loadConfig();
+if (connectorSidecarConfigured()) cfg.composio = { ...cfg.composio, apiKey: "sidecar-managed" };
+const outboundProposals = new OutboundProposalStore(DATA_DIR);
+const operatorExceptions = new OperatorExceptionStore(DATA_DIR);
+const connectedServices = () => connectorSidecarConfigured()
+  ? callComposioSidecar<Awaited<ReturnType<typeof composio.connectedServices>>>("connectedServices")
+  : composio.connectedServices(cfg);
+const connectionStatus = (slugs: string[]) => connectorSidecarConfigured()
+  ? callComposioSidecar<Awaited<ReturnType<typeof composio.connectionStatus>>>("connectionStatus", [slugs])
+  : composio.connectionStatus(cfg, slugs);
+const listToolkits = () => connectorSidecarConfigured()
+  ? callComposioSidecar<Awaited<ReturnType<typeof composio.listToolkits>>>("listToolkits")
+  : composio.listToolkits(cfg);
+const toolkitCard = (slug: string) => connectorSidecarConfigured()
+  ? callComposioSidecar<Awaited<ReturnType<typeof composio.toolkitCard>>>("toolkitCard", [slug])
+  : composio.toolkitCard(cfg, slug);
+const authorizeService = (slug: string, alias?: string) => connectorSidecarConfigured()
+  ? callComposioSidecar<Awaited<ReturnType<typeof composio.authorizeService>>>("authorizeService", [slug, alias])
+  : composio.authorizeService(cfg, slug, alias);
+const removeAccount = (slug: string, accountId: string) => connectorSidecarConfigured()
+  ? callComposioSidecar<Awaited<ReturnType<typeof composio.removeAccount>>>("removeAccount", [slug, accountId])
+  : composio.removeAccount(cfg, slug, accountId);
+const removeService = (slug: string) => connectorSidecarConfigured()
+  ? callComposioSidecar<Awaited<ReturnType<typeof composio.removeService>>>("removeService", [slug])
+  : composio.removeService(cfg, slug);
+const relayComposio = async (
+  payload: Record<string, unknown>,
+  transportSessionId?: string,
+  capability?: string,
+  exact?: ExactRelayAuthorization,
+) => {
+  if (connectorSidecarConfigured()) {
+    return relayComposioSidecar(payload, transportSessionId, capability, exact);
+  }
+  if (exact && !autonomyAuthority.consumeExact(exact.token, exact.kind, exact.action, exact.proposalDigest)) {
+    throw new Error("exact capability is invalid, expired, replayed, or mismatched");
+  }
+  return composio.relayMcp(cfg, payload as never, transportSessionId);
+};
+const relayCustomMcp = async (
+  serverName: string,
+  payload: Record<string, unknown>,
+  sessionId?: string,
+  capability?: string,
+  exact?: ExactRelayAuthorization,
+) => {
+  if (connectorSidecarConfigured()) {
+    return relayCustomMcpSidecar(serverName, payload, sessionId, capability, exact);
+  }
+  if (exact && !autonomyAuthority.consumeExact(exact.token, exact.kind, exact.action, exact.proposalDigest)) {
+    throw new Error("exact capability is invalid, expired, replayed, or mismatched");
+  }
+  const target = customMcpServers(cfg)[serverName];
+  if (!target) throw new Error("custom MCP server is unavailable");
+  return customMcpManager.relay(serverName, target, payload, sessionId);
+};
+const outboundExecutor = new OutboundExecutor(
+  autonomyAuthority,
+  (payload, transportSessionId, exact) => relayComposio(payload, transportSessionId, undefined, exact),
+);
 const registry = new ProviderRegistry(BUILT_IN_DRIVERS);
 await registry.load(instanceConfigs(cfg));
 const bundledSkills = loadBundledSkills();
@@ -318,6 +412,11 @@ type DesktopPrivateMessage = BrowserCleanupWireRequest | {
   type: "openmausbot:browser-control";
   botId: string;
   held: true;
+} | {
+  type: "openmausbot:mcp-secrets-update";
+  requestId: string;
+  name: string;
+  env: Record<string, string> | null;
 };
 function postDesktopPrivateMessage(message: DesktopPrivateMessage): boolean {
   if (!utilityParentPort) return false;
@@ -333,10 +432,60 @@ const browserCleanup = new BrowserCleanupCoordinator({
   file: join(DATA_DIR, "browser-cleanups.json"),
   send: postDesktopPrivateMessage,
 });
+const pendingMcpSecretUpdates = new Map<string, {
+  resolve: (secrets: unknown) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}>();
+
+function persistDesktopMcpSecrets(name: string, env: Record<string, string> | null): Promise<void> {
+  if (!DESKTOP_MANAGED) return Promise.resolve();
+  const requestId = randomUUID();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingMcpSecretUpdates.delete(requestId);
+      reject(new Error("the operating-system credential store did not answer"));
+    }, 15_000);
+    timer.unref?.();
+    pendingMcpSecretUpdates.set(requestId, {
+      timer,
+      resolve: (secrets) => {
+        try {
+          setManagedMcpSecrets(secrets);
+          resolve();
+        } catch {
+          reject(new Error("the operating-system credential store returned invalid MCP data"));
+        }
+      },
+      reject,
+    });
+    if (!postDesktopPrivateMessage({ type: "openmausbot:mcp-secrets-update", requestId, name, env })) {
+      clearTimeout(timer);
+      pendingMcpSecretUpdates.delete(requestId);
+      reject(new Error("the operating-system credential store is unavailable"));
+    }
+  });
+}
+
 utilityParentPort?.on("message", (event) => {
   const message = event?.data;
   try {
+    if (message && typeof message === "object" && (message as { type?: unknown }).type === "openmausbot:mcp-secrets-updated") {
+      const reply = message as { requestId?: unknown; secrets?: unknown; error?: unknown };
+      const requestId = typeof reply.requestId === "string" ? reply.requestId : "";
+      const pending = pendingMcpSecretUpdates.get(requestId);
+      if (!pending) return;
+      pendingMcpSecretUpdates.delete(requestId);
+      clearTimeout(pending.timer);
+      if (typeof reply.error === "string" && reply.error) pending.reject(new Error(reply.error));
+      else pending.resolve(reply.secrets);
+      return;
+    }
     if (browserCleanup.receive(message)) return;
+    if (message && typeof message === "object" && (message as { type?: unknown }).type === "openmausbot:managed-mcp-secrets") {
+      setManagedMcpSecrets((message as { secrets?: unknown }).secrets ?? null);
+      return;
+    }
     if (!applyDesktopBrowserConnectionMessage(message)) composio.applyManagedBrokerMessage(message);
   } catch (error) {
     console.error(`[desktop-sync] rejected private parent message: ${error instanceof Error ? error.message : String(error)}`);
@@ -651,13 +800,46 @@ function phoneIntegration() {
   return { command: process.execPath, args: [phoneProxyPath], env };
 }
 
-function connectedAppsIntegration(botId: string, threadId: string) {
+function connectedAppsIntegration(botId: string, threadId: string, autonomyCapability: string | null) {
   return composio.mcpIntegration(cfg, {
     harnessUrl: `http://127.0.0.1:${PORT}`,
     commsToken: COMMS_TOKEN,
     botId,
     threadId,
+    ...(autonomyCapability ? { autonomyCapability } : {}),
   });
+}
+
+function turnAutonomyCapability(
+  botId: string,
+  threadId: string,
+  wakeKind: "operator" | "routine" | "webhook",
+  authorityId?: string,
+): string | null {
+  return autonomyAuthority.issue({
+    botId,
+    threadId,
+    wakeKind,
+    ...(wakeKind === "routine" && authorityId ? { routineId: authorityId } : {}),
+    ...(wakeKind === "webhook" && authorityId ? { triggerId: authorityId } : {}),
+  });
+}
+
+function guardedCustomMcpIntegrations(autonomyCapability: string | null) {
+  const custom = customMcpServers(cfg);
+  if (process.env.OMB_CUSTOM_MCP_DIRECT_COMPAT === "1") return custom;
+  return Object.fromEntries(Object.keys(custom).map((name) => [name, {
+    command: process.execPath,
+    args: [SPAWNED_PROXIES.customMcp],
+    env: {
+      ...AGENTS_NODE_FLAG,
+      OMB_HARNESS_URL: `http://127.0.0.1:${PORT}`,
+      OMB_COMMS_TOKEN: COMMS_TOKEN,
+      OMB_CUSTOM_MCP_SERVER: name,
+      OMB_CUSTOM_MCP_SESSION: randomUUID(),
+      ...(autonomyCapability ? { OMB_AUTONOMY_CAPABILITY: autonomyCapability } : {}),
+    },
+  }]));
 }
 
 // ── computer control (who is driving) ──────────────────────────────────
@@ -1590,14 +1772,274 @@ function closeOpenApprovals(threadId: string): void {
   for (const message of store.messagesFor(threadId)) {
     const card = message.card;
     if (!card?.requestId || card.answered || card.dismissed) continue;
-    if (card.routineRequest || card.skillRequest) continue;
+    if (card.routineRequest || card.skillRequest || card.outboundProposal || card.operatorException) continue;
     store.patchMessage(threadId, message.id, { card: { ...card, answered: "unavailable", dismissed: true } });
     askMessageByRequest.delete(`${threadId}:${card.requestId}`);
   }
 }
 
+function outboundCard(proposal: OutboundProposal) {
+  return {
+    schema: proposal.schema,
+    proposalId: proposal.proposalId,
+    digest: proposal.canonicalDigest,
+    channel: proposal.channel,
+    accountAlias: proposal.accountAlias,
+    purpose: proposal.purpose,
+    recipients: proposal.recipients,
+    ...(proposal.subject ? { subject: proposal.subject } : {}),
+    attachmentCount: proposal.attachments.length,
+    status: proposal.status,
+    rationale: proposal.rationale,
+  };
+}
+
+function outboundSubtitle(proposal: OutboundProposal): string {
+  const subject = proposal.subject ? `Subject: ${proposal.subject}\n` : "";
+  const attachments = proposal.attachments.length
+    ? `\nAttachments: ${proposal.attachments.map((item) => `${item.name} (${item.sha256})`).join(", ")}`
+    : "";
+  return [
+    `Account: ${proposal.accountAlias} · ${proposal.channel} · ${proposal.purpose}`,
+    `To: ${proposal.recipients.join(", ")}`,
+    `${subject}${proposal.body}`,
+    attachments,
+    `Why this draft: ${proposal.rationale}`,
+    `Proof: Communications ${proposal.communicationsReceipt.id}; Human Voice ${proposal.humanVoiceReceipt.id}; ${proposal.sourceReferences.length} current source${proposal.sourceReferences.length === 1 ? "" : "s"}`,
+  ].filter(Boolean).join("\n\n");
+}
+
+function operatorExceptionCard(proposal: OperatorExceptionProposal) {
+  return {
+    schema: proposal.schema,
+    proposalId: proposal.proposalId,
+    actionDigest: proposal.actionDigest,
+    tool: proposal.action.tool,
+    ...(proposal.action.accountAlias ? { accountAlias: proposal.action.accountAlias } : {}),
+    status: proposal.status,
+  };
+}
+
+function operatorExceptionSubtitle(proposal: OperatorExceptionProposal): string {
+  return [
+    `Tool: ${proposal.action.tool}`,
+    proposal.action.accountAlias ? `Account: ${proposal.action.accountAlias}` : "",
+    `Arguments: ${JSON.stringify(redactSecrets(proposal.action.arguments), null, 2)}`,
+    `Exact action digest: ${proposal.actionDigest}`,
+  ].filter(Boolean).join("\n");
+}
+
+function mcpResultFailed(bytes: Uint8Array): boolean {
+  try {
+    const value = JSON.parse(Buffer.from(bytes).toString("utf8")) as { error?: unknown; result?: { isError?: unknown } };
+    return Boolean(value.error || value.result?.isError === true);
+  } catch {
+    return true;
+  }
+}
+
+async function resolveOperatorException(
+  res: ServerResponse,
+  args: { botId: string; botName?: string; threadId: string; requestId: string; behavior: "allow" | "deny" | "answer" },
+): Promise<boolean> {
+  const cardMessage = store.messagesFor(args.threadId).find(
+    (message) => message.card?.requestId === args.requestId && message.card.operatorException,
+  );
+  const card = cardMessage?.card;
+  if (!cardMessage || !card?.operatorException) return false;
+  const proposal = operatorExceptions.get(card.operatorException.proposalId);
+  if (!proposal || proposal.threadId !== args.threadId || proposal.botId !== args.botId) {
+    json(res, 409, { error: "the protected operator exception is unavailable or belongs to another conversation" });
+    return true;
+  }
+  if (card.operatorException.actionDigest !== proposal.actionDigest || !operatorExceptions.actionStillMatches(proposal)) {
+    json(res, 422, { error: "the protected action changed after review; create a new proposal" });
+    return true;
+  }
+  if (proposal.status !== "pending") {
+    json(res, 200, { ok: proposal.status === "executed", outcome: proposal.status, alreadySettled: true });
+    return true;
+  }
+  if (args.behavior !== "allow") {
+    const settled = operatorExceptions.transition(proposal.proposalId, ["pending"], "cancelled", { outcomeReason: "operator cancelled" });
+    store.patchMessage(args.threadId, cardMessage.id, {
+      card: { ...card, answered: "deny", dismissed: true, operatorException: operatorExceptionCard(settled) },
+    });
+    appendDecision(DATA_DIR, {
+      threadId: args.threadId, requestId: args.requestId, botId: args.botId, botName: args.botName,
+      tool: proposal.action.tool, summary: `exact action ${proposal.actionDigest}`, decision: "user-denied", source: "user",
+    });
+    json(res, 200, { ok: true, outcome: "cancelled" });
+    return true;
+  }
+
+  operatorExceptions.transition(proposal.proposalId, ["pending"], "executing");
+  let success = false;
+  let providerId: string | undefined;
+  let reason: string | undefined;
+  try {
+    const token = autonomyAuthority.issueExact("operator-exception", proposal.action);
+    const exact = { token, kind: "operator-exception" as const, action: proposal.action };
+    if (proposal.action.transport === "composio") {
+      const upstream = await relayComposio(proposal.payload, proposal.transportSessionId, undefined, exact);
+      providerId = providerReceiptId(upstream.bytes);
+      success = upstream.status >= 200 && upstream.status < 300 && !mcpResultFailed(upstream.bytes);
+      if (!success) reason = `provider rejected the exact action (HTTP ${upstream.status})`;
+    } else {
+      const upstream = await relayCustomMcp(proposal.action.server, proposal.payload, proposal.transportSessionId, undefined, exact);
+      const bytes = Buffer.from(JSON.stringify(upstream.response ?? {}));
+      providerId = providerReceiptId(bytes);
+      success = Boolean(upstream.response) && !mcpResultFailed(bytes);
+      if (!success) reason = "provider rejected the exact action";
+    }
+  } catch (error) {
+    reason = `provider outcome is unknown; do not retry without verifying state — ${error instanceof Error ? error.message : String(error)}`;
+  }
+  const settled = operatorExceptions.transition(proposal.proposalId, ["executing"], success ? "executed" : "failed", {
+    ...(providerId ? { providerResultId: providerId } : {}),
+    ...(reason ? { outcomeReason: reason } : {}),
+  });
+  store.patchMessage(args.threadId, cardMessage.id, {
+    card: {
+      ...card,
+      answered: success ? "allow" : "failed",
+      dismissed: true,
+      held: reason,
+      operatorException: operatorExceptionCard(settled),
+    },
+  });
+  autonomyDb.recordDecision({
+    schema: AUTONOMY_DECISION_SCHEMA,
+    allowed: success,
+    code: success ? "exact-operator-exception" : "provider-effect-failed",
+    reason: success ? "executed exact stored action after one-time operator confirmation" : reason ?? "provider effect failed",
+    ruleId: `operator-exception:${proposal.proposalId}`,
+    tool: proposal.action.tool,
+    accountAlias: proposal.action.accountAlias,
+  }, proposal.action, providerId);
+  appendDecision(DATA_DIR, {
+    threadId: args.threadId, requestId: args.requestId, botId: args.botId, botName: args.botName,
+    tool: proposal.action.tool, summary: `exact action ${proposal.actionDigest}`,
+    decision: success ? "user-approved" : "provider-failed", source: "user",
+  });
+  store.appendMessage(args.threadId, {
+    role: "bot", kind: "activity",
+    tool: { name: success ? `Protected action completed${providerId ? ` · receipt ${providerId}` : ""}` : `Protected action held — ${reason}`, ok: success },
+  });
+  json(res, success ? 200 : 409, { ok: success, outcome: settled.status, providerResultId: providerId, error: reason });
+  return true;
+}
+
+async function resolveOutboundProposal(
+  res: ServerResponse,
+  args: { botId: string; botName?: string; threadId: string; requestId: string; behavior: "allow" | "deny" | "answer"; message?: unknown },
+): Promise<boolean> {
+  const cardMessage = store.messagesFor(args.threadId).find(
+    (message) => message.card?.requestId === args.requestId && message.card.outboundProposal,
+  );
+  const card = cardMessage?.card;
+  if (!cardMessage || !card?.outboundProposal) return false;
+  const proposal = outboundProposals.get(card.outboundProposal.proposalId);
+  if (!proposal || proposal.originatingThreadId !== args.threadId || proposal.coordinatorBotId !== args.botId) {
+    json(res, 409, { error: "the protected outbound proposal is unavailable or belongs to another conversation" });
+    return true;
+  }
+  if (card.outboundProposal.digest !== proposal.canonicalDigest || !outboundProposals.actionStillMatches(proposal)) {
+    json(res, 422, { error: "the outbound proposal changed after review; cancel it and create a new proposal" });
+    return true;
+  }
+  if (proposal.status !== "pending") {
+    json(res, 200, { ok: true, outcome: proposal.status, alreadySettled: true });
+    return true;
+  }
+
+  const revise = args.behavior === "answer" && String(args.message ?? "").trim().toLowerCase() === "revise";
+  if (args.behavior !== "allow") {
+    const status = revise ? "revision_requested" : "cancelled";
+    const settled = outboundProposals.transition(proposal.proposalId, ["pending"], status, {
+      outcomeReason: revise ? "operator requested revision" : "operator cancelled",
+    });
+    store.patchMessage(args.threadId, cardMessage.id, {
+      card: { ...card, answered: revise ? "revise" : "deny", dismissed: true, outboundProposal: outboundCard(settled) },
+    });
+    appendDecision(DATA_DIR, {
+      threadId: args.threadId,
+      requestId: args.requestId,
+      botId: args.botId,
+      botName: args.botName,
+      tool: card.tool,
+      summary: `${proposal.channel} to ${proposal.recipients.join(", ")}`,
+      decision: revise ? "user-requested-revision" : "user-denied",
+      source: "user",
+    });
+    json(res, 200, { ok: true, outcome: status });
+    return true;
+  }
+
+  if (proposal.sourceReferences.some((source) => source.observedAt > Date.now() || source.freshUntil < Date.now())) {
+    json(res, 409, { error: "source evidence expired before approval; create a fresh proposal" });
+    return true;
+  }
+  const sending = outboundProposals.transition(proposal.proposalId, ["pending"], "sending");
+  const result = await outboundExecutor.execute(sending);
+  const settled = outboundProposals.transition(proposal.proposalId, ["sending"], result.status, {
+    providerReadback: result.providerReadback,
+    ...(result.reason ? { outcomeReason: result.reason } : {}),
+  });
+  const success = result.status === "sent";
+  store.patchMessage(args.threadId, cardMessage.id, {
+    card: {
+      ...card,
+      answered: success ? "allow" : "failed",
+      dismissed: true,
+      held: success ? undefined : result.reason,
+      outboundProposal: outboundCard(settled),
+    },
+  });
+  autonomyDb.recordDecision({
+    schema: AUTONOMY_DECISION_SCHEMA,
+    allowed: success,
+    code: success ? "exact-operator-approval" : "provider-send-failed",
+    reason: success ? "executed exact stored outbound arguments after provider reread" : result.reason ?? "send failed",
+    ruleId: `proposal:${proposal.proposalId}`,
+    effect: "thread_reply",
+    tool: proposal.providerAction.tool,
+    accountAlias: proposal.accountAlias,
+  }, proposal.providerAction, result.providerResultId);
+  appendDecision(DATA_DIR, {
+    threadId: args.threadId,
+    requestId: args.requestId,
+    botId: args.botId,
+    botName: args.botName,
+    tool: card.tool,
+    summary: `${proposal.channel} to ${proposal.recipients.join(", ")}`,
+    decision: success ? "user-approved" : "provider-failed",
+    source: "user",
+  });
+  store.appendMessage(args.threadId, {
+    role: "bot",
+    kind: "activity",
+    tool: {
+      name: success
+        ? `Sent via ${proposal.channel}${result.providerResultId ? ` · receipt ${result.providerResultId}` : ""}${result.recovered ? " · confirmed by readback" : ""}`
+        : `Send held — ${result.reason ?? "provider failure"}`,
+      ok: success,
+    },
+  });
+  json(res, success ? 200 : 409, { ok: success, outcome: result.status, recovered: result.recovered, providerResultId: result.providerResultId, error: result.reason });
+  return true;
+}
+
 function requestBehavior(value: unknown): "allow" | "deny" | "answer" | null {
   return value === "allow" || value === "deny" || value === "answer" ? value : null;
+}
+
+function outboundConversationChoice(text: string): { behavior: "allow" | "deny" | "answer"; message?: string } | null {
+  const normalized = text.trim().toLowerCase().replace(/[.!]$/, "");
+  if (normalized === "send" || normalized === "send it" || normalized === "approve and send") return { behavior: "allow" };
+  if (normalized === "revise") return { behavior: "answer", message: "revise" };
+  if (normalized === "cancel") return { behavior: "deny" };
+  return null;
 }
 // the last settled assistant text per thread, so a "finished" notification
 // can carry what the bot actually said
@@ -2884,6 +3326,8 @@ async function startTurn(
     /** Lets the system prompt put externally supplied payloads behind an
      * explicit untrusted-data boundary without changing ordinary chat. */
     automationSource?: RoutineRunTrigger;
+    /** Owning routine id or policy trigger id for a bounded capability. */
+    authorityId?: string;
     /** the caller was already running unattended, so this turn is too */
     unattended?: boolean;
     /** Resume an agent after the user completed an inline connection or credential card.
@@ -3059,15 +3503,20 @@ async function startTurn(
       // them — a key in the config says the connections exist, not that
       // this engine can reach them — and only to a bot the user has not
       // switched off: the key is workspace-wide, the grant is per bot.
+      const wakeKind = opts?.automationSource === "webhook"
+        ? "webhook"
+        : opts?.automationSource === "schedule" || opts?.automationSource === "manual"
+          ? "routine"
+          : "operator";
+      const autonomyCapability = turnAutonomyCapability(bot.id, threadId, wakeKind, opts?.authorityId);
       if (bot.composio !== false && composio.configured(cfg) && instance.adapter.capabilities.composioMcp === true) {
-        const connection = await connectedAppsIntegration(bot.id, threadId);
+        const connection = await connectedAppsIntegration(bot.id, threadId, autonomyCapability);
         if (connection) integrations.composio = connection;
       }
-      // user-configured MCP servers (config.json mcpServers): same rule as
-      // composio — only to a driver that can mount them. Their tools are
-      // never pre-allowed, so every call rides the normal permission flow.
+      // User-configured MCP servers are credential-free guarded proxies. The
+      // same turn capability authorizes both Composio and custom-MCP calls.
       if (instance.adapter.capabilities.customMcp === true) {
-        const custom = customMcpServers(cfg);
+        const custom = guardedCustomMcpIntegrations(autonomyCapability);
         if (Object.keys(custom).length) integrations.custom = custom;
       }
       // CLI engines work inside the bot's own workspace directory rather
@@ -3650,8 +4099,8 @@ routines = new RoutineManager({
     return task;
   },
   createGoalTask: (groupId, title) => store.createGroupTask(groupId, title, false),
-  startTurn: (botId, threadId, prompt, runOn, triggerSource, onDispatchError) =>
-    startTurn(botId, prompt, { threadId, runOn, automationSource: triggerSource, onDispatchError })
+  startTurn: (botId, threadId, prompt, runOn, triggerSource, authorityId, onDispatchError) =>
+    startTurn(botId, prompt, { threadId, runOn, automationSource: triggerSource, authorityId, onDispatchError })
       .then(() => undefined),
   startGoal: async (groupId, threadId, prompt, coordinatorBotId, runId, _onDispatchError) => {
     startGroupTurn(groupId, prompt, undefined, undefined, "goal", undefined, {
@@ -4074,9 +4523,11 @@ async function runGroupMemberTurn(
   if (selectedSkills.some((skill) => skill.manifest.requiredCapabilities.includes("phoneMcp"))) {
     integrations.phone = phoneIntegration();
   }
+  const wakeKind = isUnattended(bot.id) ? "webhook" : "operator";
+  const autonomyCapability = turnAutonomyCapability(bot.id, threadId, wakeKind);
   try {
     if (bot.composio !== false && composio.configured(cfg) && instance.adapter.capabilities.composioMcp === true) {
-      const connection = await connectedAppsIntegration(bot.id, threadId);
+      const connection = await connectedAppsIntegration(bot.id, threadId, autonomyCapability);
       if (connection) integrations.composio = connection;
     }
   } catch (error) {
@@ -4090,9 +4541,9 @@ async function runGroupMemberTurn(
     onDispatchError?.(message);
     return true;
   }
-  // user-configured MCP servers: same gating as the 1:1 site above.
+  // user-configured MCP servers: same guarded capability as the 1:1 site.
   if (instance.adapter.capabilities.customMcp === true) {
-    const custom = customMcpServers(cfg);
+    const custom = guardedCustomMcpIntegrations(autonomyCapability);
     if (Object.keys(custom).length) integrations.custom = custom;
   }
   // Connected-app discovery is intentionally awaited before a provider owns
@@ -5711,13 +6162,27 @@ async function perBotLocalVmCountForModeChange(): Promise<number | null> {
   return existingPerBotLocalVmCount(runtime.runtime);
 }
 
-function configStatus() {
+async function configStatus() {
+  let mcpSecrets = mcpSecretsDiagnostic(cfg.mcpServers);
+  if (connectorSidecarConfigured()) {
+    try {
+      mcpSecrets = await callCustomMcpSidecar<typeof mcpSecrets>("diagnostic");
+    } catch {
+      mcpSecrets = { status: "invalid", servers: {} };
+    }
+  }
   return {
     xai: { configured: Boolean(cfg.xai?.key) },
     composio: {
       configured: composio.configured(cfg),
       mode: composio.connectionMode(cfg),
     },
+    autonomy: {
+      status: autonomyAuthority.state.status,
+      revision: autonomyAuthority.state.revision,
+      digest: autonomyAuthority.state.digest,
+    },
+    mcpSecrets,
     box: { configured: Boolean(cfg.box?.token) },
     vps: { configured: Boolean(vpsSshAlias(cfg)), sshAlias: vpsSshAlias(cfg) ?? "" },
     opencodeGo: { configured: Boolean(cfg.opencodeGo?.apiKey) },
@@ -5757,6 +6222,16 @@ function persistMcpServers(next: Record<string, unknown>): void {
   // clears the final entry; Object.assign(loadConfig()) would leave it stale
   // when an empty section is omitted by an older config file.
   cfg.mcpServers = next;
+}
+
+function mcpServerWithResolvedSecrets(name: string, server: ReturnType<typeof parseStoredMcpServer> & { ok: true }) {
+  const resolved = resolveMcpSecrets(name, server.server.env);
+  if (resolved.status !== "resolved") return null;
+  return { ...server.server, env: resolved.env };
+}
+
+function withoutInlineMcpSecrets(server: { command: string; args: string[]; env: Record<string, string>; enabled: boolean }) {
+  return { ...server, env: Object.fromEntries(Object.keys(server.env).map((key) => [key, ""])) };
 }
 
 /** Rebuild the provider fleet after a config change so new keys take
@@ -5880,6 +6355,67 @@ function readBody(req: IncomingMessage): Promise<any> {
   });
 }
 
+function readRawBody(req: IncomingMessage, maximum = 256 * 1_024): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    let done = false;
+    const fail = (status: number, message: string) => {
+      if (done) return;
+      done = true;
+      reject(Object.assign(new Error(message), { status }));
+    };
+    req.on("data", (chunk) => {
+      if (done) return;
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      bytes += buffer.length;
+      if (bytes > maximum) return fail(413, "body too large");
+      chunks.push(buffer);
+    });
+    req.on("end", () => {
+      if (done) return;
+      done = true;
+      resolve(Buffer.concat(chunks));
+    });
+    req.on("error", (error) => fail(400, error instanceof Error ? error.message : String(error)));
+  });
+}
+
+function providerReceiptId(bytes: Uint8Array): string | undefined {
+  const text = Buffer.from(bytes).toString("utf8");
+  const match = text.match(/"(?:log_id|execution_id|result_id)"\s*:\s*"([^"\\]{1,300})"/);
+  return match?.[1];
+}
+
+function composioWebhookSecret(): string | undefined {
+  const file = process.env.COMPOSIO_WEBHOOK_SECRET_FILE?.trim();
+  if (!file) return process.env.COMPOSIO_WEBHOOK_SECRET;
+  try {
+    return readFileSync(file, "utf8").trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function deniedMcpResponse(id: unknown, decisions: AutonomyDecision[]) {
+  return {
+    jsonrpc: "2.0",
+    id,
+    result: {
+      isError: true,
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          schema: AUTONOMY_DECISION_SCHEMA,
+          outcome: "denied",
+          approvalCardCreated: false,
+          decisions,
+        }),
+      }],
+    },
+  };
+}
+
 // Loopback-only enforcement: the harness runs on 127.0.0.1 but accepts
 // requests from any loopback connection and any web page that DNS-rebinds
 // onto it. Reject non-loopback Hosts outright (defeats rebinding) and
@@ -5917,6 +6453,50 @@ const server = createServer(async (req, res) => {
         return json(res, 200, { session: result.session, environment });
       }
       return json(res, 200, { token: result.token, session: result.session, environment });
+    }
+    if (method === "POST" && path === "/api/webhooks/composio") {
+      const rawBody = await readRawBody(req);
+      const webhookSecret = composioWebhookSecret();
+      if (!webhookSecret) return json(res, 503, { accepted: false, error: "Composio webhook ingress is not configured" });
+      let event;
+      try {
+        event = verifyComposioWebhook({
+          rawBody,
+          webhookId: Array.isArray(req.headers["webhook-id"]) ? req.headers["webhook-id"][0] : req.headers["webhook-id"],
+          webhookTimestamp: Array.isArray(req.headers["webhook-timestamp"])
+            ? req.headers["webhook-timestamp"][0]
+            : req.headers["webhook-timestamp"],
+          webhookSignature: Array.isArray(req.headers["webhook-signature"])
+            ? req.headers["webhook-signature"][0]
+            : req.headers["webhook-signature"],
+          secret: webhookSecret,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return json(res, 401, { accepted: false, error: message });
+      }
+      const route = routeComposioWebhook(autonomyAuthority.state.policy, event);
+      if (!route) return json(res, 202, { accepted: false, outcome: "unrouted" });
+      const eventId = event.metadata.log_id ?? event.id;
+      const receivedAt = Date.now();
+      const outcome = autonomyDb.acceptComposioEvent({
+        eventId,
+        receivedAt,
+        materialDigest: composioEventMaterialDigest(event),
+        triggerSlug: event.metadata.trigger_slug,
+        accountAlias: event.metadata.connected_account_id,
+      });
+      if (outcome !== "accepted") return json(res, 200, { accepted: false, outcome });
+      const run = routines!.enqueueWebhook({
+        webhookId: route.id,
+        webhookName: `Composio: ${event.metadata.trigger_slug}`,
+        prompt: composioWakePrompt(event),
+        botId: route.botId,
+        runOn: route.runOn ?? "maus",
+        deliveryId: eventId,
+        receivedAt,
+      });
+      return json(res, 202, { accepted: true, outcome: "queued", runId: run.id });
     }
     const gate = resolveRequestAuth(req, { sessions, cookieName: SESSION_COOKIE, streamPath: "/api/events", url });
     if (!gate.auth) return json(res, gate.status, { error: gate.error });
@@ -6096,6 +6676,77 @@ const server = createServer(async (req, res) => {
           source: "routine",
         });
         return json(res, 201, proposed);
+      }
+      if (method === "POST" && path === "/api/internal/outbound-proposals") {
+        const body = await readBody(req);
+        const fromBotId = String(body?.fromBotId ?? "");
+        const fromThreadId = String(body?.fromThreadId ?? "");
+        const from = store.bot(fromBotId);
+        if (!from || !from.chiefOfStaff || from.name.trim().toLowerCase() !== "poppy") {
+          return json(res, 403, { error: "only Poppy may coordinate an outbound proposal" });
+        }
+        const owner = connectorThread(from.id, fromThreadId);
+        if (!owner) return json(res, 403, { error: "source conversation does not belong to Poppy" });
+        if (!body?.proposal || typeof body.proposal !== "object" || Array.isArray(body.proposal)) {
+          return json(res, 400, { error: "proposal object required" });
+        }
+        const submitted = body.proposal as Record<string, unknown>;
+        const terminalReceipt = (value: unknown, requiredName: string) => {
+          const id = value && typeof value === "object" && !Array.isArray(value)
+            ? String((value as Record<string, unknown>).id ?? "")
+            : "";
+          const receipt = id ? findDelegationReceipt(id) : null;
+          return receipt
+            && receipt.sourceThreadId === fromThreadId
+            && receipt.status === "done"
+            && receipt.toBotName.trim().toLowerCase() === requiredName.toLowerCase()
+            ? { id: receipt.id, status: "completed" as const, finishedAt: receipt.finishedAt }
+            : null;
+        };
+        const communicationsReceipt = terminalReceipt(submitted.communicationsReceipt, "Communications");
+        const humanVoiceReceipt = terminalReceipt(submitted.humanVoiceReceipt, "Human Voice");
+        if (!communicationsReceipt || !humanVoiceReceipt) {
+          return json(res, 409, { error: "terminal Communications and Human Voice delegation receipts are required" });
+        }
+        let proposal: OutboundProposal;
+        try {
+          proposal = outboundProposals.create({
+            ...submitted,
+            originatingThreadId: fromThreadId,
+            coordinatorBotId: from.id,
+            communicationsReceipt,
+            humanVoiceReceipt,
+          });
+        } catch (error) {
+          return json(res, 400, { error: error instanceof Error ? error.message : "invalid outbound proposal" });
+        }
+        if (proposal.status === "held") {
+          return json(res, 202, { proposalId: proposal.proposalId, status: proposal.status, reason: proposal.outcomeReason });
+        }
+        const message = store.appendMessage(fromThreadId, {
+          role: "bot",
+          kind: "options",
+          ...(owner.group ? { from: { botId: from.id, name: from.name, color: from.color } } : {}),
+          card: {
+            title: "Send this reviewed draft?",
+            subtitle: outboundSubtitle(proposal),
+            options: ["Send", "Revise", "Cancel"],
+            requestId: proposal.proposalId,
+            tool: "outbound_proposal",
+            outboundProposal: outboundCard(proposal),
+          },
+        });
+        appendDecision(DATA_DIR, {
+          threadId: fromThreadId,
+          requestId: proposal.proposalId,
+          botId: from.id,
+          botName: from.name,
+          tool: "outbound_proposal",
+          summary: `${proposal.channel} to ${proposal.recipients.join(", ")}`,
+          decision: "card-shown",
+          source: "outbound-proposal",
+        });
+        return json(res, 201, { proposalId: proposal.proposalId, messageId: message.id, status: proposal.status, digest: proposal.canonicalDigest });
       }
       if (method === "GET" && path === "/api/internal/skills") {
         if (!skillRecorderEnabled(cfg)) return json(res, 403, { error: "learned skills are not enabled" });
@@ -6487,13 +7138,99 @@ const server = createServer(async (req, res) => {
       }
       if (method === "POST" && path === "/api/internal/connectors/mcp") {
         const body = await readBody(req);
-        const upstream = await composio.relayMcp(
-          cfg,
+        const extracted = actionsFromMcpPayload(body);
+        const capability = Array.isArray(req.headers["x-openmaus-autonomy-capability"])
+          ? req.headers["x-openmaus-autonomy-capability"][0]
+          : req.headers["x-openmaus-autonomy-capability"];
+        if (extracted.error) {
+          const action: ToolAction = {
+            transport: "composio",
+            server: "composio",
+            tool: String(body?.params?.name ?? "unknown"),
+            arguments: {},
+          };
+          const decision: AutonomyDecision = {
+            schema: AUTONOMY_DECISION_SCHEMA,
+            allowed: false,
+            code: "malformed-action",
+            reason: extracted.error,
+            tool: action.tool,
+          };
+          autonomyDb.recordDecision(decision, action);
+          return json(res, 200, deniedMcpResponse(body?.id, [decision]));
+        }
+        const decisions = extracted.actions.map((action) => autonomyAuthority.authorize(capability, action));
+        if (decisions.some((decision) => !decision.allowed)) {
+          const context = autonomyAuthority.verify(capability);
+          if (
+            extracted.actions.length === 1
+            && context?.wakeKind === "operator"
+            && isOperatorException(extracted.actions[0]!)
+            && connectorThread(context.botId, context.threadId)
+          ) {
+            const proposal = operatorExceptions.create({
+              botId: context.botId,
+              threadId: context.threadId,
+              action: extracted.actions[0]!,
+              payload: body,
+              ...(typeof req.headers["mcp-session-id"] === "string" ? { transportSessionId: req.headers["mcp-session-id"] } : {}),
+            });
+            const existing = store.messagesFor(context.threadId).find(
+              (message) => message.card?.operatorException?.proposalId === proposal.proposalId,
+            );
+            if (!existing) {
+              const owner = connectorThread(context.botId, context.threadId)!;
+              const from = store.bot(context.botId)!;
+              store.appendMessage(context.threadId, {
+                role: "bot",
+                kind: "options",
+                ...(owner.group ? { from: { botId: from.id, name: from.name, color: from.color } } : {}),
+                card: {
+                  title: "Allow this exact protected action once?",
+                  subtitle: operatorExceptionSubtitle(proposal),
+                  options: ["Allow once", "Cancel"],
+                  requestId: proposal.proposalId,
+                  tool: "operator_exception",
+                  held: "Only this exact move-to-trash or non-admin collaborator change can run.",
+                  operatorException: operatorExceptionCard(proposal),
+                },
+              });
+              appendDecision(DATA_DIR, {
+                threadId: context.threadId, requestId: proposal.proposalId, botId: from.id, botName: from.name,
+                tool: proposal.action.tool, summary: `exact action ${proposal.actionDigest}`, decision: "card-shown", source: "operator-exception",
+              });
+            }
+            autonomyDb.recordDecision(decisions[0]!, extracted.actions[0]!);
+            return json(res, 200, {
+              jsonrpc: "2.0",
+              id: body?.id,
+              result: {
+                isError: true,
+                content: [{ type: "text", text: JSON.stringify({
+                  schema: AUTONOMY_DECISION_SCHEMA,
+                  outcome: "awaiting-operator-confirmation",
+                  approvalCardCreated: true,
+                  proposalId: proposal.proposalId,
+                  decisions,
+                }) }],
+              },
+            });
+          }
+          const rejected = decisions.map((decision): AutonomyDecision => decision.allowed
+            ? { ...decision, allowed: false, code: "mixed-batch-denied", reason: "the entire batch was denied before execution" }
+            : decision);
+          rejected.forEach((decision, index) => autonomyDb.recordDecision(decision, extracted.actions[index]!));
+          return json(res, 200, deniedMcpResponse(body?.id, rejected));
+        }
+        const upstream = await relayComposio(
           body,
           Array.isArray(req.headers["mcp-session-id"])
             ? req.headers["mcp-session-id"][0]
             : req.headers["mcp-session-id"],
+          capability,
         );
+        const providerId = providerReceiptId(upstream.bytes);
+        decisions.forEach((decision, index) => autonomyDb.recordDecision(decision, extracted.actions[index]!, providerId));
         const headers: Record<string, string> = {
           "content-type": upstream.contentType,
           "cache-control": "no-store",
@@ -6501,6 +7238,113 @@ const server = createServer(async (req, res) => {
         if (upstream.transportSessionId) headers["mcp-session-id"] = upstream.transportSessionId;
         res.writeHead(upstream.status, headers);
         return res.end(Buffer.from(upstream.bytes));
+      }
+      if (path === "/api/internal/custom-mcp/mcp") {
+        const serverName = url.searchParams.get("server") ?? "";
+        const sessionId = Array.isArray(req.headers["x-openmaus-mcp-session"])
+          ? req.headers["x-openmaus-mcp-session"][0]
+          : req.headers["x-openmaus-mcp-session"];
+        if (!/^[a-z][a-z0-9_-]{0,31}$/.test(serverName)) {
+          return json(res, 400, { error: "invalid custom MCP server" });
+        }
+        if (method === "DELETE") {
+          if (sessionId) {
+            if (connectorSidecarConfigured()) await closeCustomMcpSidecar(serverName, sessionId);
+            else customMcpManager.close(sessionId);
+          }
+          res.writeHead(204, { "cache-control": "no-store" });
+          return res.end();
+        }
+        if (method !== "POST") return json(res, 405, { error: "method not allowed" });
+        const target = connectorSidecarConfigured() ? null : customMcpServers(cfg)[serverName];
+        if (!connectorSidecarConfigured() && !target) return json(res, 404, { error: "custom MCP server is unavailable" });
+        const body = await readBody(req);
+        const extracted = actionsFromCustomMcpPayload(serverName, body);
+        const capability = Array.isArray(req.headers["x-openmaus-autonomy-capability"])
+          ? req.headers["x-openmaus-autonomy-capability"][0]
+          : req.headers["x-openmaus-autonomy-capability"];
+        if (extracted.error) {
+          const action: ToolAction = {
+            transport: "custom-mcp",
+            server: serverName,
+            tool: String(body?.params?.name ?? "unknown"),
+            arguments: {},
+          };
+          const decision: AutonomyDecision = {
+            schema: AUTONOMY_DECISION_SCHEMA,
+            allowed: false,
+            code: "malformed-action",
+            reason: extracted.error,
+            tool: action.tool,
+          };
+          autonomyDb.recordDecision(decision, action);
+          return json(res, 200, deniedMcpResponse(body?.id, [decision]));
+        }
+        const decisions = extracted.actions.map((action) => autonomyAuthority.authorize(capability, action));
+        if (decisions.some((decision) => !decision.allowed)) {
+          const context = autonomyAuthority.verify(capability);
+          if (
+            extracted.actions.length === 1
+            && context?.wakeKind === "operator"
+            && isOperatorException(extracted.actions[0]!)
+            && connectorThread(context.botId, context.threadId)
+          ) {
+            const proposal = operatorExceptions.create({
+              botId: context.botId,
+              threadId: context.threadId,
+              action: extracted.actions[0]!,
+              payload: body,
+              ...(typeof sessionId === "string" ? { transportSessionId: sessionId } : {}),
+            });
+            const existing = store.messagesFor(context.threadId).find(
+              (message) => message.card?.operatorException?.proposalId === proposal.proposalId,
+            );
+            if (!existing) {
+              const owner = connectorThread(context.botId, context.threadId)!;
+              const from = store.bot(context.botId)!;
+              store.appendMessage(context.threadId, {
+                role: "bot", kind: "options",
+                ...(owner.group ? { from: { botId: from.id, name: from.name, color: from.color } } : {}),
+                card: {
+                  title: "Allow this exact protected action once?",
+                  subtitle: operatorExceptionSubtitle(proposal),
+                  options: ["Allow once", "Cancel"],
+                  requestId: proposal.proposalId,
+                  tool: "operator_exception",
+                  held: "Only this exact move-to-trash or non-admin collaborator change can run.",
+                  operatorException: operatorExceptionCard(proposal),
+                },
+              });
+              appendDecision(DATA_DIR, {
+                threadId: context.threadId, requestId: proposal.proposalId, botId: from.id, botName: from.name,
+                tool: proposal.action.tool, summary: `exact action ${proposal.actionDigest}`, decision: "card-shown", source: "operator-exception",
+              });
+            }
+            autonomyDb.recordDecision(decisions[0]!, extracted.actions[0]!);
+            return json(res, 200, {
+              jsonrpc: "2.0", id: body?.id,
+              result: { isError: true, content: [{ type: "text", text: JSON.stringify({
+                schema: AUTONOMY_DECISION_SCHEMA,
+                outcome: "awaiting-operator-confirmation",
+                approvalCardCreated: true,
+                proposalId: proposal.proposalId,
+                decisions,
+              }) }] },
+            });
+          }
+          decisions.forEach((decision, index) => autonomyDb.recordDecision(decision, extracted.actions[index]!));
+          return json(res, 200, deniedMcpResponse(body?.id, decisions));
+        }
+        const relayed = await relayCustomMcp(serverName, body, sessionId, capability);
+        const responseBytes = Buffer.from(JSON.stringify(relayed.response ?? {}));
+        const providerId = providerReceiptId(responseBytes);
+        decisions.forEach((decision, index) => autonomyDb.recordDecision(decision, extracted.actions[index]!, providerId));
+        res.setHeader("x-openmaus-mcp-session", relayed.sessionId);
+        if (!relayed.response) {
+          res.writeHead(204, { "cache-control": "no-store" });
+          return res.end();
+        }
+        return json(res, 200, relayed.response);
       }
       // ── computer control: proxies read the hold, bots plead for help ──
       if (path === "/api/internal/computer-control") {
@@ -6543,7 +7387,7 @@ const server = createServer(async (req, res) => {
         if (!composio.configured(cfg) || owner.bot.composio === false) {
           return json(res, 409, { error: "connected apps are not enabled for this bot" });
         }
-        const connectionState: Record<string, { connected?: boolean }> = await composio.connectionStatus(cfg, slugs).catch(() => ({}));
+        const connectionState: Record<string, { connected?: boolean }> = await connectionStatus(slugs).catch(() => ({}));
         const messageIds: string[] = [];
         for (const slug of slugs) {
           const existing = store.messagesFor(threadId).find(
@@ -6553,7 +7397,7 @@ const server = createServer(async (req, res) => {
             messageIds.push(existing.id);
             continue;
           }
-          const toolkit = await composio.toolkitCard(cfg, slug);
+          const toolkit = await toolkitCard(slug);
           const connected = connectionState[slug]?.connected === true;
           const message = store.appendMessage(threadId, {
             role: "bot",
@@ -8584,6 +9428,18 @@ const server = createServer(async (req, res) => {
       if (!store.taskByThread(bot.id, threadId)) {
         return json(res, 409, { error: "the bot switched tasks before it could receive the message" });
       }
+      const choice = outboundConversationChoice(text);
+      const pendingOutbound = choice ? outboundProposals.pendingForThread(threadId) : [];
+      if (choice && pendingOutbound.length === 1 && pendingOutbound[0]!.coordinatorBotId === bot.id) {
+        store.appendMessage(threadId, { role: "user", kind: "text", text });
+        if (await resolveOutboundProposal(res, {
+          botId: bot.id,
+          botName: bot.name,
+          threadId,
+          requestId: pendingOutbound[0]!.proposalId,
+          ...choice,
+        })) return;
+      }
       const sendId = parseSendId(body.sendId);
       const replyTo = resolveReplyTarget(threadId, body.replyToId);
       const receipt = await sendSequencer.run(
@@ -8753,6 +9609,21 @@ const server = createServer(async (req, res) => {
       const behavior = requestBehavior(body.behavior);
       const reviewedSha256 = typeof body.reviewedSha256 === "string" ? body.reviewedSha256 : undefined;
       if (!behavior) return json(res, 400, { error: "behavior must be allow, deny, or answer" });
+      if (await resolveOutboundProposal(res, {
+        botId: bot.id,
+        botName: bot.name,
+        threadId: bot.threadId,
+        requestId: String(body.requestId),
+        behavior,
+        message: body.message,
+      })) return;
+      if (await resolveOperatorException(res, {
+        botId: bot.id,
+        botName: bot.name,
+        threadId: bot.threadId,
+        requestId: String(body.requestId),
+        behavior,
+      })) return;
       if (resolveAndSendRoutine(res, {
         botId: bot.id,
         botName: bot.name,
@@ -8788,6 +9659,33 @@ const server = createServer(async (req, res) => {
       const reviewedSha256 = typeof body.reviewedSha256 === "string" ? body.reviewedSha256 : undefined;
       if (!behavior) return json(res, 400, { error: "behavior must be allow, deny, or answer" });
       const requestId = String(body.requestId);
+      const outboundMessage = store.messagesFor(threadId).find(
+        (message) => message.card?.requestId === requestId && message.card.outboundProposal,
+      );
+      if (outboundMessage?.card?.outboundProposal) {
+        const coordinatorId = outboundMessage.from?.botId ?? store.botByThread(threadId)?.id;
+        const coordinator = coordinatorId ? store.bot(coordinatorId) : null;
+        if (!coordinator) return json(res, 409, { error: "the outbound proposal coordinator is unavailable" });
+        if (await resolveOutboundProposal(res, {
+          botId: coordinator.id,
+          botName: coordinator.name,
+          threadId,
+          requestId,
+          behavior,
+          message: body.message,
+        })) return;
+      }
+      const operatorExceptionMessage = store.messagesFor(threadId).find(
+        (message) => message.card?.requestId === requestId && message.card.operatorException,
+      );
+      if (operatorExceptionMessage?.card?.operatorException) {
+        const ownerId = operatorExceptionMessage.from?.botId ?? store.botByThread(threadId)?.id;
+        const owner = ownerId ? store.bot(ownerId) : null;
+        if (!owner) return json(res, 409, { error: "the operator exception owner is unavailable" });
+        if (await resolveOperatorException(res, {
+          botId: owner.id, botName: owner.name, threadId, requestId, behavior,
+        })) return;
+      }
       const skillCard = store.messagesFor(threadId).find(
         (message) => message.card?.requestId === requestId && message.card.skillRequest,
       );
@@ -9252,6 +10150,11 @@ const server = createServer(async (req, res) => {
       if (raw === undefined) return json(res, 404, { error: "MCP server not found." });
       const parsed = parseStoredMcpServer(mcpTest[1], raw);
       if (!parsed.ok) return json(res, 400, { error: parsed.error });
+      if (connectorSidecarConfigured()) {
+        return json(res, 200, await callCustomMcpSidecar("test", [mcpTest[1]]));
+      }
+      const resolvedServer = mcpServerWithResolvedSecrets(mcpTest[1], parsed);
+      if (!resolvedServer) return json(res, 409, { error: "MCP credentials are missing or invalid." });
       if (mcpProbesInFlight >= MAX_CONCURRENT_MCP_PROBES) {
         return json(res, 429, { error: "Two MCP connection tests are already running." });
       }
@@ -9262,7 +10165,7 @@ const server = createServer(async (req, res) => {
       res.once("close", disconnect);
       mcpProbesInFlight += 1;
       try {
-        return json(res, 200, await probeMcpServer(parsed.server, undefined, controller.signal));
+        return json(res, 200, await probeMcpServer(resolvedServer, undefined, controller.signal));
       } finally {
         res.off("close", disconnect);
         mcpProbesInFlight -= 1;
@@ -9290,7 +10193,19 @@ const server = createServer(async (req, res) => {
           enabled: body?.enabled,
         });
         if (!parsed.ok) return json(res, 400, { error: parsed.error });
-        persistMcpServers({ ...current, [name]: parsed.server });
+        let stored = parsed.server;
+        if (DESKTOP_MANAGED) {
+          await persistDesktopMcpSecrets(name, parsed.server.env);
+          stored = withoutInlineMcpSecrets(parsed.server);
+        } else if (connectorSidecarConfigured()) {
+          stored = await callCustomMcpSidecar("upsert", [name, {
+            command: body?.command,
+            args: body?.args,
+            env: body?.env,
+            enabled: body?.enabled,
+          }]);
+        }
+        persistMcpServers({ ...current, [name]: stored });
         return json(res, 201, mcpServerResponse());
       } finally {
         mcpConfigBusy = false;
@@ -9311,6 +10226,8 @@ const server = createServer(async (req, res) => {
         if (method === "DELETE") {
           const next = { ...current };
           delete next[name];
+          if (DESKTOP_MANAGED) await persistDesktopMcpSecrets(name, null);
+          else if (connectorSidecarConfigured()) await callCustomMcpSidecar("remove", [name]);
           persistMcpServers(next);
           return json(res, 200, mcpServerResponse());
         }
@@ -9323,13 +10240,25 @@ const server = createServer(async (req, res) => {
             || Object.keys(body).length !== 1 || typeof body.enabled !== "boolean") {
             return json(res, 400, { error: "Only an enabled boolean can be changed here." });
           }
-          persistMcpServers({ ...current, [name]: { ...existing.server, enabled: body.enabled } });
+          const stored = connectorSidecarConfigured()
+            ? await callCustomMcpSidecar("setEnabled", [name, body.enabled])
+            : { ...existing.server, enabled: body.enabled };
+          persistMcpServers({ ...current, [name]: stored });
           return json(res, 200, mcpServerResponse());
         }
 
-        const parsed = parseMcpServerMutation(name, body, existing.server);
-        if (!parsed.ok) return json(res, 400, { error: parsed.error });
-        persistMcpServers({ ...current, [name]: parsed.server });
+        const resolvedExisting = connectorSidecarConfigured() ? null : mcpServerWithResolvedSecrets(name, existing);
+        const parsed = connectorSidecarConfigured() ? null : parseMcpServerMutation(name, body, resolvedExisting ?? existing.server);
+        if (parsed && !parsed.ok) return json(res, 400, { error: parsed.error });
+        let stored;
+        if (connectorSidecarConfigured()) {
+          stored = await callCustomMcpSidecar("upsert", [name, body]);
+        } else {
+          if (!parsed?.ok) return json(res, 400, { error: "Invalid MCP server." });
+          if (DESKTOP_MANAGED) await persistDesktopMcpSecrets(name, parsed.server.env);
+          stored = DESKTOP_MANAGED ? withoutInlineMcpSecrets(parsed.server) : parsed.server;
+        }
+        persistMcpServers({ ...current, [name]: stored });
         return json(res, 200, mcpServerResponse());
       } finally {
         mcpConfigBusy = false;
@@ -9338,7 +10267,7 @@ const server = createServer(async (req, res) => {
 
     // ── app config (API keys — never echoed back, booleans only) ──
     if (method === "GET" && path === "/api/config") {
-      return json(res, 200, configStatus());
+      return json(res, 200, await configStatus());
     }
     if ((method === "PUT" || method === "PATCH") && path === "/api/config") {
       const body = await readBody(req);
@@ -9413,6 +10342,9 @@ const server = createServer(async (req, res) => {
       // persisting, and save the non-secret ids needed to reuse that Session.
       const requestedComposioKey = patch.composio?.apiKey;
       if (requestedComposioKey !== undefined) {
+        if (process.env.OMB_CONNECTOR_SIDECAR_REQUIRED === "1") {
+          return json(res, 409, { error: "the Composio credential is host-managed by the connector sidecar" });
+        }
         if (requestedComposioKey.trim()) {
           try {
             const prepared = await composio.prepareProjectSession(requestedComposioKey, cfg.composio);
@@ -9570,7 +10502,7 @@ const server = createServer(async (req, res) => {
               if (!mandatoryError) mandatoryError = error;
             }
           }
-          const status = configStatus();
+          const status = await configStatus();
           broadcast({ kind: "config", ...status });
           if (mandatoryError) throw mandatoryError;
           return status;
@@ -9637,7 +10569,7 @@ const server = createServer(async (req, res) => {
 
     // ── connectors (Composio) ──
     if (method === "GET" && path === "/api/connectors/catalog") {
-      const { cards, source } = await composio.listToolkits(cfg);
+      const { cards, source } = await listToolkits();
       return json(res, 200, { configured: composio.configured(cfg), mode: composio.connectionMode(cfg), source, cards });
     }
     if (method === "GET" && path === "/api/connectors/connected") {
@@ -9652,7 +10584,7 @@ const server = createServer(async (req, res) => {
           services: {},
         });
       }
-      return json(res, 200, { configured: true, credentialStore: "ok", services: await composio.connectedServices(cfg) });
+      return json(res, 200, { configured: true, credentialStore: "ok", services: await connectedServices() });
     }
     if (method === "GET" && path === "/api/connectors") {
       const services = (url.searchParams.get("services") ?? "").split(",").filter(Boolean);
@@ -9664,18 +10596,18 @@ const server = createServer(async (req, res) => {
           services: {},
         });
       }
-      const status = await composio.connectionStatus(cfg, services.length ? services : composio.CURATED_SLUGS);
+      const status = await connectionStatus(services.length ? services : composio.CURATED_SLUGS);
       return json(res, 200, { configured: true, services: status });
     }
     m = path.match(/^\/api\/connectors\/([\w-]+)\/authorize$/);
     if (m && method === "POST") {
       const body = await readBody(req);
-      return json(res, 200, await composio.authorizeService(cfg, m[1], body.alias));
+      return json(res, 200, await authorizeService(m[1], body.alias));
     }
     m = path.match(/^\/api\/connectors\/([\w-]+)\/accounts\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})$/);
-    if (m && method === "DELETE") return json(res, 200, await composio.removeAccount(cfg, m[1], m[2]));
+    if (m && method === "DELETE") return json(res, 200, await removeAccount(m[1], m[2]));
     m = path.match(/^\/api\/connectors\/([\w-]+)$/);
-    if (m && method === "DELETE") return json(res, 200, await composio.removeService(cfg, m[1]));
+    if (m && method === "DELETE") return json(res, 200, await removeService(m[1]));
 
     // Inline credential cards never receive the credential value. Electron
     // saves it through the OS-backed store first; this route only verifies
@@ -9724,7 +10656,7 @@ const server = createServer(async (req, res) => {
           connector: { ...connector, status: "authorizing", error: undefined, dismissed: false },
         });
         try {
-          return json(res, 200, await composio.authorizeService(cfg, connector.slug));
+          return json(res, 200, await authorizeService(connector.slug));
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
           store.patchMessage(threadId, message.id, {
@@ -9734,7 +10666,7 @@ const server = createServer(async (req, res) => {
         }
       }
       if (m[3] === "status" && method === "GET") {
-        const state = (await composio.connectionStatus(cfg, [connector.slug]))[connector.slug];
+        const state = (await connectionStatus([connector.slug]))[connector.slug];
         const failed = /failed|expired|revoked|error/i.test(state?.status ?? "");
         const next = {
           ...connector,
@@ -9906,6 +10838,8 @@ const gracefulShutdown = createGracefulShutdown({
       routines?.stop();
       calendarCalls?.stop();
       webhookIngress?.server.close();
+      customMcpManager.dispose();
+      autonomyDb.close();
     },
     () => releaseAllBrowserCapabilities(),
     () => registry.disposeAll(),

@@ -145,6 +145,7 @@ interface IntegrationContext {
   commsToken: string;
   botId: string;
   threadId: string;
+  autonomyCapability?: string;
 }
 
 let managedBrokerAccess: { url: string; token: string } | null | undefined;
@@ -520,6 +521,7 @@ export async function mcpIntegration(
       OMB_COMMS_TOKEN: context.commsToken,
       OMB_BOT_ID: context.botId,
       OMB_THREAD_ID: context.threadId,
+      ...(context.autonomyCapability ? { OMB_AUTONOMY_CAPABILITY: context.autonomyCapability } : {}),
     },
   };
 }
