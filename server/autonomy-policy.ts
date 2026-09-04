@@ -453,6 +453,7 @@ export function actionsFromMcpPayload(payload: unknown): { actions: ToolAction[]
   if (tool === "COMPOSIO_MULTI_EXECUTE_TOOL") {
     const nested = args.tools ?? args.actions;
     if (!Array.isArray(nested) || nested.length === 0) return { actions: [], error: "multi-execute has no recognizable actions" };
+    if (nested.length > 50) return { actions: [], error: "multi-execute exceeds the 50-action provider limit" };
     const actions = nested.map(actionFromNested);
     if (actions.some((action) => action === null)) return { actions: [], error: "multi-execute contains an unrecognized action" };
     return { actions: actions as ToolAction[] };

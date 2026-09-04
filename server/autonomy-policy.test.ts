@@ -147,6 +147,7 @@ describe("autonomy policy", () => {
       { tool_slug: "TODOIST_UPSERT_TASK", account: "personal", arguments: {} },
     ] } } })).toMatchObject({ actions: [{ accountAlias: "personal" }] });
     expect(actionsFromMcpPayload({ method: "tools/call", params: { name: "COMPOSIO_MULTI_EXECUTE_TOOL", arguments: { tools: [{}] } } })).toMatchObject({ actions: [], error: expect.any(String) });
+    expect(actionsFromMcpPayload({ method: "tools/call", params: { name: "COMPOSIO_MULTI_EXECUTE_TOOL", arguments: { tools: Array.from({ length: 51 }, () => ({ slug: "TODOIST_GET_TASKS" })) } } })).toMatchObject({ actions: [], error: "multi-execute exceeds the 50-action provider limit" });
   });
 
   it("binds custom MCP calls to the exact server, tool, and arguments", () => {
