@@ -166,4 +166,25 @@ describe("autonomy policy", () => {
     expect(actionsFromCustomMcpPayload("wiki", { method: "tools/list", params: {} })).toEqual({ actions: [] });
     expect(actionsFromCustomMcpPayload("wiki", { method: "tools/call", params: {} })).toMatchObject({ error: "missing tool name" });
   });
+
+  it("inspects the isolated Todoist broker like Composio and preserves atomic batches", () => {
+    expect(actionsFromCustomMcpPayload("todoist", {
+      method: "tools/call",
+      params: { name: "COMPOSIO_MULTI_EXECUTE_TOOL", arguments: { tools: [
+        { slug: "TODOIST_GET_ALL_TASKS", arguments: {} },
+        { slug: "GMAIL_FETCH_EMAILS", arguments: {} },
+      ] } },
+    })).toMatchObject({ actions: [
+      { transport: "custom-mcp", server: "todoist", tool: "TODOIST_GET_ALL_TASKS" },
+      { transport: "custom-mcp", server: "todoist", tool: "GMAIL_FETCH_EMAILS" },
+    ] });
+    expect(actionsFromCustomMcpPayload("todoist", {
+      method: "tools/call",
+      params: { name: "COMPOSIO_MULTI_EXECUTE_TOOL", arguments: { tools: [{}] } },
+    })).toMatchObject({ actions: [], error: expect.any(String) });
+    expect(actionsFromCustomMcpPayload("todoist", {
+      method: "tools/call",
+      params: { name: "COMPOSIO_SEARCH_TOOLS", arguments: {} },
+    })).toMatchObject({ actions: [{ transport: "custom-mcp", server: "todoist", tool: "COMPOSIO_SEARCH_TOOLS" }] });
+  });
 });

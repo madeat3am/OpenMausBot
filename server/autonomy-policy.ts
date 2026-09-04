@@ -393,7 +393,7 @@ function argumentMatches(args: Record<string, unknown>, keys: string[], expected
 }
 
 function isDiscoveryAction(action: ToolAction): boolean {
-  return action.transport === "composio"
+  return (action.transport === "composio" || (action.transport === "custom-mcp" && action.server === "todoist"))
     && ["COMPOSIO_SEARCH_TOOLS", "COMPOSIO_GET_TOOL_SCHEMAS", "COMPOSIO_WAIT_FOR_CONNECTIONS"].includes(action.tool);
 }
 
@@ -470,6 +470,19 @@ export function actionsFromCustomMcpPayload(
   server: string,
   payload: unknown,
 ): { actions: ToolAction[]; error?: string } {
+  // The migrated Todoist grant is served by a second Composio broker through
+  // an isolated custom-MCP child. Preserve the same nested, all-or-nothing
+  // inspection used by the primary broker before anything reaches it.
+  if (server === "todoist") {
+    const extracted = actionsFromMcpPayload(payload);
+    return extracted.error ? extracted : {
+      actions: extracted.actions.map((action) => ({
+        ...action,
+        transport: "custom-mcp",
+        server,
+      })),
+    };
+  }
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     return { actions: [], error: "invalid MCP request" };
   }
