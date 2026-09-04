@@ -422,25 +422,34 @@ async function readVerifiedArchive({
   }
   if (offline) throw new Error("offline CUA staging requires an existing verified stage or archive cache");
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), downloadTimeoutMs);
-  timeout.unref?.();
   let bytes;
-  try {
-    const response = await fetchImpl(LINUX_CUA_RELEASE.url, {
-      headers: { "user-agent": "OpenMausBot-packager" },
-      signal: controller.signal,
-    });
-    if (!response?.ok) {
-      throw new Error(`CUA Driver download failed: HTTP ${response?.status ?? "unknown"}`);
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), downloadTimeoutMs);
+    timeout.unref?.();
+    try {
+      const response = await fetchImpl(LINUX_CUA_RELEASE.url, {
+        headers: { "user-agent": "OpenMausBot-packager" },
+        signal: controller.signal,
+      });
+      if (!response?.ok) {
+        throw new Error(`CUA Driver download failed: HTTP ${response?.status ?? "unknown"}`);
+      }
+      bytes = await readBoundedResponseBody(response, LINUX_CUA_RELEASE.maxArchiveBytes);
+      break;
+    } catch (error) {
+      if (controller.signal.aborted) {
+        if (attempt === 3) throw new Error("CUA Driver download timed out");
+      } else if (error instanceof Error && error.message.startsWith("CUA Driver download failed: HTTP")) {
+        throw error;
+      } else if (attempt === 3) {
+        throw error;
+      }
+    } finally {
+      clearTimeout(timeout);
     }
-    bytes = await readBoundedResponseBody(response, LINUX_CUA_RELEASE.maxArchiveBytes);
-  } catch (error) {
-    if (controller.signal.aborted) throw new Error("CUA Driver download timed out");
-    throw error;
-  } finally {
-    clearTimeout(timeout);
   }
+  if (!bytes) throw new Error("CUA Driver download failed");
   if (bytes.length !== LINUX_CUA_RELEASE.archiveSize) {
     throw new Error("downloaded CUA archive size does not match the pinned release");
   }

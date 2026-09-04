@@ -241,6 +241,18 @@ describe("Linux CUA release staging", () => {
         downloadTimeoutMs: 10,
       }),
     ).rejects.toThrow("download timed out");
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  it("retries transport failures but not HTTP failures", async () => {
+    const root = temporaryProject();
+    const fetchImpl = vi.fn()
+      .mockRejectedValueOnce(new TypeError("fetch failed"))
+      .mockResolvedValueOnce(new Response("missing", { status: 404 }));
+    await expect(
+      stageLinuxCua({ rootDirectory: root, platform: "linux", arch: "x64", fetchImpl }),
+    ).rejects.toThrow("download failed: HTTP 404");
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
   it.skipIf(process.platform === "win32")(
