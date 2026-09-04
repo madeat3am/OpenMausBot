@@ -16,7 +16,7 @@ import * as composio from "./composio.ts";
 import { customMcpServers, ensureDirs, loadConfig, saveConfig } from "./config.ts";
 import { CustomMcpManager } from "./custom-mcp-manager.ts";
 import { mcpSecretsDiagnostic, resolveMcpSecrets, updateExternalMcpSecrets } from "./mcp-secrets.ts";
-import { parseMcpServerMutation, parseStoredMcpServer, type StoredMcpServer } from "./mcp-registry.ts";
+import { listMcpServers, parseMcpServerMutation, parseStoredMcpServer, type StoredMcpServer } from "./mcp-registry.ts";
 import { probeMcpServer } from "./mcp-probe.ts";
 import type { ExactRelayAuthorization } from "./connector-sidecar-client.ts";
 
@@ -192,6 +192,9 @@ const server = createServer(async (req, res) => {
       switch (input.method) {
         case "diagnostic":
           result = mcpSecretsDiagnostic(currentMcpServers());
+          break;
+        case "list":
+          result = listMcpServers(currentMcpServers());
           break;
         case "upsert": {
           const activeServers = currentMcpServers();

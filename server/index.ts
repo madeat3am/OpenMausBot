@@ -828,10 +828,21 @@ function turnAutonomyCapability(
   });
 }
 
-function guardedCustomMcpIntegrations(autonomyCapability: string | null) {
+async function guardedCustomMcpIntegrations(autonomyCapability: string | null) {
   const custom = customMcpServers(cfg);
   if (process.env.OMB_CUSTOM_MCP_DIRECT_COMPAT === "1") return custom;
-  return Object.fromEntries(Object.keys(custom).map((name) => [name, {
+  const localNames = Object.keys(custom);
+  let sidecarNames: string[] = [];
+  if (connectorSidecarConfigured()) {
+    try {
+      const listings = await callCustomMcpSidecar<{ name: string; enabled: boolean }[]>("list", []);
+      sidecarNames = listings.filter((l) => l.enabled).map((l) => l.name);
+    } catch {
+      // Sidecar unreachable — fall back to local cfg.mcpServers only.
+    }
+  }
+  const allNames = [...new Set([...localNames, ...sidecarNames])];
+  return Object.fromEntries(allNames.map((name) => [name, {
     command: process.execPath,
     args: [SPAWNED_PROXIES.customMcp],
     env: {
@@ -3519,7 +3530,7 @@ async function startTurn(
       // User-configured MCP servers are credential-free guarded proxies. The
       // same turn capability authorizes both Composio and custom-MCP calls.
       if (instance.adapter.capabilities.customMcp === true) {
-        const custom = guardedCustomMcpIntegrations(autonomyCapability);
+        const custom = await guardedCustomMcpIntegrations(autonomyCapability);
         if (Object.keys(custom).length) integrations.custom = custom;
       }
       // CLI engines work inside the bot's own workspace directory rather
@@ -4546,7 +4557,7 @@ async function runGroupMemberTurn(
   }
   // user-configured MCP servers: same guarded capability as the 1:1 site.
   if (instance.adapter.capabilities.customMcp === true) {
-    const custom = guardedCustomMcpIntegrations(autonomyCapability);
+    const custom = await guardedCustomMcpIntegrations(autonomyCapability);
     if (Object.keys(custom).length) integrations.custom = custom;
   }
   // Connected-app discovery is intentionally awaited before a provider owns

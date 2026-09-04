@@ -162,6 +162,10 @@ describe("connector execution sidecar", () => {
     expect(storedSecrets.servers.notes).toEqual({ NOTES_TOKEN: secret });
     const diagnostic = await control("diagnostic", []);
     expect(diagnostic.body.result).toEqual({ status: "resolved", servers: { notes: "resolved" } });
+    const listed = await control("list", []);
+    expect(listed.body.result).toEqual([
+      expect.objectContaining({ name: "notes", enabled: false, envKeys: ["NOTES_TOKEN"] }),
+    ]);
 
     const retained = await control("upsert", ["notes", {
       command: process.execPath,
