@@ -205,4 +205,37 @@ describe("autonomy policy", () => {
       params: { name: "COMPOSIO_SEARCH_TOOLS", arguments: {} },
     })).toMatchObject({ actions: [{ transport: "custom-mcp", server: "todoist", tool: "COMPOSIO_SEARCH_TOOLS" }] });
   });
+
+  it("binds the isolated FreshBooks broker to one exact account alias", () => {
+    const extracted = actionsFromCustomMcpPayload("freshbooks-seed", {
+      method: "tools/call",
+      params: { name: "COMPOSIO_MULTI_EXECUTE_TOOL", arguments: { tools: [
+        { tool_slug: "FRESHBOOKS_LIST_BUSINESSES", arguments: {}, account: "SEED Creates LLC" },
+      ], sync_response_to_workbench: false } },
+    });
+    expect(extracted).toMatchObject({ actions: [{
+      transport: "custom-mcp",
+      server: "freshbooks-seed",
+      tool: "FRESHBOOKS_LIST_BUSINESSES",
+      accountAlias: "SEED Creates LLC",
+    }] });
+    const policy = parseAutonomyPolicy({
+      schema: "openmausbot.autonomy-policy.v1",
+      revision: "isolated-freshbooks",
+      rules: [{
+        id: "freshbooks-seed-read",
+        botId: "personal-admin",
+        wakeKinds: ["operator"],
+        transport: "custom-mcp",
+        server: "freshbooks-seed",
+        tools: ["FRESHBOOKS_LIST_BUSINESSES"],
+        accountAliases: ["SEED Creates LLC"],
+        effect: "read",
+      }],
+    });
+    const authority = new AutonomyAuthority({ policy: policy.policy, digest: policy.digest, revision: "isolated-freshbooks", status: "resolved" }, Buffer.alloc(32, 13));
+    const capability = authority.issue({ botId: "personal-admin", threadId: "thread-1", wakeKind: "operator" })!;
+    expect(authority.authorize(capability, extracted.actions[0]!)).toMatchObject({ allowed: true, ruleId: "freshbooks-seed-read" });
+    expect(authority.authorize(capability, { ...extracted.actions[0]!, accountAlias: "Meridian Row LLC" })).toMatchObject({ allowed: false });
+  });
 });

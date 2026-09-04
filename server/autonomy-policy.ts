@@ -392,8 +392,10 @@ function argumentMatches(args: Record<string, unknown>, keys: string[], expected
   return keys.some((key) => args[key] === expected);
 }
 
+const COMPOSIO_CUSTOM_MCP_SERVERS = new Set(["todoist", "freshbooks-seed"]);
+
 function isDiscoveryAction(action: ToolAction): boolean {
-  return (action.transport === "composio" || (action.transport === "custom-mcp" && action.server === "todoist"))
+  return (action.transport === "composio" || (action.transport === "custom-mcp" && COMPOSIO_CUSTOM_MCP_SERVERS.has(action.server)))
     && ["COMPOSIO_SEARCH_TOOLS", "COMPOSIO_GET_TOOL_SCHEMAS", "COMPOSIO_WAIT_FOR_CONNECTIONS"].includes(action.tool);
 }
 
@@ -470,10 +472,10 @@ export function actionsFromCustomMcpPayload(
   server: string,
   payload: unknown,
 ): { actions: ToolAction[]; error?: string } {
-  // The migrated Todoist grant is served by a second Composio broker through
-  // an isolated custom-MCP child. Preserve the same nested, all-or-nothing
-  // inspection used by the primary broker before anything reaches it.
-  if (server === "todoist") {
+  // Migrated or account-pinned grants are served by isolated Composio brokers
+  // through custom-MCP children. Preserve the same nested, all-or-nothing
+  // inspection used by the primary broker before anything reaches them.
+  if (COMPOSIO_CUSTOM_MCP_SERVERS.has(server)) {
     const extracted = actionsFromMcpPayload(payload);
     return extracted.error ? extracted : {
       actions: extracted.actions.map((action) => ({
