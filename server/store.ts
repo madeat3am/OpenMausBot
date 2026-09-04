@@ -627,7 +627,12 @@ export class Store {
   constructor(defaultSelection: () => ModelSelection) {
     this.defaultSelection = defaultSelection;
     mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
-    if (process.platform !== "win32") chmodSync(DATA_DIR, 0o700);
+    if (process.platform !== "win32") {
+      chmodSync(DATA_DIR, 0o700);
+      for (const file of [BOTS_FILE, GROUPS_FILE]) {
+        if (existsSync(file)) chmodSync(file, 0o600);
+      }
+    }
     try {
       this.bots = JSON.parse(readFileSync(BOTS_FILE, "utf8"));
     } catch {
