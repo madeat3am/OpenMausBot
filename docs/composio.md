@@ -25,7 +25,7 @@ Missing or invalid policy and expired capabilities deny provider actions. OAuth 
 
 ## Credential-isolated hosted mode
 
-Hosted deployments can run connector execution in a distinct-UID sidecar. Set `OMB_CONNECTOR_SIDECAR_URL`, mount the same owner-generated `OMB_CONNECTOR_SIDECAR_TOKEN_FILE`, `OMB_AUTONOMY_POLICY_PATH`, and `OMB_AUTONOMY_SIGNING_KEY_FILE` into the server and sidecar, and set `OMB_CONNECTOR_SIDECAR_REQUIRED=1` on the server. Mount `COMPOSIO_API_KEY_FILE`, `OMB_MCP_SECRETS_FILE`, and the connector-only state directory on the sidecar only. Do not expose the sidecar port outside an internal container network.
+Hosted deployments can run connector execution in a distinct-UID sidecar. Set `OMB_CONNECTOR_SIDECAR_URL`, mount the same owner-generated `OMB_CONNECTOR_SIDECAR_TOKEN_FILE`, `OMB_AUTONOMY_POLICY_PATH`, and `OMB_AUTONOMY_SIGNING_KEY_FILE` into the server and sidecar, and set `OMB_CONNECTOR_SIDECAR_REQUIRED=1` on the server. Mount `COMPOSIO_API_KEY_FILE` or `OMB_COMPOSIO_BROKER_TOKEN_FILE`, `OMB_MCP_SECRETS_FILE`, and the connector-only state directory on the sidecar only. The broker URL is non-secret and may remain an environment value; the broker token file is loaded only inside the sidecar. Do not expose the sidecar port outside an internal container network.
 
 Set `OMB_CONNECTOR_CONFIG_FILE` on the sidecar to the main container's
 read-only `config.json` mount. Hosted MCP Settings writes then send secret

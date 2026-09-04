@@ -60,8 +60,10 @@ describe("connector execution sidecar", () => {
     const policyPath = join(dir, "policy.json");
     const keyPath = join(dir, "key");
     const tokenPath = join(dir, "token");
+    const brokerTokenPath = join(dir, "broker-token");
     const mcpSecretsPath = join(dir, "mcp-secrets.json");
     writeFileSync(tokenPath, token, { mode: 0o600 });
+    writeFileSync(brokerTokenPath, "b".repeat(64), { mode: 0o600 });
     writeFileSync(keyPath, key.toString("hex"), { mode: 0o600 });
     writeFileSync(policyPath, JSON.stringify({
       schema: "openmausbot.autonomy-policy.v1",
@@ -89,7 +91,7 @@ describe("connector execution sidecar", () => {
         OMB_MCP_SECRETS_FILE: mcpSecretsPath,
         OMB_MCP_INLINE_SECRETS: "reject",
         OMB_COMPOSIO_BROKER_URL: `http://127.0.0.1:${brokerPort}`,
-        OMB_COMPOSIO_BROKER_TOKEN: "b".repeat(64),
+        OMB_COMPOSIO_BROKER_TOKEN_FILE: brokerTokenPath,
       },
       stdio: ["ignore", "pipe", "pipe"],
     });

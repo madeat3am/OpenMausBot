@@ -32,6 +32,7 @@ function secret(name: string, fileName: string): void {
 }
 
 secret("COMPOSIO_API_KEY", "COMPOSIO_API_KEY_FILE");
+secret("OMB_COMPOSIO_BROKER_TOKEN", "OMB_COMPOSIO_BROKER_TOKEN_FILE");
 ensureDirs();
 const cfg = loadConfig();
 const authority = new AutonomyAuthority();
