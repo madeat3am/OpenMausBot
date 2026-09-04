@@ -54,7 +54,9 @@ describe("managed connected-apps credential export", () => {
       decrypt: async () =>
         JSON.stringify({ composioBrokerToken: TOKEN, composioInstallationId: "installation-1" }),
     });
-    expect(fs.statSync(output).mode & 0o777).toBe(0o600);
+    if (process.platform !== "win32") {
+      expect(fs.statSync(output).mode & 0o777).toBe(0o600);
+    }
     expect(JSON.parse(fs.readFileSync(output, "utf8"))).toEqual({
       schema: "openmausbot.managed-composio-credential.v1",
       brokerUrl: "https://broker.example",
