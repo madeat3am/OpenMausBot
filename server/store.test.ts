@@ -2,7 +2,7 @@
 // the durable record — everything here must survive a process restart
 // except `busy`, which never does (no turn survives one either).
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -191,6 +191,16 @@ describe("Store", () => {
 
     expect(channel.section).toBe("Work");
     expect(new Store(selection).group(channel.id)?.section).toBe("Work");
+  });
+
+  it.skipIf(process.platform === "win32")("keeps bot, room, and data-directory state private", () => {
+    const store = new Store(selection);
+    const bot = store.createBot();
+    store.createGroup("Private team", [bot.id]);
+
+    expect(statSync(DATA_DIR).mode & 0o777).toBe(0o700);
+    expect(statSync(join(DATA_DIR, "bots.json")).mode & 0o777).toBe(0o600);
+    expect(statSync(join(DATA_DIR, "groups.json")).mode & 0o777).toBe(0o600);
   });
 
   it("persists a channel's completed setup in the same create write", () => {

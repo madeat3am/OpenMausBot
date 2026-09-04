@@ -3,7 +3,7 @@
 // ProviderSessionDirectory, recipe step 6: persist the binding from day
 // one). messages-<threadId>.json holds the folded transcript.
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, mkdirSync, rmSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, mkdirSync, rmSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
 import { writeFileAtomic } from "./atomic.ts";
@@ -626,7 +626,8 @@ export class Store {
 
   constructor(defaultSelection: () => ModelSelection) {
     this.defaultSelection = defaultSelection;
-    mkdirSync(DATA_DIR, { recursive: true });
+    mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
+    if (process.platform !== "win32") chmodSync(DATA_DIR, 0o700);
     try {
       this.bots = JSON.parse(readFileSync(BOTS_FILE, "utf8"));
     } catch {
@@ -772,11 +773,13 @@ export class Store {
   }
 
   private saveBots(bots: BotRecord[] = this.bots) {
-    writeFileAtomic(BOTS_FILE, JSON.stringify(bots, null, 2));
+    writeFileAtomic(BOTS_FILE, JSON.stringify(bots, null, 2), { mode: 0o600 });
   }
 
   private saveGroups() {
-    writeFileAtomic(GROUPS_FILE, JSON.stringify(this.groups.map(({ busyBotId: _busyBotId, ...g }) => g), null, 2));
+    writeFileAtomic(GROUPS_FILE, JSON.stringify(this.groups.map(({ busyBotId: _busyBotId, ...g }) => g), null, 2), {
+      mode: 0o600,
+    });
   }
 
   // ── groups ────────────────────────────────────────────────────────────
