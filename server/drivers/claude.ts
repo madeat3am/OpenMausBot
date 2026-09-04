@@ -739,14 +739,13 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         };
         allowed.push("mcp__dweb");
       }
-      // user-configured servers mount like any integration but are NOT
-      // pre-allowed: acceptEdits silently denies unlisted tools, which
-      // routes every custom tool call through the ogb permission broker
-      // into an Allow/Deny card. Reserved names were filtered upstream;
-      // skip any residual collision instead of clobbering a built-in.
+      // User-configured names now point at OMB's credential-free guarded
+      // proxy. Policy is the authorization boundary, so allow the proxy tool
+      // surface here and let it return terminal allow/deny receipts.
       for (const [name, server] of Object.entries(turn.integrations?.custom ?? {})) {
         if (name in mcpServers) continue;
         mcpServers[name] = { ...server };
+        allowed.push(`mcp__${name}__*`);
       }
       // permission broker: anything acceptEdits would silently deny becomes
       // an Allow/Deny card in chat, and the agent gets ask_user. Skipped in

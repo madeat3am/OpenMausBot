@@ -22,9 +22,20 @@
       "tools": ["SLACK_SEND_MESSAGE"],
       "accountAliases": ["replace-with-private-alias"],
       "effect": "thread_reply",
+      "authority": "operator-promoted",
       "constraints": {
-        "recipientAliases": ["replace-with-private-recipient-alias"]
+        "recipientAliases": ["replace-with-private-recipient-alias"],
+        "purposes": ["replace-with-approved-purpose"]
       }
+    },
+    {
+      "id": "client-ops-wiki-read",
+      "botId": "replace-with-bot-id",
+      "wakeKinds": ["operator", "routine", "webhook"],
+      "transport": "custom-mcp",
+      "server": "replace-with-custom-mcp-name",
+      "tools": ["replace-with-exact-tool-name"],
+      "effect": "read"
     }
   ],
   "webhooks": [

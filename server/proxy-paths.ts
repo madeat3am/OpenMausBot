@@ -41,6 +41,7 @@ export const SPAWNED_PROXIES = {
   agents: resolveProxy("drivers/agents-proxy"),
   dweb: resolveProxy("drivers/dweb-proxy"),
   connectors: resolveProxy("connector-proxy"),
+  customMcp: resolveProxy("custom-mcp-proxy"),
   phone: resolveProxy("drivers/phone-proxy"),
   browser: resolveProxy("drivers/browser-proxy"),
   // Loaded by the external `pi` process via `-e`, not by this server — but

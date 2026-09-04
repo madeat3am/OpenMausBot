@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { AutonomyDatabase } from "./autonomy-db.ts";
@@ -30,5 +31,27 @@ describe("autonomy database", () => {
     expect(db.acceptComposioEvent(event)).toBe("accepted");
     expect(db.acceptComposioEvent({ ...event, receivedAt: first + 30 * 24 * 60 * 60_000 + 1 })).toBe("accepted");
     db.close();
+  });
+
+  it("retains redacted decisions for one year and then removes them", () => {
+    const dir = mkdtempSync(join(tmpdir(), "omb-autonomy-db-"));
+    dirs.push(dir);
+    const file = join(dir, "autonomy.db");
+    const db = new AutonomyDatabase(dir, file);
+    const action = { transport: "composio" as const, server: "composio", tool: "GMAIL_CREATE_DRAFT", arguments: { body: "private" } };
+    const decision = { schema: "openmausbot.autonomy-decision.v1" as const, allowed: true, code: "policy-allowed", reason: "allowed", tool: action.tool };
+    const first = 1_000_000_000;
+    db.recordDecision(decision, action, "log-1", first);
+    db.cleanupDecisions(first + 365 * 24 * 60 * 60_000);
+    db.close();
+    const inspect = new DatabaseSync(file);
+    expect(inspect.prepare("SELECT COUNT(*) AS count FROM decision_receipts").get()).toEqual({ count: 1 });
+    inspect.close();
+    const reopened = new AutonomyDatabase(dir, file);
+    reopened.cleanupDecisions(first + 365 * 24 * 60 * 60_000 + 1);
+    reopened.close();
+    const final = new DatabaseSync(file);
+    expect(final.prepare("SELECT COUNT(*) AS count FROM decision_receipts").get()).toEqual({ count: 0 });
+    final.close();
   });
 });

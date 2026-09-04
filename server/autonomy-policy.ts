@@ -8,6 +8,7 @@ export const AUTONOMY_DECISION_SCHEMA = "openmausbot.autonomy-decision.v1" as co
 
 export const ALLOWED_EFFECTS = [
   "read",
+  "communication_draft",
   "todoist_upsert",
   "thread_reply",
   "calendar_upsert",
@@ -24,6 +25,7 @@ const effectSchema = z.enum(ALLOWED_EFFECTS);
 const shortId = z.string().trim().min(1).max(160);
 const constraintsSchema = z.object({
   recipientAliases: z.array(shortId).max(64).optional(),
+  purposes: z.array(shortId).min(1).max(64).optional(),
   originatingThreadOnly: z.boolean().optional(),
   argumentEquals: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
 }).strict().optional();
@@ -39,6 +41,10 @@ const ruleSchema = z.object({
   tools: z.array(shortId).min(1).max(200),
   accountAliases: z.array(shortId).max(100).optional(),
   effect: effectSchema,
+  /** Outbound sends never become autonomous merely because a broad policy
+   * row exists. Trey must explicitly promote the exact recipient/account/
+   * channel/purpose rule first. */
+  authority: z.literal("operator-promoted").optional(),
   constraints: constraintsSchema,
 }).strict();
 
@@ -66,6 +72,9 @@ const policySchema = z.object({
     if (rule.wakeKinds.includes("webhook") && rule.triggerIds?.length === 0) {
       ctx.addIssue({ code: "custom", path: ["rules", index, "triggerIds"], message: "triggerIds cannot be empty" });
     }
+    if (rule.effect === "thread_reply" && rule.authority !== "operator-promoted") {
+      ctx.addIssue({ code: "custom", path: ["rules", index, "authority"], message: "thread_reply rules must be explicitly operator-promoted" });
+    }
   }
 });
 
@@ -85,6 +94,15 @@ export interface CapabilityContext {
 interface CapabilityPayload extends CapabilityContext {
   schema: "openmausbot.autonomy-capability.v1";
   policyDigest: string;
+  expiresAt: number;
+  nonce: string;
+}
+
+interface ExactCapabilityPayload {
+  schema: "openmausbot.exact-effect-capability.v1";
+  kind: "outbound-send" | "operator-exception";
+  actionDigest: string;
+  proposalDigest?: string;
   expiresAt: number;
   nonce: string;
 }
@@ -175,9 +193,19 @@ const capabilitySchema = z.object({
   nonce: z.string().uuid(),
 }).strict();
 
+const exactCapabilitySchema = z.object({
+  schema: z.literal("openmausbot.exact-effect-capability.v1"),
+  kind: z.enum(["outbound-send", "operator-exception"]),
+  actionDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  proposalDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  expiresAt: z.number().int().positive(),
+  nonce: z.string().uuid(),
+}).strict();
+
 export class AutonomyAuthority {
   readonly state: PolicyState;
   private readonly key: Buffer;
+  private readonly consumedExactNonces = new Set<string>();
 
   constructor(state = loadAutonomyPolicy(), key = randomBytes(32)) {
     this.state = state;
@@ -218,6 +246,57 @@ export class AutonomyAuthority {
     }
   }
 
+  /** Minted only by a server-owned confirmation handler. The action digest
+   * binds the capability to the exact provider arguments reviewed by the
+   * operator; models never receive a general-purpose outbound grant. */
+  issueExact(
+    kind: ExactCapabilityPayload["kind"],
+    action: ToolAction,
+    proposalDigest?: string,
+    ttlMs = 30 * 60_000,
+    now = Date.now(),
+  ): string {
+    const payload: ExactCapabilityPayload = {
+      schema: "openmausbot.exact-effect-capability.v1",
+      kind,
+      actionDigest: exactActionDigest(action),
+      ...(proposalDigest ? { proposalDigest } : {}),
+      expiresAt: now + Math.max(1_000, Math.min(ttlMs, 30 * 60_000)),
+      nonce: randomUUID(),
+    };
+    const body = encode(payload);
+    return `${body}.${createHmac("sha256", this.key).update(body).digest("base64url")}`;
+  }
+
+  /** Consume a single-use exact capability immediately before the server
+   * executes its stored provider arguments. A retry must first prove absence
+   * using provider readback and receive a newly confirmed capability. */
+  consumeExact(
+    token: string | undefined,
+    kind: ExactCapabilityPayload["kind"],
+    action: ToolAction,
+    proposalDigest?: string,
+    now = Date.now(),
+  ): boolean {
+    if (!token) return false;
+    const [body, supplied, ...extra] = token.split(".");
+    if (!body || !supplied || extra.length) return false;
+    const expected = createHmac("sha256", this.key).update(body).digest();
+    let received: Buffer;
+    try { received = Buffer.from(supplied, "base64url"); } catch { return false; }
+    if (received.length !== expected.length || !timingSafeEqual(received, expected)) return false;
+    try {
+      const payload = exactCapabilitySchema.parse(decode(body));
+      if (payload.kind !== kind || payload.expiresAt <= now || this.consumedExactNonces.has(payload.nonce)) return false;
+      if (payload.actionDigest !== exactActionDigest(action)) return false;
+      if ((payload.proposalDigest ?? undefined) !== (proposalDigest ?? undefined)) return false;
+      this.consumedExactNonces.add(payload.nonce);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   authorize(token: string | undefined, action: ToolAction, now = Date.now()): AutonomyDecision {
     const hardDenied = hardDeniedEffect(action);
     if (hardDenied) return denied(action, "hard-deny", `${hardDenied} effects are never autonomous`, hardDenied);
@@ -240,6 +319,10 @@ export class AutonomyAuthority {
       if (rule.constraints?.recipientAliases) {
         const recipient = stringArgument(action.arguments, ["recipientAlias", "recipient_alias", "recipient", "to"]);
         if (!recipient || !rule.constraints.recipientAliases.includes(recipient)) continue;
+      }
+      if (rule.constraints?.purposes) {
+        const purpose = stringArgument(action.arguments, ["purpose", "communication_purpose"]);
+        if (!purpose || !rule.constraints.purposes.includes(purpose)) continue;
       }
       if (rule.constraints?.argumentEquals) {
         const matches = Object.entries(rule.constraints.argumentEquals).every(([key, value]) => action.arguments[key] === value);
@@ -274,7 +357,8 @@ function argumentMatches(args: Record<string, unknown>, keys: string[], expected
 }
 
 function isDiscoveryAction(action: ToolAction): boolean {
-  return ["COMPOSIO_SEARCH_TOOLS", "COMPOSIO_GET_TOOL_SCHEMAS", "COMPOSIO_WAIT_FOR_CONNECTIONS"].includes(action.tool);
+  return action.transport === "composio"
+    && ["COMPOSIO_SEARCH_TOOLS", "COMPOSIO_GET_TOOL_SCHEMAS", "COMPOSIO_WAIT_FOR_CONNECTIONS"].includes(action.tool);
 }
 
 function hardDeniedEffect(action: ToolAction): DeniedEffect | null {
@@ -286,6 +370,20 @@ function hardDeniedEffect(action: ToolAction): DeniedEffect | null {
   if (/(_|^)(CREATE|ROTATE|RESET|UPDATE)_(API_?KEY|TOKEN|PASSWORD|CREDENTIAL|SECRET)/.test(tool)) return "credential";
   if (/(_|^)(DISABLE_MFA|CHANGE_SECURITY|UPDATE_FIREWALL|CREATE_AUTH_CONFIG|MANAGE_CONNECTIONS)_/.test(`${tool}_`)) return "security";
   return null;
+}
+
+/** The only hard-denied operations that can cross an attended, exact,
+ * one-time operator confirmation. Permanent deletion and admin/ownership
+ * changes deliberately do not match. */
+export function isOperatorException(action: ToolAction): boolean {
+  const tool = action.tool.toUpperCase();
+  const moveToTrash = /(^|_)(MOVE_TO_TRASH|TRASH_MESSAGE|TRASH_FILE|TRASH_ITEM)(_|$)/.test(tool)
+    && action.arguments.permanent !== true;
+  const collaboratorChange = /(^|_)(ADD_COLLABORATOR|REMOVE_COLLABORATOR|UPDATE_COLLABORATOR)(_|$)/.test(tool)
+    && action.arguments.admin !== true
+    && action.arguments.role !== "admin"
+    && action.arguments.role !== "owner";
+  return moveToTrash || collaboratorChange;
 }
 
 function actionFromNested(value: unknown): ToolAction | null {
@@ -326,6 +424,49 @@ export function actionsFromMcpPayload(payload: unknown): { actions: ToolAction[]
   return { actions: [{ transport: "composio", server: "composio", tool, arguments: args, accountAlias: stringArgument(args, ["account", "account_alias", "accountAlias", "connected_account_id", "connectedAccountId"]) }] };
 }
 
+/** Extract the exact effecting call for a named custom MCP. Handshakes,
+ * discovery, notifications, and resource reads are relayed as non-effecting
+ * protocol traffic; every tools/call is policy matched before the child sees
+ * it. Custom MCP batching is intentionally unsupported unless a policy can
+ * inspect the nested provider actions. */
+export function actionsFromCustomMcpPayload(
+  server: string,
+  payload: unknown,
+): { actions: ToolAction[]; error?: string } {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return { actions: [], error: "invalid MCP request" };
+  }
+  const request = payload as Record<string, unknown>;
+  if (request.method !== "tools/call") return { actions: [] };
+  const params = request.params;
+  if (!params || typeof params !== "object" || Array.isArray(params)) {
+    return { actions: [], error: "invalid tools/call params" };
+  }
+  const row = params as Record<string, unknown>;
+  const tool = typeof row.name === "string" ? row.name.trim() : "";
+  if (!tool) return { actions: [], error: "missing tool name" };
+  const args = row.arguments && typeof row.arguments === "object" && !Array.isArray(row.arguments)
+    ? row.arguments as Record<string, unknown>
+    : {};
+  return { actions: [{
+    transport: "custom-mcp",
+    server,
+    tool,
+    arguments: args,
+    accountAlias: stringArgument(args, ["account", "account_alias", "accountAlias"]),
+  }] };
+}
+
 export function argumentDigest(action: ToolAction): string {
   return createHash("sha256").update(canonical(action.arguments)).digest("hex");
+}
+
+export function exactActionDigest(action: ToolAction): string {
+  return createHash("sha256").update(canonical({
+    transport: action.transport,
+    server: action.server,
+    tool: action.tool,
+    accountAlias: action.accountAlias ?? null,
+    arguments: action.arguments,
+  })).digest("hex");
 }

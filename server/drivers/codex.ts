@@ -190,7 +190,10 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
           mountMcpServer(appServerArgs, env, "browser", turn.integrations.browser);
         }
         for (const [name, server] of Object.entries(turn.integrations?.custom ?? {})) {
-          mountMcpServer(appServerArgs, env, name, server, false);
+          // This is the same harness-owned policy boundary as Composio. The
+          // model process has no provider credential and a denial is terminal,
+          // so a second Codex approval would only create an unattended stall.
+          mountMcpServer(appServerArgs, env, name, server);
         }
         if (turn.integrations?.phone) {
           const bridge = turn.integrations.phone;

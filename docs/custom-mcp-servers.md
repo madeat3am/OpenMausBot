@@ -44,22 +44,31 @@ server's subtree is passed to that MCP child. Set
 inline value makes the server fail closed. Diagnostics expose only
 `resolved`, `missing`, or `invalid`.
 
-Externalization alone does not isolate the resolved child environment from a
-shell-capable engine running as the same operating-system user. Do not enable
-unattended custom-MCP mutations until the deployment also supplies the
-host-owned sandbox and guarded custom-MCP proxy. The policy boundary described
-for Connected Apps does not yet authorize custom MCPs.
+OpenMausBot resolves those values only in the server and injects one server's
+subtree into that MCP child. Codex, Claude, and ACP engines receive a
+credential-free localhost proxy and a short-lived policy capability. A
+container deployment must additionally deny engine profiles access to the
+secret mount, peer process environments, and ptrace; externalizing a value is
+not by itself an operating-system boundary.
+
+On the packaged desktop, legacy inline values are copied into Electron
+`safeStorage` (`credentials.bin`) before the active JSON values are blanked.
+Future Settings writes use the same private utility-process channel and expose
+only key names to the renderer and server config. No provider-side rotation is
+part of this migration. Headless operators may render the mode-0600 JSON from a
+least-privilege 1Password service account, but OMB does not require or embed the
+1Password CLI.
 
 If you edit the file by hand, restart OpenMausBot. Every bot whose engine can
 mount custom MCP servers gets the enabled tools on its next task.
 
 ## Rules that keep this safe
 
-- **Permission cards by default.** Custom servers are never pre-approved:
-  on Claude their tools route through the permission broker into Allow/Deny
-  cards; on Codex they keep the on-request approval policy; ACP engines
-  relay the agent's own permission asks. Built-ins stay pre-quieted — only
-  *your* servers ask.
+- **Policy-bounded without approval cards.** Custom tool calls are pre-approved
+  only at the engine layer because the OMB proxy already sees the exact server,
+  tool, and arguments. A matching `custom-mcp` rule executes; missing, expired,
+  malformed, hard-denied, or unmatched authority returns a terminal denial and
+  never reaches the provider.
 - **Reserved names are refused** (`computer`, `agents`, `composio`,
   `browser`, `phone`, `dweb`, `ogb`, …) so a custom entry can never shadow
   a built-in tool surface. Names are lowercase letters/digits/`_`/`-`, max
@@ -68,11 +77,11 @@ mount custom MCP servers gets the enabled tools on its next task.
   with a logged reason; the rest still mount.
 - **Credentials are write-only in the UI.** The API returns environment names,
   never their values. Headless acceptance uses the external file above.
-- **Credentials stay off argv.** `env` values travel in the child
-  environment (Codex argv carries env *names* only; Claude uses the private
-  0600 mcp-config file; ACP passes them in the session payload with the
-  wire log redacted). Legacy inline values are compatibility-only and must be
-  removed before enabling external-only mode.
+- **Credentials stay out of engines and argv.** Model processes receive only
+  proxy routing metadata. The OMB server starts the selected MCP child with a
+  small ambient environment plus that server's secret subtree. Legacy direct
+  mounting exists only behind `OMB_CUSTOM_MCP_DIRECT_COMPAT=1` for an explicit
+  rollback and must not be enabled in the autonomous deployment.
 - **Testing is bounded.** The test command is stopped after the handshake (or
   eight seconds), its output is capped, and its stderr is never sent to the UI.
   It inherits none of OpenMausBot's workspace or provider credentials; only

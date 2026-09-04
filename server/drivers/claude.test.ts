@@ -475,7 +475,7 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     expect(allowed).toContain("mcp__agents");
   });
 
-  it("mounts custom MCP servers without pre-allowing their tools", async () => {
+  it("pre-allows credential-free guarded custom MCP proxies", async () => {
     await create();
     const dump = join(scratch, "custom-mcp.json");
     process.env.FAKE_CLAUDE_DUMP = dump;
@@ -485,7 +485,7 @@ describe("ClaudeDriver turns (fake CLI)", () => {
       text: "hi",
       integrations: {
         custom: {
-          notes: { command: "npx", args: ["-y", "@x/notes-mcp"], env: { NOTES_TOKEN: "tok-notes" } },
+          notes: { command: process.execPath, args: ["/tmp/custom-mcp-proxy.js"], env: { OMB_CUSTOM_MCP_SERVER: "notes" } },
         },
         agents: {
           command: process.execPath,
@@ -499,17 +499,15 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     const seen = JSON.parse(readFileSync(dump, "utf8"));
     // the server reaches the CLI through the private mcp-config file…
     expect(seen.mcpConfig.mcpServers.notes).toMatchObject({
-      command: "npx",
-      args: ["-y", "@x/notes-mcp"],
-      env: { NOTES_TOKEN: "tok-notes" },
+      command: process.execPath,
+      args: ["/tmp/custom-mcp-proxy.js"],
+      env: { OMB_CUSTOM_MCP_SERVER: "notes" },
     });
-    // …but its tools are NOT pre-allowed: acceptEdits denies unlisted tools,
-    // which routes every custom call through the ogb broker into a card.
+    // Policy is enforced at the proxy, so Claude adds no approval-card layer.
     const allowed = seen.argv[seen.argv.indexOf("--allowedTools") + 1];
     expect(allowed).toContain("mcp__agents");
-    expect(allowed).not.toContain("mcp__notes");
-    // and its credential value stays out of argv
-    expect(JSON.stringify(seen.argv)).not.toContain("tok-notes");
+    expect(allowed).toContain("mcp__notes__*");
+    expect(seen.mcpConfig.mcpServers.notes.env.NOTES_TOKEN).toBeUndefined();
   });
 
   it("passes normalized available and denied built-in tool sets to Claude", async () => {

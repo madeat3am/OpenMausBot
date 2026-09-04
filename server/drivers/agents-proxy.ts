@@ -360,6 +360,52 @@ const TOOLS = [
     },
   },
   {
+    name: "propose_outbound",
+    description:
+      "Poppy-only: present one reviewed outbound communication after terminal Communications and Human Voice delegations. This creates a native Send/Revise/Cancel card; it never sends. Missing, conflicting, stale, or cross-relationship evidence is held. Use the exact task ids returned by delegate_bot and exact provider draft/read/send arguments. End the turn after proposing.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        communications_receipt_id: { type: "string" },
+        human_voice_receipt_id: { type: "string" },
+        account_alias: { type: "string" },
+        channel: { type: "string" },
+        purpose: { type: "string" },
+        relationship_boundary: { type: "string", description: "Resolved person or client relationship boundary shared by every source." },
+        recipients: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 64 },
+        subject: { type: "string" },
+        body: { type: "string" },
+        attachments: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: { name: { type: "string" }, mime: { type: "string" }, size: { type: "integer" }, sha256: { type: "string" } },
+            required: ["name", "mime", "size", "sha256"],
+          },
+        },
+        provider_draft_id: { type: "string" },
+        source_references: {
+          type: "array",
+          minItems: 1,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: { uri: { type: "string" }, relationship_boundary: { type: "string" }, observed_at: { type: "integer" }, fresh_until: { type: "integer" } },
+            required: ["uri", "relationship_boundary", "observed_at", "fresh_until"],
+          },
+        },
+        material_facts: { type: "string", enum: ["verified", "missing", "conflicting"] },
+        rationale: { type: "string" },
+        provider_action: { type: "object", description: "Exact guarded provider send action: transport, server, tool, accountAlias, arguments." },
+        provider_read_action: { type: "object", description: "Exact guarded provider reread action run immediately before send." },
+        idempotency_key: { type: "string" },
+      },
+      required: ["communications_receipt_id", "human_voice_receipt_id", "account_alias", "channel", "purpose", "relationship_boundary", "recipients", "body", "source_references", "material_facts", "rationale", "provider_action", "provider_read_action", "idempotency_key"],
+    },
+  },
+  {
     name: "skills_list",
     description:
       "List this bot's imported skills (enabled and disabled) and any staged skill writes waiting for the user to confirm. Use this before skill_manage to avoid duplicate names. Listing does not enable anything.",
@@ -677,6 +723,51 @@ async function callTool(name: string, args: Json): Promise<{ text: string; isErr
       body: JSON.stringify(body),
     });
     return confirmationResult(r, `${action.replace("_", " ")} on routine ${routineId}`);
+  }
+  if (name === "propose_outbound") {
+    const sourceReferences = Array.isArray(args.source_references)
+      ? args.source_references.map((value) => {
+          const source = jsonRecord(value) ? value : {};
+          return {
+            uri: source.uri,
+            relationshipBoundary: source.relationship_boundary,
+            observedAt: source.observed_at,
+            freshUntil: source.fresh_until,
+          };
+        })
+      : [];
+    const r = await api("/api/internal/outbound-proposals", {
+      method: "POST",
+      body: JSON.stringify({
+        fromBotId: BOT_ID,
+        fromThreadId: THREAD_ID,
+        proposal: {
+          communicationsReceipt: { id: args.communications_receipt_id },
+          humanVoiceReceipt: { id: args.human_voice_receipt_id },
+          accountAlias: args.account_alias,
+          channel: args.channel,
+          purpose: args.purpose,
+          relationshipBoundary: args.relationship_boundary,
+          recipients: args.recipients,
+          subject: args.subject,
+          body: args.body,
+          attachments: args.attachments ?? [],
+          providerDraftId: args.provider_draft_id,
+          sourceReferences,
+          materialFacts: args.material_facts,
+          rationale: args.rationale,
+          providerAction: args.provider_action,
+          providerReadAction: args.provider_read_action,
+          idempotencyKey: args.idempotency_key,
+        },
+      }),
+    });
+    if (r.status === "held") {
+      return { text: `Outbound proposal ${r.proposalId} is held: ${r.reason ?? "evidence is not approval-ready"}. Do not request approval or claim it was sent.`, isError: true };
+    }
+    return {
+      text: `A Send/Revise/Cancel card is now visible for outbound proposal ${r.proposalId}. The protected provider arguments remain server-side and nothing has been sent. End this turn and wait for the user's decision.`,
+    };
   }
   if (name === "skills_list") {
     const query = new URLSearchParams({ fromBotId: BOT_ID, fromThreadId: THREAD_ID });

@@ -40,6 +40,7 @@ export class AutonomyDatabase {
   }
 
   recordDecision(decision: AutonomyDecision, action: ToolAction, providerResultId?: string, now = Date.now()): number {
+    this.cleanupDecisions(now);
     const result = this.database.prepare(`
       INSERT INTO decision_receipts
         (decided_at, outcome, code, rule_id, effect, account_alias, tool, argument_digest, provider_result_id, reason)
@@ -57,6 +58,11 @@ export class AutonomyDatabase {
       decision.reason,
     );
     return Number(result.lastInsertRowid);
+  }
+
+  cleanupDecisions(now = Date.now()): void {
+    this.database.prepare("DELETE FROM decision_receipts WHERE decided_at < ?")
+      .run(now - 365 * 24 * 60 * 60_000);
   }
 
   acceptComposioEvent(input: {

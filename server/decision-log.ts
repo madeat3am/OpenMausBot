@@ -31,6 +31,8 @@ export type DecisionKind =
   | "card-shown"
   | "user-approved"
   | "user-denied"
+  | "user-requested-revision"
+  | "provider-failed"
   | "review-would-approve"
   | "review-would-deny";
 
@@ -45,6 +47,7 @@ export type DecisionSource =
   | "auto-fallback"
   | "routine"
   | "skill"
+  | "outbound-proposal"
   | "user"
   | "auto-review"
   | "auto-review-shadow";

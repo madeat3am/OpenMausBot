@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  managedMcpSecretDocument,
+  migrateMcpCredentials,
   migrateWorkspaceCredentials,
+  updateManagedMcpCredentials,
   workspaceCredentialEnv,
   WORKSPACE_CREDENTIALS,
 } from "./workspace-credentials.mjs";
@@ -139,5 +142,47 @@ describe("workspace credential env", () => {
     const credentials = Object.fromEntries(WORKSPACE_CREDENTIALS.map((c) => [c.name, `v-${c.name}`]));
     const env = workspaceCredentialEnv(credentials);
     expect(Object.keys(env).sort()).toEqual(WORKSPACE_CREDENTIALS.map((c) => c.env).sort());
+  });
+});
+
+describe("custom MCP credential migration", () => {
+  it("copies values into safeStorage state before leaving key-only config", () => {
+    const config = { mcpServers: {
+      wiki: { command: "wiki-mcp", env: { TOKEN: "secret", URL: "https://wiki.test" } },
+      twenty: { command: "twenty-mcp", env: { TOKEN: "other" } },
+    } };
+    const result = migrateMcpCredentials(config, {});
+    expect(result.credentialsChanged).toBe(true);
+    expect(result.configChanged).toBe(true);
+    expect(result.config.mcpServers.wiki.env).toEqual({ TOKEN: "", URL: "" });
+    expect(result.credentials.customMcpSecrets).toEqual({
+      wiki: { TOKEN: "secret", URL: "https://wiki.test" },
+      twenty: { TOKEN: "other" },
+    });
+    expect(config.mcpServers.wiki.env.TOKEN).toBe("secret");
+  });
+
+  it("is idempotent and empty placeholders preserve encrypted values", () => {
+    const credentials = { customMcpSecrets: { wiki: { TOKEN: "keep" } } };
+    const result = migrateMcpCredentials(
+      { mcpServers: { wiki: { command: "wiki-mcp", env: { TOKEN: "" } } } },
+      credentials,
+    );
+    expect(result.credentialsChanged).toBe(false);
+    expect(result.configChanged).toBe(false);
+    expect(result.credentials).toEqual(credentials);
+  });
+
+  it("produces the private server document and supports copy-on-write updates", () => {
+    const start = { customMcpSecrets: { wiki: { TOKEN: "old" }, twenty: { TOKEN: "keep" } } };
+    const updated = updateManagedMcpCredentials(start, "wiki", { TOKEN: "new", EMPTY: "" });
+    expect(managedMcpSecretDocument(updated)).toEqual({
+      schema: "openmausbot.mcp-secrets.v1",
+      servers: { wiki: { TOKEN: "new" }, twenty: { TOKEN: "keep" } },
+    });
+    expect(start.customMcpSecrets.wiki.TOKEN).toBe("old");
+    expect(managedMcpSecretDocument(updateManagedMcpCredentials(updated, "wiki", null)).servers).toEqual({
+      twenty: { TOKEN: "keep" },
+    });
   });
 });

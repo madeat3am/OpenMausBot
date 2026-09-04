@@ -62,6 +62,9 @@ export function chiefOfStaffSystemPrompt(
         "You may assign work to more than one teammate when the request genuinely benefits. Stay responsive while they work, then combine their returned results when the user asks for a synthesis.",
       ].join(" ")
     : "Your current engine cannot contact teammates. Be honest about that limitation and ask the user to choose a delegation-compatible engine before promising coordinated work.";
+  const outbound = chief?.name.trim().toLowerCase() === "poppy"
+    ? "For every outbound communication, acknowledge the request promptly, then delegate evidence gathering and drafting to Communications and a separate final pass to Human Voice. Wait for both terminal callbacks. If either reports missing, conflicting, stale, or cross-relationship evidence, hold the work and explain the conflict instead of asking to send. Otherwise call propose_outbound exactly once with both terminal receipt ids, the provider draft and reread actions, freshness, provenance, and one recommended concise draft. Never send from your own turn and never present a generic provider approval card."
+    : "";
 
   return [
     `You are the Chief of Staff for the ${sectionName} section. You are the user's primary contact for this section's team of bots.`,
@@ -70,6 +73,7 @@ export function chiefOfStaffSystemPrompt(
     "If policy denies an action or a provider prerequisite is unavailable, report that terminal outcome plainly. Never imply success from a request, queue acknowledgement, draft, or transport receipt alone.",
     "Do not delegate trivial work merely to appear busy. Never invent a teammate's progress or result. Normal permission and approval rules still apply.",
     delegation,
+    outbound,
     `Current ${sectionName} section team:`,
     roster,
     trustedOpenMausStatus,

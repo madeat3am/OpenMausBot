@@ -264,3 +264,49 @@ describe("ApprovalCard learned skills", () => {
       .toContain("propose the update again");
   });
 });
+
+describe("ApprovalCard outbound proposals", () => {
+  const outboundMessage = (answered?: string): Message => ({
+    id: "outbound-card",
+    role: "bot",
+    kind: "options",
+    at: 1,
+    card: {
+      title: "Send this reviewed draft?",
+      subtitle: "Account: personal · gmail · acceptance-test\n\nTo: self@example.com\n\nSubject: Acceptance\nReviewed body\n\nWhy this draft: concise and sourced\n\nProof: Communications c-1; Human Voice h-1; 1 current source",
+      options: ["Send", "Revise", "Cancel"],
+      ...(answered ? { answered } : {}),
+      requestId: "proposal-1",
+      tool: "outbound_proposal",
+      outboundProposal: {
+        schema: "openmausbot.outbound-proposal.v1",
+        proposalId: "proposal-1",
+        digest: "a".repeat(64),
+        channel: "gmail",
+        accountAlias: "personal",
+        purpose: "acceptance-test",
+        recipients: ["self@example.com"],
+        subject: "Acceptance",
+        attachmentCount: 0,
+        status: answered === "allow" ? "sent" : answered === "revise" ? "revision_requested" : "pending",
+        rationale: "concise and sourced",
+      },
+    },
+  });
+
+  it("shows recipient, account, content, rationale, and specialist proof without a generic approval label", () => {
+    const message = outboundMessage();
+    const markup = renderToStaticMarkup(createElement(ApprovalCard, { message }));
+    expect(markup).toContain("send a reviewed message");
+    expect(markup).toContain("self@example.com");
+    expect(markup).toContain("Communications c-1");
+    expect(markup).toContain("Waiting for Send, Revise, or Cancel");
+    expect(spokenApprovalPrompt({ message, requestId: "proposal-1", tool: "outbound_proposal", detail: message.card!.subtitle }, "Poppy"))
+      .toContain("Review the recipient, content, account, and proof on screen");
+  });
+
+  it("records send and revision outcomes precisely", () => {
+    expect(renderToStaticMarkup(createElement(ApprovalCard, { message: outboundMessage("allow") }))).toContain("Message sent");
+    expect(renderToStaticMarkup(createElement(ApprovalCard, { message: outboundMessage("revise") }))).toContain("Revision requested");
+  });
+});

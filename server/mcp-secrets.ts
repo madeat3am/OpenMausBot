@@ -18,6 +18,16 @@ export interface McpSecretResolution {
   missingKeys: string[];
 }
 
+let managedSecrets: z.infer<typeof secretFileSchema> | null = null;
+
+/** Desktop Electron sends its safeStorage-decrypted document over the private
+ * utility-process channel. Keep it in memory only; the renderer and model
+ * processes never receive it. Headless installs continue to use the
+ * root/owner-controlled read-only file. */
+export function setManagedMcpSecrets(raw: unknown): void {
+  managedSecrets = raw === null ? null : secretFileSchema.parse(raw);
+}
+
 function externalSecrets(path = process.env.OMB_MCP_SECRETS_FILE): z.infer<typeof secretFileSchema> | null {
   if (!path?.trim()) return null;
   return secretFileSchema.parse(JSON.parse(readFileSync(path, "utf8")));
@@ -32,7 +42,7 @@ export function resolveMcpSecrets(
 ): McpSecretResolution {
   let file: z.infer<typeof secretFileSchema> | null;
   try {
-    file = externalSecrets(path);
+    file = externalSecrets(path) ?? managedSecrets;
   } catch {
     return { status: "invalid", env: {}, missingKeys: Object.keys(inline).sort() };
   }

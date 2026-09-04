@@ -21,12 +21,16 @@ import {
 import { approvalKey, autoVerdict } from "./auto-approve.ts";
 import { AutonomyDatabase } from "./autonomy-db.ts";
 import {
+  actionsFromCustomMcpPayload,
   actionsFromMcpPayload,
   AutonomyAuthority,
   AUTONOMY_DECISION_SCHEMA,
   type AutonomyDecision,
   type ToolAction,
 } from "./autonomy-policy.ts";
+import { CustomMcpManager } from "./custom-mcp-manager.ts";
+import { OutboundExecutor } from "./outbound-executor.ts";
+import { OutboundProposalStore, type OutboundProposal } from "./outbound-proposals.ts";
 import { requestReview, resolveAutoReviewMode, shouldReview } from "./auto-review.ts";
 import { updateClaudeCli } from "./claude-update.ts";
 import {
@@ -135,7 +139,7 @@ import {
   parseStoredMcpServer,
 } from "./mcp-registry.ts";
 import { probeMcpServer } from "./mcp-probe.ts";
-import { mcpSecretsDiagnostic } from "./mcp-secrets.ts";
+import { mcpSecretsDiagnostic, resolveMcpSecrets, setManagedMcpSecrets } from "./mcp-secrets.ts";
 import {
   GROUP_GOAL_MAX_TURNS,
   groupGoalAssignmentKey,
@@ -304,6 +308,7 @@ const MIME: Record<string, string> = {
 ensureDirs();
 const autonomyAuthority = new AutonomyAuthority();
 const autonomyDb = new AutonomyDatabase(DATA_DIR);
+const customMcpManager = new CustomMcpManager();
 // Only after ensureDirs(): it performs the one-time rename of the legacy data
 // dir, which must not find a freshly created ~/.openmausbot already there.
 // Remote clients (server/request-auth.ts, server/sessions.ts): a stable identity
@@ -315,6 +320,11 @@ const DESKTOP_MANAGED = process.env.OMB_DESKTOP_PARENT === "1";
 // Where remote clients reach this server (a proxy's public address); pairing URLs use it.
 const PUBLIC_URL = process.env.OMB_PUBLIC_URL?.trim().replace(/\/+$/, "") || null;
 const cfg = loadConfig();
+const outboundProposals = new OutboundProposalStore(DATA_DIR);
+const outboundExecutor = new OutboundExecutor(
+  autonomyAuthority,
+  (payload, transportSessionId) => composio.relayMcp(cfg, payload as never, transportSessionId),
+);
 const registry = new ProviderRegistry(BUILT_IN_DRIVERS);
 await registry.load(instanceConfigs(cfg));
 const bundledSkills = loadBundledSkills();
@@ -335,6 +345,11 @@ type DesktopPrivateMessage = BrowserCleanupWireRequest | {
   type: "openmausbot:browser-control";
   botId: string;
   held: true;
+} | {
+  type: "openmausbot:mcp-secrets-update";
+  requestId: string;
+  name: string;
+  env: Record<string, string> | null;
 };
 function postDesktopPrivateMessage(message: DesktopPrivateMessage): boolean {
   if (!utilityParentPort) return false;
@@ -350,10 +365,60 @@ const browserCleanup = new BrowserCleanupCoordinator({
   file: join(DATA_DIR, "browser-cleanups.json"),
   send: postDesktopPrivateMessage,
 });
+const pendingMcpSecretUpdates = new Map<string, {
+  resolve: (secrets: unknown) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}>();
+
+function persistDesktopMcpSecrets(name: string, env: Record<string, string> | null): Promise<void> {
+  if (!DESKTOP_MANAGED) return Promise.resolve();
+  const requestId = randomUUID();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingMcpSecretUpdates.delete(requestId);
+      reject(new Error("the operating-system credential store did not answer"));
+    }, 15_000);
+    timer.unref?.();
+    pendingMcpSecretUpdates.set(requestId, {
+      timer,
+      resolve: (secrets) => {
+        try {
+          setManagedMcpSecrets(secrets);
+          resolve();
+        } catch {
+          reject(new Error("the operating-system credential store returned invalid MCP data"));
+        }
+      },
+      reject,
+    });
+    if (!postDesktopPrivateMessage({ type: "openmausbot:mcp-secrets-update", requestId, name, env })) {
+      clearTimeout(timer);
+      pendingMcpSecretUpdates.delete(requestId);
+      reject(new Error("the operating-system credential store is unavailable"));
+    }
+  });
+}
+
 utilityParentPort?.on("message", (event) => {
   const message = event?.data;
   try {
+    if (message && typeof message === "object" && (message as { type?: unknown }).type === "openmausbot:mcp-secrets-updated") {
+      const reply = message as { requestId?: unknown; secrets?: unknown; error?: unknown };
+      const requestId = typeof reply.requestId === "string" ? reply.requestId : "";
+      const pending = pendingMcpSecretUpdates.get(requestId);
+      if (!pending) return;
+      pendingMcpSecretUpdates.delete(requestId);
+      clearTimeout(pending.timer);
+      if (typeof reply.error === "string" && reply.error) pending.reject(new Error(reply.error));
+      else pending.resolve(reply.secrets);
+      return;
+    }
     if (browserCleanup.receive(message)) return;
+    if (message && typeof message === "object" && (message as { type?: unknown }).type === "openmausbot:managed-mcp-secrets") {
+      setManagedMcpSecrets((message as { secrets?: unknown }).secrets ?? null);
+      return;
+    }
     if (!applyDesktopBrowserConnectionMessage(message)) composio.applyManagedBrokerMessage(message);
   } catch (error) {
     console.error(`[desktop-sync] rejected private parent message: ${error instanceof Error ? error.message : String(error)}`);
@@ -668,19 +733,7 @@ function phoneIntegration() {
   return { command: process.execPath, args: [phoneProxyPath], env };
 }
 
-function connectedAppsIntegration(
-  botId: string,
-  threadId: string,
-  wakeKind: "operator" | "routine" | "webhook" = "operator",
-  authorityId?: string,
-) {
-  const autonomyCapability = autonomyAuthority.issue({
-    botId,
-    threadId,
-    wakeKind,
-    ...(wakeKind === "routine" && authorityId ? { routineId: authorityId } : {}),
-    ...(wakeKind === "webhook" && authorityId ? { triggerId: authorityId } : {}),
-  });
+function connectedAppsIntegration(botId: string, threadId: string, autonomyCapability: string | null) {
   return composio.mcpIntegration(cfg, {
     harnessUrl: `http://127.0.0.1:${PORT}`,
     commsToken: COMMS_TOKEN,
@@ -688,6 +741,38 @@ function connectedAppsIntegration(
     threadId,
     ...(autonomyCapability ? { autonomyCapability } : {}),
   });
+}
+
+function turnAutonomyCapability(
+  botId: string,
+  threadId: string,
+  wakeKind: "operator" | "routine" | "webhook",
+  authorityId?: string,
+): string | null {
+  return autonomyAuthority.issue({
+    botId,
+    threadId,
+    wakeKind,
+    ...(wakeKind === "routine" && authorityId ? { routineId: authorityId } : {}),
+    ...(wakeKind === "webhook" && authorityId ? { triggerId: authorityId } : {}),
+  });
+}
+
+function guardedCustomMcpIntegrations(autonomyCapability: string | null) {
+  const custom = customMcpServers(cfg);
+  if (process.env.OMB_CUSTOM_MCP_DIRECT_COMPAT === "1") return custom;
+  return Object.fromEntries(Object.keys(custom).map((name) => [name, {
+    command: process.execPath,
+    args: [SPAWNED_PROXIES.customMcp],
+    env: {
+      ...AGENTS_NODE_FLAG,
+      OMB_HARNESS_URL: `http://127.0.0.1:${PORT}`,
+      OMB_COMMS_TOKEN: COMMS_TOKEN,
+      OMB_CUSTOM_MCP_SERVER: name,
+      OMB_CUSTOM_MCP_SESSION: randomUUID(),
+      ...(autonomyCapability ? { OMB_AUTONOMY_CAPABILITY: autonomyCapability } : {}),
+    },
+  }]));
 }
 
 // ── computer control (who is driving) ──────────────────────────────────
@@ -1620,14 +1705,153 @@ function closeOpenApprovals(threadId: string): void {
   for (const message of store.messagesFor(threadId)) {
     const card = message.card;
     if (!card?.requestId || card.answered || card.dismissed) continue;
-    if (card.routineRequest || card.skillRequest) continue;
+    if (card.routineRequest || card.skillRequest || card.outboundProposal) continue;
     store.patchMessage(threadId, message.id, { card: { ...card, answered: "unavailable", dismissed: true } });
     askMessageByRequest.delete(`${threadId}:${card.requestId}`);
   }
 }
 
+function outboundCard(proposal: OutboundProposal) {
+  return {
+    schema: proposal.schema,
+    proposalId: proposal.proposalId,
+    digest: proposal.canonicalDigest,
+    channel: proposal.channel,
+    accountAlias: proposal.accountAlias,
+    purpose: proposal.purpose,
+    recipients: proposal.recipients,
+    ...(proposal.subject ? { subject: proposal.subject } : {}),
+    attachmentCount: proposal.attachments.length,
+    status: proposal.status,
+    rationale: proposal.rationale,
+  };
+}
+
+function outboundSubtitle(proposal: OutboundProposal): string {
+  const subject = proposal.subject ? `Subject: ${proposal.subject}\n` : "";
+  const attachments = proposal.attachments.length
+    ? `\nAttachments: ${proposal.attachments.map((item) => `${item.name} (${item.sha256})`).join(", ")}`
+    : "";
+  return [
+    `Account: ${proposal.accountAlias} · ${proposal.channel} · ${proposal.purpose}`,
+    `To: ${proposal.recipients.join(", ")}`,
+    `${subject}${proposal.body}`,
+    attachments,
+    `Why this draft: ${proposal.rationale}`,
+    `Proof: Communications ${proposal.communicationsReceipt.id}; Human Voice ${proposal.humanVoiceReceipt.id}; ${proposal.sourceReferences.length} current source${proposal.sourceReferences.length === 1 ? "" : "s"}`,
+  ].filter(Boolean).join("\n\n");
+}
+
+async function resolveOutboundProposal(
+  res: ServerResponse,
+  args: { botId: string; botName?: string; threadId: string; requestId: string; behavior: "allow" | "deny" | "answer"; message?: unknown },
+): Promise<boolean> {
+  const cardMessage = store.messagesFor(args.threadId).find(
+    (message) => message.card?.requestId === args.requestId && message.card.outboundProposal,
+  );
+  const card = cardMessage?.card;
+  if (!cardMessage || !card?.outboundProposal) return false;
+  const proposal = outboundProposals.get(card.outboundProposal.proposalId);
+  if (!proposal || proposal.originatingThreadId !== args.threadId || proposal.coordinatorBotId !== args.botId) {
+    json(res, 409, { error: "the protected outbound proposal is unavailable or belongs to another conversation" });
+    return true;
+  }
+  if (card.outboundProposal.digest !== proposal.canonicalDigest || !outboundProposals.actionStillMatches(proposal)) {
+    json(res, 422, { error: "the outbound proposal changed after review; cancel it and create a new proposal" });
+    return true;
+  }
+  if (proposal.status !== "pending") {
+    json(res, 200, { ok: true, outcome: proposal.status, alreadySettled: true });
+    return true;
+  }
+
+  const revise = args.behavior === "answer" && String(args.message ?? "").trim().toLowerCase() === "revise";
+  if (args.behavior !== "allow") {
+    const status = revise ? "revision_requested" : "cancelled";
+    const settled = outboundProposals.transition(proposal.proposalId, ["pending"], status, {
+      outcomeReason: revise ? "operator requested revision" : "operator cancelled",
+    });
+    store.patchMessage(args.threadId, cardMessage.id, {
+      card: { ...card, answered: revise ? "revise" : "deny", dismissed: true, outboundProposal: outboundCard(settled) },
+    });
+    appendDecision(DATA_DIR, {
+      threadId: args.threadId,
+      requestId: args.requestId,
+      botId: args.botId,
+      botName: args.botName,
+      tool: card.tool,
+      summary: `${proposal.channel} to ${proposal.recipients.join(", ")}`,
+      decision: revise ? "user-requested-revision" : "user-denied",
+      source: "user",
+    });
+    json(res, 200, { ok: true, outcome: status });
+    return true;
+  }
+
+  if (proposal.sourceReferences.some((source) => source.observedAt > Date.now() || source.freshUntil < Date.now())) {
+    json(res, 409, { error: "source evidence expired before approval; create a fresh proposal" });
+    return true;
+  }
+  const sending = outboundProposals.transition(proposal.proposalId, ["pending"], "sending");
+  const result = await outboundExecutor.execute(sending);
+  const settled = outboundProposals.transition(proposal.proposalId, ["sending"], result.status, {
+    providerReadback: result.providerReadback,
+    ...(result.reason ? { outcomeReason: result.reason } : {}),
+  });
+  const success = result.status === "sent";
+  store.patchMessage(args.threadId, cardMessage.id, {
+    card: {
+      ...card,
+      answered: success ? "allow" : "failed",
+      dismissed: true,
+      held: success ? undefined : result.reason,
+      outboundProposal: outboundCard(settled),
+    },
+  });
+  autonomyDb.recordDecision({
+    schema: AUTONOMY_DECISION_SCHEMA,
+    allowed: success,
+    code: success ? "exact-operator-approval" : "provider-send-failed",
+    reason: success ? "executed exact stored outbound arguments after provider reread" : result.reason ?? "send failed",
+    ruleId: `proposal:${proposal.proposalId}`,
+    effect: "thread_reply",
+    tool: proposal.providerAction.tool,
+    accountAlias: proposal.accountAlias,
+  }, proposal.providerAction, result.providerResultId);
+  appendDecision(DATA_DIR, {
+    threadId: args.threadId,
+    requestId: args.requestId,
+    botId: args.botId,
+    botName: args.botName,
+    tool: card.tool,
+    summary: `${proposal.channel} to ${proposal.recipients.join(", ")}`,
+    decision: success ? "user-approved" : "provider-failed",
+    source: "user",
+  });
+  store.appendMessage(args.threadId, {
+    role: "bot",
+    kind: "activity",
+    tool: {
+      name: success
+        ? `Sent via ${proposal.channel}${result.providerResultId ? ` · receipt ${result.providerResultId}` : ""}${result.recovered ? " · confirmed by readback" : ""}`
+        : `Send held — ${result.reason ?? "provider failure"}`,
+      ok: success,
+    },
+  });
+  json(res, success ? 200 : 409, { ok: success, outcome: result.status, recovered: result.recovered, providerResultId: result.providerResultId, error: result.reason });
+  return true;
+}
+
 function requestBehavior(value: unknown): "allow" | "deny" | "answer" | null {
   return value === "allow" || value === "deny" || value === "answer" ? value : null;
+}
+
+function outboundConversationChoice(text: string): { behavior: "allow" | "deny" | "answer"; message?: string } | null {
+  const normalized = text.trim().toLowerCase().replace(/[.!]$/, "");
+  if (normalized === "send" || normalized === "send it" || normalized === "approve and send") return { behavior: "allow" };
+  if (normalized === "revise") return { behavior: "answer", message: "revise" };
+  if (normalized === "cancel") return { behavior: "deny" };
+  return null;
 }
 // the last settled assistant text per thread, so a "finished" notification
 // can carry what the bot actually said
@@ -3091,20 +3315,20 @@ async function startTurn(
       // them — a key in the config says the connections exist, not that
       // this engine can reach them — and only to a bot the user has not
       // switched off: the key is workspace-wide, the grant is per bot.
+      const wakeKind = opts?.automationSource === "webhook"
+        ? "webhook"
+        : opts?.automationSource === "schedule" || opts?.automationSource === "manual"
+          ? "routine"
+          : "operator";
+      const autonomyCapability = turnAutonomyCapability(bot.id, threadId, wakeKind, opts?.authorityId);
       if (bot.composio !== false && composio.configured(cfg) && instance.adapter.capabilities.composioMcp === true) {
-        const wakeKind = opts?.automationSource === "webhook"
-          ? "webhook"
-          : opts?.automationSource === "schedule" || opts?.automationSource === "manual"
-            ? "routine"
-            : "operator";
-        const connection = await connectedAppsIntegration(bot.id, threadId, wakeKind, opts?.authorityId);
+        const connection = await connectedAppsIntegration(bot.id, threadId, autonomyCapability);
         if (connection) integrations.composio = connection;
       }
-      // user-configured MCP servers (config.json mcpServers): same rule as
-      // composio — only to a driver that can mount them. Their tools are
-      // never pre-allowed, so every call rides the normal permission flow.
+      // User-configured MCP servers are credential-free guarded proxies. The
+      // same turn capability authorizes both Composio and custom-MCP calls.
       if (instance.adapter.capabilities.customMcp === true) {
-        const custom = customMcpServers(cfg);
+        const custom = guardedCustomMcpIntegrations(autonomyCapability);
         if (Object.keys(custom).length) integrations.custom = custom;
       }
       // CLI engines work inside the bot's own workspace directory rather
@@ -4111,13 +4335,11 @@ async function runGroupMemberTurn(
   if (selectedSkills.some((skill) => skill.manifest.requiredCapabilities.includes("phoneMcp"))) {
     integrations.phone = phoneIntegration();
   }
+  const wakeKind = isUnattended(bot.id) ? "webhook" : "operator";
+  const autonomyCapability = turnAutonomyCapability(bot.id, threadId, wakeKind);
   try {
     if (bot.composio !== false && composio.configured(cfg) && instance.adapter.capabilities.composioMcp === true) {
-      const connection = await connectedAppsIntegration(
-        bot.id,
-        threadId,
-        isUnattended(bot.id) ? "webhook" : "operator",
-      );
+      const connection = await connectedAppsIntegration(bot.id, threadId, autonomyCapability);
       if (connection) integrations.composio = connection;
     }
   } catch (error) {
@@ -4131,9 +4353,9 @@ async function runGroupMemberTurn(
     onDispatchError?.(message);
     return true;
   }
-  // user-configured MCP servers: same gating as the 1:1 site above.
+  // user-configured MCP servers: same guarded capability as the 1:1 site.
   if (instance.adapter.capabilities.customMcp === true) {
-    const custom = customMcpServers(cfg);
+    const custom = guardedCustomMcpIntegrations(autonomyCapability);
     if (Object.keys(custom).length) integrations.custom = custom;
   }
   // Connected-app discovery is intentionally awaited before a provider owns
@@ -5806,6 +6028,16 @@ function persistMcpServers(next: Record<string, unknown>): void {
   cfg.mcpServers = next;
 }
 
+function mcpServerWithResolvedSecrets(name: string, server: ReturnType<typeof parseStoredMcpServer> & { ok: true }) {
+  const resolved = resolveMcpSecrets(name, server.server.env);
+  if (resolved.status !== "resolved") return null;
+  return { ...server.server, env: resolved.env };
+}
+
+function withoutInlineMcpSecrets(server: { command: string; args: string[]; env: Record<string, string>; enabled: boolean }) {
+  return { ...server, env: Object.fromEntries(Object.keys(server.env).map((key) => [key, ""])) };
+}
+
 /** Rebuild the provider fleet after a config change so new keys take
  * effect without a server restart (kills any in-flight turns). */
 async function reloadProviders() {
@@ -6249,6 +6481,77 @@ const server = createServer(async (req, res) => {
         });
         return json(res, 201, proposed);
       }
+      if (method === "POST" && path === "/api/internal/outbound-proposals") {
+        const body = await readBody(req);
+        const fromBotId = String(body?.fromBotId ?? "");
+        const fromThreadId = String(body?.fromThreadId ?? "");
+        const from = store.bot(fromBotId);
+        if (!from || !from.chiefOfStaff || from.name.trim().toLowerCase() !== "poppy") {
+          return json(res, 403, { error: "only Poppy may coordinate an outbound proposal" });
+        }
+        const owner = connectorThread(from.id, fromThreadId);
+        if (!owner) return json(res, 403, { error: "source conversation does not belong to Poppy" });
+        if (!body?.proposal || typeof body.proposal !== "object" || Array.isArray(body.proposal)) {
+          return json(res, 400, { error: "proposal object required" });
+        }
+        const submitted = body.proposal as Record<string, unknown>;
+        const terminalReceipt = (value: unknown, requiredName: string) => {
+          const id = value && typeof value === "object" && !Array.isArray(value)
+            ? String((value as Record<string, unknown>).id ?? "")
+            : "";
+          const receipt = id ? findDelegationReceipt(id) : null;
+          return receipt
+            && receipt.sourceThreadId === fromThreadId
+            && receipt.status === "done"
+            && receipt.toBotName.trim().toLowerCase() === requiredName.toLowerCase()
+            ? { id: receipt.id, status: "completed" as const, finishedAt: receipt.finishedAt }
+            : null;
+        };
+        const communicationsReceipt = terminalReceipt(submitted.communicationsReceipt, "Communications");
+        const humanVoiceReceipt = terminalReceipt(submitted.humanVoiceReceipt, "Human Voice");
+        if (!communicationsReceipt || !humanVoiceReceipt) {
+          return json(res, 409, { error: "terminal Communications and Human Voice delegation receipts are required" });
+        }
+        let proposal: OutboundProposal;
+        try {
+          proposal = outboundProposals.create({
+            ...submitted,
+            originatingThreadId: fromThreadId,
+            coordinatorBotId: from.id,
+            communicationsReceipt,
+            humanVoiceReceipt,
+          });
+        } catch (error) {
+          return json(res, 400, { error: error instanceof Error ? error.message : "invalid outbound proposal" });
+        }
+        if (proposal.status === "held") {
+          return json(res, 202, { proposalId: proposal.proposalId, status: proposal.status, reason: proposal.outcomeReason });
+        }
+        const message = store.appendMessage(fromThreadId, {
+          role: "bot",
+          kind: "options",
+          ...(owner.group ? { from: { botId: from.id, name: from.name, color: from.color } } : {}),
+          card: {
+            title: "Send this reviewed draft?",
+            subtitle: outboundSubtitle(proposal),
+            options: ["Send", "Revise", "Cancel"],
+            requestId: proposal.proposalId,
+            tool: "outbound_proposal",
+            outboundProposal: outboundCard(proposal),
+          },
+        });
+        appendDecision(DATA_DIR, {
+          threadId: fromThreadId,
+          requestId: proposal.proposalId,
+          botId: from.id,
+          botName: from.name,
+          tool: "outbound_proposal",
+          summary: `${proposal.channel} to ${proposal.recipients.join(", ")}`,
+          decision: "card-shown",
+          source: "outbound-proposal",
+        });
+        return json(res, 201, { proposalId: proposal.proposalId, messageId: message.id, status: proposal.status, digest: proposal.canonicalDigest });
+      }
       if (method === "GET" && path === "/api/internal/skills") {
         if (!skillRecorderEnabled(cfg)) return json(res, 403, { error: "learned skills are not enabled" });
         const fromBotId = String(url.searchParams.get("fromBotId") ?? "");
@@ -6684,6 +6987,60 @@ const server = createServer(async (req, res) => {
         if (upstream.transportSessionId) headers["mcp-session-id"] = upstream.transportSessionId;
         res.writeHead(upstream.status, headers);
         return res.end(Buffer.from(upstream.bytes));
+      }
+      if (path === "/api/internal/custom-mcp/mcp") {
+        const serverName = url.searchParams.get("server") ?? "";
+        const sessionId = Array.isArray(req.headers["x-openmaus-mcp-session"])
+          ? req.headers["x-openmaus-mcp-session"][0]
+          : req.headers["x-openmaus-mcp-session"];
+        if (!/^[a-z][a-z0-9_-]{0,31}$/.test(serverName)) {
+          return json(res, 400, { error: "invalid custom MCP server" });
+        }
+        if (method === "DELETE") {
+          if (sessionId) customMcpManager.close(sessionId);
+          res.writeHead(204, { "cache-control": "no-store" });
+          return res.end();
+        }
+        if (method !== "POST") return json(res, 405, { error: "method not allowed" });
+        const target = customMcpServers(cfg)[serverName];
+        if (!target) return json(res, 404, { error: "custom MCP server is unavailable" });
+        const body = await readBody(req);
+        const extracted = actionsFromCustomMcpPayload(serverName, body);
+        const capability = Array.isArray(req.headers["x-openmaus-autonomy-capability"])
+          ? req.headers["x-openmaus-autonomy-capability"][0]
+          : req.headers["x-openmaus-autonomy-capability"];
+        if (extracted.error) {
+          const action: ToolAction = {
+            transport: "custom-mcp",
+            server: serverName,
+            tool: String(body?.params?.name ?? "unknown"),
+            arguments: {},
+          };
+          const decision: AutonomyDecision = {
+            schema: AUTONOMY_DECISION_SCHEMA,
+            allowed: false,
+            code: "malformed-action",
+            reason: extracted.error,
+            tool: action.tool,
+          };
+          autonomyDb.recordDecision(decision, action);
+          return json(res, 200, deniedMcpResponse(body?.id, [decision]));
+        }
+        const decisions = extracted.actions.map((action) => autonomyAuthority.authorize(capability, action));
+        if (decisions.some((decision) => !decision.allowed)) {
+          decisions.forEach((decision, index) => autonomyDb.recordDecision(decision, extracted.actions[index]!));
+          return json(res, 200, deniedMcpResponse(body?.id, decisions));
+        }
+        const relayed = await customMcpManager.relay(serverName, target, body, sessionId);
+        const responseBytes = Buffer.from(JSON.stringify(relayed.response ?? {}));
+        const providerId = providerReceiptId(responseBytes);
+        decisions.forEach((decision, index) => autonomyDb.recordDecision(decision, extracted.actions[index]!, providerId));
+        res.setHeader("x-openmaus-mcp-session", relayed.sessionId);
+        if (!relayed.response) {
+          res.writeHead(204, { "cache-control": "no-store" });
+          return res.end();
+        }
+        return json(res, 200, relayed.response);
       }
       // ── computer control: proxies read the hold, bots plead for help ──
       if (path === "/api/internal/computer-control") {
@@ -8767,6 +9124,18 @@ const server = createServer(async (req, res) => {
       if (!store.taskByThread(bot.id, threadId)) {
         return json(res, 409, { error: "the bot switched tasks before it could receive the message" });
       }
+      const choice = outboundConversationChoice(text);
+      const pendingOutbound = choice ? outboundProposals.pendingForThread(threadId) : [];
+      if (choice && pendingOutbound.length === 1 && pendingOutbound[0]!.coordinatorBotId === bot.id) {
+        store.appendMessage(threadId, { role: "user", kind: "text", text });
+        if (await resolveOutboundProposal(res, {
+          botId: bot.id,
+          botName: bot.name,
+          threadId,
+          requestId: pendingOutbound[0]!.proposalId,
+          ...choice,
+        })) return;
+      }
       const sendId = parseSendId(body.sendId);
       const replyTo = resolveReplyTarget(threadId, body.replyToId);
       const receipt = await sendSequencer.run(
@@ -8936,6 +9305,14 @@ const server = createServer(async (req, res) => {
       const behavior = requestBehavior(body.behavior);
       const reviewedSha256 = typeof body.reviewedSha256 === "string" ? body.reviewedSha256 : undefined;
       if (!behavior) return json(res, 400, { error: "behavior must be allow, deny, or answer" });
+      if (await resolveOutboundProposal(res, {
+        botId: bot.id,
+        botName: bot.name,
+        threadId: bot.threadId,
+        requestId: String(body.requestId),
+        behavior,
+        message: body.message,
+      })) return;
       if (resolveAndSendRoutine(res, {
         botId: bot.id,
         botName: bot.name,
@@ -8971,6 +9348,22 @@ const server = createServer(async (req, res) => {
       const reviewedSha256 = typeof body.reviewedSha256 === "string" ? body.reviewedSha256 : undefined;
       if (!behavior) return json(res, 400, { error: "behavior must be allow, deny, or answer" });
       const requestId = String(body.requestId);
+      const outboundMessage = store.messagesFor(threadId).find(
+        (message) => message.card?.requestId === requestId && message.card.outboundProposal,
+      );
+      if (outboundMessage?.card?.outboundProposal) {
+        const coordinatorId = outboundMessage.from?.botId ?? store.botByThread(threadId)?.id;
+        const coordinator = coordinatorId ? store.bot(coordinatorId) : null;
+        if (!coordinator) return json(res, 409, { error: "the outbound proposal coordinator is unavailable" });
+        if (await resolveOutboundProposal(res, {
+          botId: coordinator.id,
+          botName: coordinator.name,
+          threadId,
+          requestId,
+          behavior,
+          message: body.message,
+        })) return;
+      }
       const skillCard = store.messagesFor(threadId).find(
         (message) => message.card?.requestId === requestId && message.card.skillRequest,
       );
@@ -9435,6 +9828,8 @@ const server = createServer(async (req, res) => {
       if (raw === undefined) return json(res, 404, { error: "MCP server not found." });
       const parsed = parseStoredMcpServer(mcpTest[1], raw);
       if (!parsed.ok) return json(res, 400, { error: parsed.error });
+      const resolvedServer = mcpServerWithResolvedSecrets(mcpTest[1], parsed);
+      if (!resolvedServer) return json(res, 409, { error: "MCP credentials are missing or invalid." });
       if (mcpProbesInFlight >= MAX_CONCURRENT_MCP_PROBES) {
         return json(res, 429, { error: "Two MCP connection tests are already running." });
       }
@@ -9445,7 +9840,7 @@ const server = createServer(async (req, res) => {
       res.once("close", disconnect);
       mcpProbesInFlight += 1;
       try {
-        return json(res, 200, await probeMcpServer(parsed.server, undefined, controller.signal));
+        return json(res, 200, await probeMcpServer(resolvedServer, undefined, controller.signal));
       } finally {
         res.off("close", disconnect);
         mcpProbesInFlight -= 1;
@@ -9473,7 +9868,9 @@ const server = createServer(async (req, res) => {
           enabled: body?.enabled,
         });
         if (!parsed.ok) return json(res, 400, { error: parsed.error });
-        persistMcpServers({ ...current, [name]: parsed.server });
+        if (DESKTOP_MANAGED) await persistDesktopMcpSecrets(name, parsed.server.env);
+        const stored = DESKTOP_MANAGED ? withoutInlineMcpSecrets(parsed.server) : parsed.server;
+        persistMcpServers({ ...current, [name]: stored });
         return json(res, 201, mcpServerResponse());
       } finally {
         mcpConfigBusy = false;
@@ -9494,6 +9891,7 @@ const server = createServer(async (req, res) => {
         if (method === "DELETE") {
           const next = { ...current };
           delete next[name];
+          if (DESKTOP_MANAGED) await persistDesktopMcpSecrets(name, null);
           persistMcpServers(next);
           return json(res, 200, mcpServerResponse());
         }
@@ -9510,9 +9908,12 @@ const server = createServer(async (req, res) => {
           return json(res, 200, mcpServerResponse());
         }
 
-        const parsed = parseMcpServerMutation(name, body, existing.server);
+        const resolvedExisting = mcpServerWithResolvedSecrets(name, existing);
+        const parsed = parseMcpServerMutation(name, body, resolvedExisting ?? existing.server);
         if (!parsed.ok) return json(res, 400, { error: parsed.error });
-        persistMcpServers({ ...current, [name]: parsed.server });
+        if (DESKTOP_MANAGED) await persistDesktopMcpSecrets(name, parsed.server.env);
+        const stored = DESKTOP_MANAGED ? withoutInlineMcpSecrets(parsed.server) : parsed.server;
+        persistMcpServers({ ...current, [name]: stored });
         return json(res, 200, mcpServerResponse());
       } finally {
         mcpConfigBusy = false;
@@ -10089,6 +10490,8 @@ const gracefulShutdown = createGracefulShutdown({
       routines?.stop();
       calendarCalls?.stop();
       webhookIngress?.server.close();
+      customMcpManager.dispose();
+      autonomyDb.close();
     },
     () => releaseAllBrowserCapabilities(),
     () => registry.disposeAll(),
