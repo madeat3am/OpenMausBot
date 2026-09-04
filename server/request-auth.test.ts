@@ -89,6 +89,7 @@ describe("scopes", () => {
     expect(requiredScope("GET", "/api/instances")).toBe("client");
     expect(requiredScope("POST", "/api/mcp/servers")).toBe("admin");
     expect(requiredScope("POST", "/api/mcp/servers/github/test")).toBe("admin");
+    expect(requiredScope("PATCH", "/api/connectors/todoist/accounts/ca_one")).toBe("admin");
     expect(requiredScope("GET", "/api/mcp/servers")).toBe("client");
     expect(requiredScope("POST", "/api/bots/x/messages")).toBe("client");
     expect(requiredScope("POST", "/api/auth/pair")).toBe("client");

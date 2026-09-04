@@ -8,6 +8,13 @@ MCP traffic, and returns short-lived Connect Links to the local app.
 The desktop never receives the project key. Authorization links are returned
 only on demand and are never persisted in chat messages.
 
+Existing account aliases can be repaired through the authenticated
+`PATCH /v1/connectors/:toolkit/accounts/:accountId` broker route. OpenMausBot
+exposes that operation only to a direct loopback host operator; it is not part
+of the connector MCP or any bot tool surface. The broker proves the account
+belongs to the installation's stable Composio user and toolkit, applies one
+exact alias, and requires provider readback before reporting success.
+
 Deployment for this repository:
 
 1. `pnpm broker:types`

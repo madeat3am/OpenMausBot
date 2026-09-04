@@ -14,6 +14,7 @@ import {
   removeAccount,
   removeService,
   setManagedBrokerAccess,
+  updateAccountAlias,
 } from "./composio.ts";
 
 let api: Server;
@@ -36,6 +37,7 @@ let nextReadbackSafety: {
   sandbox?: { enable?: boolean };
   workbench?: { enable?: boolean };
 } | undefined;
+let githubPersonalAlias = "personal";
 
 beforeAll(async () => {
   api = createServer(async (req, res) => {
@@ -139,7 +141,7 @@ beforeAll(async () => {
       return res.end(JSON.stringify({
         items: [
           { id: "ca_github_work", alias: "work", toolkit: { slug: "github" }, status: "ACTIVE", updated_at: "2026-08-17T08:00:00Z" },
-          { id: "ca_github_personal", alias: "personal", toolkit: { slug: "github" }, status: "ACTIVE", updated_at: "2026-08-17T09:00:00Z" },
+          { id: "ca_github_personal", alias: githubPersonalAlias, toolkit: { slug: "github" }, status: "ACTIVE", updated_at: "2026-08-17T09:00:00Z" },
           { id: "ca_notion", alias: "team", toolkit: { slug: "notion" }, status: "INITIATED", updated_at: "2026-08-17T08:01:00Z" },
           { id: "ca_linear", toolkit: { slug: "linear" }, status: "EXPIRED", updated_at: "2026-08-17T08:02:00Z" },
         ],
@@ -165,6 +167,11 @@ beforeAll(async () => {
     if (req.method === "DELETE" && url.pathname.startsWith("/api/v3.1/connected_accounts/ca_")) {
       res.writeHead(200, { "content-type": "application/json" });
       return res.end(JSON.stringify({ success: true }));
+    }
+    if (req.method === "PATCH" && url.pathname === "/api/v3.1/connected_accounts/ca_github_personal") {
+      githubPersonalAlias = body.alias;
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ id: "ca_github_personal", alias: githubPersonalAlias, status: "ACTIVE" }));
     }
     res.writeHead(404, { "content-type": "application/json" });
     res.end(JSON.stringify({ error: "not found" }));
@@ -397,6 +404,24 @@ describe.sequential("Composio Sessions", () => {
     expect(normalizeAccountAlias("  personal gmail  ")).toBe("personal gmail");
     expect(() => normalizeAccountAlias("bad\nalias")).toThrow(/printable/i);
     expect(() => normalizeAccountAlias("x".repeat(65))).toThrow(/1-64/i);
+  });
+
+  it("updates an exact owned alias and requires provider readback", async () => {
+    const cfg: AppConfig = {
+      composio: { apiKey: "ak_test", userId: "openmausbot_existing", sessionId: "trs_test" },
+    };
+    try {
+      await expect(updateAccountAlias(cfg, "github", "ca_github_personal", "madeat3am")).resolves.toEqual({
+        updated: 1,
+        alias: "madeat3am",
+        status: "ACTIVE",
+      });
+      expect(calls.filter((call) => call.method === "PATCH").at(-1)?.body).toEqual({ alias: "madeat3am" });
+      await expect(updateAccountAlias(cfg, "github", "ca_other_user", "nobody")).resolves.toEqual({ updated: 0 });
+      await expect(updateAccountAlias(cfg, "github", "../other", "nobody")).rejects.toThrow(/invalid connected-account ID/i);
+    } finally {
+      githubPersonalAlias = "personal";
+    }
   });
 
   it("mounts the Session MCP endpoint with the project key header", async () => {

@@ -354,6 +354,9 @@ const authorizeService = (slug: string, alias?: string) => connectorSidecarConfi
 const removeAccount = (slug: string, accountId: string) => connectorSidecarConfigured()
   ? callComposioSidecar<Awaited<ReturnType<typeof composio.removeAccount>>>("removeAccount", [slug, accountId])
   : composio.removeAccount(cfg, slug, accountId);
+const updateAccountAlias = (slug: string, accountId: string, alias: string) => connectorSidecarConfigured()
+  ? callComposioSidecar<Awaited<ReturnType<typeof composio.updateAccountAlias>>>("updateAccountAlias", [slug, accountId, alias])
+  : composio.updateAccountAlias(cfg, slug, accountId, alias);
 const removeService = (slug: string) => connectorSidecarConfigured()
   ? callComposioSidecar<Awaited<ReturnType<typeof composio.removeService>>>("removeService", [slug])
   : composio.removeService(cfg, slug);
@@ -10605,6 +10608,13 @@ const server = createServer(async (req, res) => {
       return json(res, 200, await authorizeService(m[1], body.alias));
     }
     m = path.match(/^\/api\/connectors\/([\w-]+)\/accounts\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})$/);
+    if (m && method === "PATCH") {
+      if (auth.kind !== "loopback") {
+        return json(res, 403, { error: "connected-account identity changes require the host operator" });
+      }
+      const body = await readBody(req);
+      return json(res, 200, await updateAccountAlias(m[1], m[2], String(body.alias ?? "")));
+    }
     if (m && method === "DELETE") return json(res, 200, await removeAccount(m[1], m[2]));
     m = path.match(/^\/api\/connectors\/([\w-]+)$/);
     if (m && method === "DELETE") return json(res, 200, await removeService(m[1]));

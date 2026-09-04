@@ -557,6 +557,56 @@ async function disconnectAccount(
   return json({ removed: 1 });
 }
 
+async function updateAccountAlias(
+  slug: string,
+  accountId: string,
+  alias: string | undefined,
+  installation: InstallationRow,
+  env: Env,
+  ctx: ExecutionContext,
+) {
+  if (!ACCOUNT_ID.test(accountId)) return json({ error: "Invalid connected-account ID" }, 400);
+  if (!alias) return json({ error: "Account alias is required" }, 400);
+  await ensureSession(installation, env, ctx);
+  const accounts = await listConnectedAccounts(env, installation.composio_user_id, [slug]);
+  const owned = accounts.find((account) =>
+    account.id === accountId && account.toolkit?.slug?.toLowerCase() === slug
+  );
+  if (!owned) return json({ updated: 0 }, 404);
+  if (accounts.some((account) =>
+    account.id !== accountId
+      && account.toolkit?.slug?.toLowerCase() === slug
+      && account.alias?.trim().toLowerCase() === alias.toLowerCase()
+  )) {
+    return json({ error: `Account alias "${alias}" is already in use for ${slug}` }, 409);
+  }
+
+  let updateError: unknown;
+  try {
+    const response = await composioRequest(env, `/connected_accounts/${encodeURIComponent(accountId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ alias }),
+    });
+    if (!response.ok) updateError = new Error(await upstreamError(response, `Alias update failed (${response.status})`));
+  } catch (error) {
+    // PATCH is idempotent for one exact alias. On an ambiguous transport
+    // failure, authoritative readback decides the outcome; never replay it.
+    updateError = error;
+  }
+
+  const readback = await listConnectedAccounts(env, installation.composio_user_id, [slug]);
+  const verified = readback.find((account) =>
+    account.id === accountId
+      && account.toolkit?.slug?.toLowerCase() === slug
+      && account.alias?.trim() === alias
+  );
+  if (!verified) {
+    if (updateError instanceof Error) throw updateError;
+    throw new Error("Connected-account alias readback did not match the requested value");
+  }
+  return json({ updated: 1, alias, status: verified.status || "UNKNOWN" });
+}
+
 async function requestAlias(request: Request) {
   if (!request.body) return undefined;
   const declared = Number(request.headers.get("content-length") ?? "0");
@@ -596,6 +646,9 @@ async function route(request: Request, env: Env, ctx: ExecutionContext) {
   if (request.method === "GET" && url.pathname === "/v1/connectors/connected") return connectedServices(installation, env, ctx);
   if (request.method === "GET" && url.pathname === "/v1/connectors") return connectionStatus(url, installation, env, ctx);
   const accountMatch = url.pathname.match(/^\/v1\/connectors\/([a-z0-9][a-z0-9_-]{0,80})\/accounts\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})$/);
+  if (accountMatch && request.method === "PATCH") {
+    return updateAccountAlias(accountMatch[1], accountMatch[2], await requestAlias(request), installation, env, ctx);
+  }
   if (accountMatch && request.method === "DELETE") {
     return disconnectAccount(accountMatch[1], accountMatch[2], installation, env, ctx);
   }
@@ -628,4 +681,5 @@ export {
   parseSession,
   requestAlias,
   sha256,
+  updateAccountAlias,
 };

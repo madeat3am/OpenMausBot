@@ -11,6 +11,7 @@ import {
   parseSession,
   requestAlias,
   sha256,
+  updateAccountAlias,
 } from "./index";
 
 const multiAccount = {
@@ -83,6 +84,41 @@ describe("connected-apps broker boundaries", () => {
 
   it("hashes installation tokens before storage", async () => {
     await expect(sha256("openmausbot")).resolves.toBe("63c74f70a9d4681c334e84001935955a75245ea5b16b9c37c808e85c69963705");
+  });
+
+  it("updates only an owned account alias and verifies provider readback", async () => {
+    const fetchCalls: Array<{ url: string; init?: RequestInit }> = [];
+    const { env, ctx } = testEnv(fetchCalls);
+    let alias: string | undefined;
+    vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      fetchCalls.push({ url, init });
+      if (url.endsWith("/tool_router/session/trs_multi")) return Response.json(session("trs_multi", "omb_stable"));
+      if (url.includes("/connected_accounts?") && !init?.method) {
+        return Response.json({
+          items: [{ id: "ca_todoist", alias, toolkit: { slug: "todoist" }, status: "ACTIVE" }],
+        });
+      }
+      if (url.endsWith("/connected_accounts/ca_todoist") && init?.method === "PATCH") {
+        alias = JSON.parse(String(init.body)).alias;
+        return Response.json({ id: "ca_todoist", alias, status: "ACTIVE" });
+      }
+      return Response.json({ error: "not found" }, { status: 404 });
+    });
+
+    const installation = {
+      id: "install-1",
+      composio_user_id: "omb_stable",
+      session_id: "trs_multi",
+      disabled_at: null,
+    };
+    const response = await updateAccountAlias("todoist", "ca_todoist", "Trey", installation, env as never, ctx as never);
+    expect(await response.json()).toEqual({ updated: 1, alias: "Trey", status: "ACTIVE" });
+    expect(fetchCalls.filter((call) => call.init?.method === "PATCH")).toHaveLength(1);
+
+    const denied = await updateAccountAlias("todoist", "ca_other", "Trey", installation, env as never, ctx as never);
+    expect(denied.status).toBe(404);
+    expect(fetchCalls.filter((call) => call.init?.method === "PATCH")).toHaveLength(1);
   });
 
   it("creates Sessions with explicit multi-account selection", async () => {

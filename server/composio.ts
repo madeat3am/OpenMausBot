@@ -103,6 +103,11 @@ const connectorServiceSchema = z.object({
 });
 const connectorServicesResponseSchema = z.object({ services: z.record(z.string(), connectorServiceSchema).optional() });
 const removalResponseSchema = z.object({ removed: z.number() });
+const aliasUpdateResponseSchema = z.object({
+  updated: z.number(),
+  alias: z.string().optional(),
+  status: z.string().optional(),
+});
 const authUrlResponseSchema = z.object({ url: z.string().optional() });
 const linkResponseSchema = z.object({ redirect_url: z.string().optional() });
 
@@ -835,6 +840,70 @@ export async function removeAccount(cfg: AppConfig, slug: string, accountId: str
   );
   if (!removed.ok) throw new Error(await responseError(removed, `Composio disconnect: HTTP ${removed.status}`));
   return { removed: 1 };
+}
+
+/** Update one owned account alias and require authoritative provider readback. */
+export async function updateAccountAlias(
+  cfg: AppConfig,
+  slug: string,
+  accountId: string,
+  requestedAlias: string | null | undefined,
+) {
+  if (!validAccountId(accountId)) throw inputError("Invalid connected-account ID");
+  const alias = normalizeAccountAlias(requestedAlias);
+  if (!alias) throw inputError("Account alias is required");
+  if (brokerAccess() || !cfg.composio?.apiKey) {
+    const response = await brokerRequest(
+      `/v1/connectors/${encodeURIComponent(slug)}/accounts/${encodeURIComponent(accountId)}`,
+      { method: "PATCH", body: JSON.stringify({ alias }) },
+    );
+    if (!response.ok) await throwBrokerError(response, `Connected apps: HTTP ${response.status}`);
+    return aliasUpdateResponseSchema.parse(await response.json());
+  }
+
+  const session = await ensureProjectSession(cfg);
+  const userId = session.config?.user_id ?? cfg.composio.userId;
+  if (!userId) throw new Error("Composio Session has no user ID");
+  const accounts = await listConnectedAccounts(cfg.composio.apiKey, userId, [slug]);
+  const owned = accounts.find((account) =>
+    account.id === accountId && account.toolkit?.slug?.toLowerCase() === slug.toLowerCase()
+  );
+  if (!owned) return { updated: 0 };
+  if (accounts.some((account) =>
+    account.id !== accountId
+      && account.toolkit?.slug?.toLowerCase() === slug.toLowerCase()
+      && account.alias?.trim().toLowerCase() === alias.toLowerCase()
+  )) {
+    throw inputError(`Account alias "${alias}" is already in use for ${slug}`, 409);
+  }
+
+  let updateError: unknown;
+  try {
+    const response = await fetch(
+      `${apiBase()}/connected_accounts/${encodeURIComponent(accountId)}`,
+      {
+        method: "PATCH",
+        headers: projectHeaders(cfg.composio.apiKey, true),
+        body: JSON.stringify({ alias }),
+        signal: AbortSignal.timeout(30_000),
+      },
+    );
+    if (!response.ok) updateError = new Error(await responseError(response, `Composio alias update: HTTP ${response.status}`));
+  } catch (error) {
+    updateError = error;
+  }
+
+  const readback = await listConnectedAccounts(cfg.composio.apiKey, userId, [slug]);
+  const verified = readback.find((account) =>
+    account.id === accountId
+      && account.toolkit?.slug?.toLowerCase() === slug.toLowerCase()
+      && account.alias?.trim() === alias
+  );
+  if (!verified) {
+    if (updateError instanceof Error) throw updateError;
+    throw new Error("Connected-account alias readback did not match the requested value");
+  }
+  return { updated: 1, alias, status: verified.status || "UNKNOWN" };
 }
 
 /** Mint a browser auth link for one service. Returns { url } or throws. */

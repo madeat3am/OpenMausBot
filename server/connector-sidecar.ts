@@ -178,6 +178,7 @@ const server = createServer(async (req, res) => {
         case "toolkitCard": result = await composio.toolkitCard(cfg, String(args[0] ?? "")); break;
         case "authorizeService": result = await composio.authorizeService(cfg, String(args[0] ?? ""), typeof args[1] === "string" ? args[1] : undefined); break;
         case "removeAccount": result = await composio.removeAccount(cfg, String(args[0] ?? ""), String(args[1] ?? "")); break;
+        case "updateAccountAlias": result = await composio.updateAccountAlias(cfg, String(args[0] ?? ""), String(args[1] ?? ""), typeof args[2] === "string" ? args[2] : undefined); break;
         case "removeService": result = await composio.removeService(cfg, String(args[0] ?? "")); break;
         default: return json(res, 400, { error: "unsupported connected-app control method" });
       }
