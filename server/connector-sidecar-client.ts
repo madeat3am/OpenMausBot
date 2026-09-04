@@ -104,3 +104,8 @@ export async function callComposioSidecar<T>(method: string, args: unknown[] = [
   const value = await request("/v1/composio-control", { method, args });
   return value.result as T;
 }
+
+export async function callCustomMcpSidecar<T>(method: string, args: unknown[] = []): Promise<T> {
+  const value = await request("/v1/custom-mcp-control", { method, args });
+  return value.result as T;
+}

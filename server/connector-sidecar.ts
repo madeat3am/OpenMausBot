@@ -12,8 +12,11 @@ import {
   type ToolAction,
 } from "./autonomy-policy.ts";
 import * as composio from "./composio.ts";
-import { customMcpServers, ensureDirs, loadConfig } from "./config.ts";
+import { customMcpServers, ensureDirs, loadConfig, saveConfig } from "./config.ts";
 import { CustomMcpManager } from "./custom-mcp-manager.ts";
+import { mcpSecretsDiagnostic, resolveMcpSecrets, updateExternalMcpSecrets } from "./mcp-secrets.ts";
+import { parseMcpServerMutation, parseStoredMcpServer, type StoredMcpServer } from "./mcp-registry.ts";
+import { probeMcpServer } from "./mcp-probe.ts";
 import type { ExactRelayAuthorization } from "./connector-sidecar-client.ts";
 
 const PORT = Number(process.env.OMB_CONNECTOR_SIDECAR_PORT || 8810);
@@ -95,6 +98,39 @@ function exactAuthorized(value: unknown, actions: ToolAction[]): boolean {
   return authority.consumeExact(exact.token, exact.kind, exact.action, exact.proposalDigest);
 }
 
+function withoutInlineSecrets(server: StoredMcpServer): StoredMcpServer {
+  return { ...server, env: Object.fromEntries(Object.keys(server.env).map((key) => [key, ""])) };
+}
+
+function currentMcpServers(): Record<string, unknown> {
+  const path = process.env.OMB_CONNECTOR_CONFIG_FILE?.trim();
+  if (!path) return cfg.mcpServers ?? {};
+  const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("connector MCP config is invalid");
+  const servers = (raw as { mcpServers?: unknown }).mcpServers;
+  if (servers === undefined) return {};
+  if (!servers || typeof servers !== "object" || Array.isArray(servers)) throw new Error("connector MCP config is invalid");
+  return servers as Record<string, unknown>;
+}
+
+function currentMcpConfig() {
+  return { ...cfg, mcpServers: currentMcpServers() };
+}
+
+function resolvedStoredServer(name: string): StoredMcpServer | null {
+  const raw = currentMcpServers()[name];
+  if (raw === undefined) return null;
+  const parsed = parseStoredMcpServer(name, raw);
+  if (!parsed.ok) throw new Error(parsed.error);
+  const secrets = resolveMcpSecrets(name, parsed.server.env);
+  return secrets.status === "resolved" ? { ...parsed.server, env: secrets.env } : null;
+}
+
+function saveMcpServers(next: Record<string, unknown>): void {
+  saveConfig({ mcpServers: next });
+  cfg.mcpServers = next;
+}
+
 const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
@@ -137,6 +173,72 @@ const server = createServer(async (req, res) => {
       }
       return json(res, 200, { status: 200, bodyBase64: "", contentType: "application/json", result });
     }
+    if (url.pathname === "/v1/custom-mcp-control" && req.method === "POST") {
+      const input = await body(req);
+      const args = Array.isArray(input.args) ? input.args : [];
+      const name = String(args[0] ?? "");
+      let result: unknown;
+      switch (input.method) {
+        case "diagnostic":
+          result = mcpSecretsDiagnostic(currentMcpServers());
+          break;
+        case "upsert": {
+          const activeServers = currentMcpServers();
+          const existingRaw = activeServers[name];
+          const existing = existingRaw === undefined ? undefined : parseStoredMcpServer(name, existingRaw);
+          if (existing && !existing.ok) return json(res, 400, { error: existing.error });
+          const resolved = existing ? resolvedStoredServer(name) : undefined;
+          const incoming = args[1];
+          const incomingEnv = incoming && typeof incoming === "object" && !Array.isArray(incoming)
+            ? (incoming as { env?: unknown }).env
+            : undefined;
+          if (incomingEnv && typeof incomingEnv === "object" && !Array.isArray(incomingEnv)
+            && Object.values(incomingEnv).includes(true) && !resolved) {
+            return json(res, 409, { error: "MCP credentials are missing or invalid." });
+          }
+          const parsed = parseMcpServerMutation(name, incoming, resolved ?? existing?.server);
+          if (!parsed.ok) return json(res, 400, { error: parsed.error });
+          updateExternalMcpSecrets(name, parsed.server.env);
+          const stored = withoutInlineSecrets(parsed.server);
+          saveMcpServers({ ...activeServers, [name]: stored });
+          customMcpManager.closeServer(name);
+          result = stored;
+          break;
+        }
+        case "setEnabled": {
+          const activeServers = currentMcpServers();
+          const raw = activeServers[name];
+          if (raw === undefined) return json(res, 404, { error: "MCP server not found." });
+          const parsed = parseStoredMcpServer(name, raw);
+          if (!parsed.ok) return json(res, 400, { error: parsed.error });
+          if (typeof args[1] !== "boolean") return json(res, 400, { error: "enabled must be a boolean" });
+          const stored = { ...parsed.server, enabled: args[1] };
+          saveMcpServers({ ...activeServers, [name]: stored });
+          customMcpManager.closeServer(name);
+          result = stored;
+          break;
+        }
+        case "remove": {
+          const next = { ...currentMcpServers() };
+          if (!Object.hasOwn(next, name)) return json(res, 404, { error: "MCP server not found." });
+          delete next[name];
+          updateExternalMcpSecrets(name, null);
+          saveMcpServers(next);
+          customMcpManager.closeServer(name);
+          result = { ok: true };
+          break;
+        }
+        case "test": {
+          const server = resolvedStoredServer(name);
+          if (!server) return json(res, 409, { error: "MCP credentials are missing or invalid." });
+          result = await probeMcpServer(server);
+          break;
+        }
+        default:
+          return json(res, 400, { error: "unsupported custom MCP control method" });
+      }
+      return json(res, 200, { status: 200, bodyBase64: "", contentType: "application/json", result });
+    }
     if (url.pathname === "/v1/custom-mcp" && req.method === "DELETE") {
       const sessionId = url.searchParams.get("sessionId");
       if (sessionId) customMcpManager.close(sessionId);
@@ -157,7 +259,7 @@ const server = createServer(async (req, res) => {
           return json(res, 200, { status: 200, bodyBase64: "", contentType: "application/json", sessionId: typeof input.sessionId === "string" ? input.sessionId : "denied", response: denied((payload as { id?: unknown })?.id, decisions) });
         }
       }
-      const target = customMcpServers(cfg)[serverName];
+      const target = customMcpServers(currentMcpConfig())[serverName];
       if (!target) return json(res, 404, { error: "custom MCP server is unavailable" });
       const result = await customMcpManager.relay(serverName, target, payload as Record<string, unknown>, typeof input.sessionId === "string" ? input.sessionId : undefined);
       return json(res, 200, { status: result.response ? 200 : 204, bodyBase64: "", contentType: "application/json", sessionId: result.sessionId, response: result.response });

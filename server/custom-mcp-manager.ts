@@ -138,6 +138,12 @@ export class CustomMcpManager {
     return true;
   }
 
+  closeServer(serverName: string): void {
+    for (const [id, session] of this.sessions) {
+      if (session.serverName === serverName) this.close(id);
+    }
+  }
+
   dispose(): void {
     for (const id of this.sessions.keys()) this.close(id);
   }

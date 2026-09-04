@@ -1,6 +1,6 @@
 import { createServer, type Server } from "node:http";
 import { once } from "node:events";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -60,6 +60,7 @@ describe("connector execution sidecar", () => {
     const policyPath = join(dir, "policy.json");
     const keyPath = join(dir, "key");
     const tokenPath = join(dir, "token");
+    const mcpSecretsPath = join(dir, "mcp-secrets.json");
     writeFileSync(tokenPath, token, { mode: 0o600 });
     writeFileSync(keyPath, key.toString("hex"), { mode: 0o600 });
     writeFileSync(policyPath, JSON.stringify({
@@ -85,6 +86,8 @@ describe("connector execution sidecar", () => {
         OMB_CONNECTOR_SIDECAR_TOKEN_FILE: tokenPath,
         OMB_AUTONOMY_POLICY_PATH: policyPath,
         OMB_AUTONOMY_SIGNING_KEY_FILE: keyPath,
+        OMB_MCP_SECRETS_FILE: mcpSecretsPath,
+        OMB_MCP_INLINE_SECRETS: "reject",
         OMB_COMPOSIO_BROKER_URL: `http://127.0.0.1:${brokerPort}`,
         OMB_COMPOSIO_BROKER_TOKEN: "b".repeat(64),
       },
@@ -131,5 +134,40 @@ describe("connector execution sidecar", () => {
     expect(providerCalls).toBe(2);
     expect((await post(exactBody)).status).toBe(403);
     expect(providerCalls).toBe(2);
+
+    const control = async (method: string, args: unknown[]) => {
+      const response = await fetch(`http://127.0.0.1:${port}/v1/custom-mcp-control`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+        body: JSON.stringify({ method, args }),
+      });
+      return { response, body: await response.json() as { result?: unknown; error?: string } };
+    };
+    const secret = "only-the-sidecar-may-read-this";
+    const created = await control("upsert", ["notes", {
+      command: process.execPath,
+      args: ["fixture.js"],
+      env: { NOTES_TOKEN: secret },
+    }]);
+    expect(created.response.status).toBe(200);
+    expect(JSON.stringify(created.body)).not.toContain(secret);
+    const storedConfig = JSON.parse(readFileSync(join(dir, "data", "config.json"), "utf8"));
+    expect(storedConfig.mcpServers.notes.env).toEqual({ NOTES_TOKEN: "" });
+    const storedSecrets = JSON.parse(readFileSync(mcpSecretsPath, "utf8"));
+    expect(storedSecrets.servers.notes).toEqual({ NOTES_TOKEN: secret });
+    const diagnostic = await control("diagnostic", []);
+    expect(diagnostic.body.result).toEqual({ status: "resolved", servers: { notes: "resolved" } });
+
+    const retained = await control("upsert", ["notes", {
+      command: process.execPath,
+      args: ["fixture-2.js"],
+      env: { NOTES_TOKEN: true },
+      enabled: false,
+    }]);
+    expect(retained.response.status).toBe(200);
+    expect(JSON.parse(readFileSync(mcpSecretsPath, "utf8")).servers.notes).toEqual({ NOTES_TOKEN: secret });
+    expect((await control("setEnabled", ["notes", true])).response.status).toBe(200);
+    expect((await control("remove", ["notes"])).response.status).toBe(200);
+    expect(JSON.parse(readFileSync(mcpSecretsPath, "utf8")).servers.notes).toBeUndefined();
   });
 });

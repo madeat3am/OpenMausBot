@@ -1,4 +1,6 @@
-import { readFileSync } from "node:fs";
+import { chmodSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { randomUUID } from "node:crypto";
 
 import { z } from "zod";
 
@@ -31,6 +33,32 @@ export function setManagedMcpSecrets(raw: unknown): void {
 function externalSecrets(path = process.env.OMB_MCP_SECRETS_FILE): z.infer<typeof secretFileSchema> | null {
   if (!path?.trim()) return null;
   return secretFileSchema.parse(JSON.parse(readFileSync(path, "utf8")));
+}
+
+/** The connector sidecar is the only hosted process allowed to mutate this
+ * owner-mounted file. Writes are atomic and keep the document mode 0600; the
+ * main OMB process only receives key-name placeholders. */
+export function updateExternalMcpSecrets(
+  server: string,
+  env: Record<string, string> | null,
+  path = process.env.OMB_MCP_SECRETS_FILE,
+): void {
+  if (!path?.trim()) throw new Error("OMB_MCP_SECRETS_FILE is required for hosted MCP secret updates");
+  let current: z.infer<typeof secretFileSchema> | null = null;
+  try {
+    current = externalSecrets(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  current ??= { schema: MCP_SECRETS_SCHEMA, servers: {} };
+  const servers = { ...current.servers };
+  if (env === null) delete servers[server];
+  else servers[server] = Object.fromEntries(Object.entries(env).filter(([, value]) => Boolean(value)));
+  const checked = secretFileSchema.parse({ schema: MCP_SECRETS_SCHEMA, servers });
+  const temporary = join(dirname(path), `.${randomUUID()}.tmp`);
+  writeFileSync(temporary, `${JSON.stringify(checked, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+  renameSync(temporary, path);
+  chmodSync(path, 0o600);
 }
 
 /** Resolve one server only. No caller ever receives another server's subtree. */

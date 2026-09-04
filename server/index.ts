@@ -33,6 +33,7 @@ import { CustomMcpManager } from "./custom-mcp-manager.ts";
 import {
   closeCustomMcpSidecar,
   callComposioSidecar,
+  callCustomMcpSidecar,
   connectorSidecarConfigured,
   relayComposioSidecar,
   relayCustomMcpSidecar,
@@ -6161,7 +6162,15 @@ async function perBotLocalVmCountForModeChange(): Promise<number | null> {
   return existingPerBotLocalVmCount(runtime.runtime);
 }
 
-function configStatus() {
+async function configStatus() {
+  let mcpSecrets = mcpSecretsDiagnostic(cfg.mcpServers);
+  if (connectorSidecarConfigured()) {
+    try {
+      mcpSecrets = await callCustomMcpSidecar<typeof mcpSecrets>("diagnostic");
+    } catch {
+      mcpSecrets = { status: "invalid", servers: {} };
+    }
+  }
   return {
     xai: { configured: Boolean(cfg.xai?.key) },
     composio: {
@@ -6173,7 +6182,7 @@ function configStatus() {
       revision: autonomyAuthority.state.revision,
       digest: autonomyAuthority.state.digest,
     },
-    mcpSecrets: mcpSecretsDiagnostic(cfg.mcpServers),
+    mcpSecrets,
     box: { configured: Boolean(cfg.box?.token) },
     vps: { configured: Boolean(vpsSshAlias(cfg)), sshAlias: vpsSshAlias(cfg) ?? "" },
     opencodeGo: { configured: Boolean(cfg.opencodeGo?.apiKey) },
@@ -10141,6 +10150,9 @@ const server = createServer(async (req, res) => {
       if (raw === undefined) return json(res, 404, { error: "MCP server not found." });
       const parsed = parseStoredMcpServer(mcpTest[1], raw);
       if (!parsed.ok) return json(res, 400, { error: parsed.error });
+      if (connectorSidecarConfigured()) {
+        return json(res, 200, await callCustomMcpSidecar("test", [mcpTest[1]]));
+      }
       const resolvedServer = mcpServerWithResolvedSecrets(mcpTest[1], parsed);
       if (!resolvedServer) return json(res, 409, { error: "MCP credentials are missing or invalid." });
       if (mcpProbesInFlight >= MAX_CONCURRENT_MCP_PROBES) {
@@ -10181,8 +10193,18 @@ const server = createServer(async (req, res) => {
           enabled: body?.enabled,
         });
         if (!parsed.ok) return json(res, 400, { error: parsed.error });
-        if (DESKTOP_MANAGED) await persistDesktopMcpSecrets(name, parsed.server.env);
-        const stored = DESKTOP_MANAGED ? withoutInlineMcpSecrets(parsed.server) : parsed.server;
+        let stored = parsed.server;
+        if (DESKTOP_MANAGED) {
+          await persistDesktopMcpSecrets(name, parsed.server.env);
+          stored = withoutInlineMcpSecrets(parsed.server);
+        } else if (connectorSidecarConfigured()) {
+          stored = await callCustomMcpSidecar("upsert", [name, {
+            command: body?.command,
+            args: body?.args,
+            env: body?.env,
+            enabled: body?.enabled,
+          }]);
+        }
         persistMcpServers({ ...current, [name]: stored });
         return json(res, 201, mcpServerResponse());
       } finally {
@@ -10205,6 +10227,7 @@ const server = createServer(async (req, res) => {
           const next = { ...current };
           delete next[name];
           if (DESKTOP_MANAGED) await persistDesktopMcpSecrets(name, null);
+          else if (connectorSidecarConfigured()) await callCustomMcpSidecar("remove", [name]);
           persistMcpServers(next);
           return json(res, 200, mcpServerResponse());
         }
@@ -10217,15 +10240,24 @@ const server = createServer(async (req, res) => {
             || Object.keys(body).length !== 1 || typeof body.enabled !== "boolean") {
             return json(res, 400, { error: "Only an enabled boolean can be changed here." });
           }
-          persistMcpServers({ ...current, [name]: { ...existing.server, enabled: body.enabled } });
+          const stored = connectorSidecarConfigured()
+            ? await callCustomMcpSidecar("setEnabled", [name, body.enabled])
+            : { ...existing.server, enabled: body.enabled };
+          persistMcpServers({ ...current, [name]: stored });
           return json(res, 200, mcpServerResponse());
         }
 
-        const resolvedExisting = mcpServerWithResolvedSecrets(name, existing);
-        const parsed = parseMcpServerMutation(name, body, resolvedExisting ?? existing.server);
-        if (!parsed.ok) return json(res, 400, { error: parsed.error });
-        if (DESKTOP_MANAGED) await persistDesktopMcpSecrets(name, parsed.server.env);
-        const stored = DESKTOP_MANAGED ? withoutInlineMcpSecrets(parsed.server) : parsed.server;
+        const resolvedExisting = connectorSidecarConfigured() ? null : mcpServerWithResolvedSecrets(name, existing);
+        const parsed = connectorSidecarConfigured() ? null : parseMcpServerMutation(name, body, resolvedExisting ?? existing.server);
+        if (parsed && !parsed.ok) return json(res, 400, { error: parsed.error });
+        let stored;
+        if (connectorSidecarConfigured()) {
+          stored = await callCustomMcpSidecar("upsert", [name, body]);
+        } else {
+          if (!parsed?.ok) return json(res, 400, { error: "Invalid MCP server." });
+          if (DESKTOP_MANAGED) await persistDesktopMcpSecrets(name, parsed.server.env);
+          stored = DESKTOP_MANAGED ? withoutInlineMcpSecrets(parsed.server) : parsed.server;
+        }
         persistMcpServers({ ...current, [name]: stored });
         return json(res, 200, mcpServerResponse());
       } finally {
@@ -10235,7 +10267,7 @@ const server = createServer(async (req, res) => {
 
     // ── app config (API keys — never echoed back, booleans only) ──
     if (method === "GET" && path === "/api/config") {
-      return json(res, 200, configStatus());
+      return json(res, 200, await configStatus());
     }
     if ((method === "PUT" || method === "PATCH") && path === "/api/config") {
       const body = await readBody(req);
@@ -10470,7 +10502,7 @@ const server = createServer(async (req, res) => {
               if (!mandatoryError) mandatoryError = error;
             }
           }
-          const status = configStatus();
+          const status = await configStatus();
           broadcast({ kind: "config", ...status });
           if (mandatoryError) throw mandatoryError;
           return status;

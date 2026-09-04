@@ -55,9 +55,9 @@ On the packaged desktop, legacy inline values are copied into Electron
 `safeStorage` (`credentials.bin`) before the active JSON values are blanked.
 Future Settings writes use the same private utility-process channel and expose
 only key names to the renderer and server config. No provider-side rotation is
-part of this migration. Headless operators may render the mode-0600 JSON from a
-least-privilege 1Password service account, but OMB does not require or embed the
-1Password CLI.
+part of this migration. A separately encrypted 1Password copy may be retained
+for recovery, but OMB never reads 1Password at runtime and does not embed its
+CLI.
 
 If you edit the file by hand, restart OpenMausBot. Every bot whose engine can
 mount custom MCP servers gets the enabled tools on its next task.

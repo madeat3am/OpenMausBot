@@ -27,6 +27,13 @@ Missing or invalid policy and expired capabilities deny provider actions. OAuth 
 
 Hosted deployments can run connector execution in a distinct-UID sidecar. Set `OMB_CONNECTOR_SIDECAR_URL`, mount the same owner-generated `OMB_CONNECTOR_SIDECAR_TOKEN_FILE`, `OMB_AUTONOMY_POLICY_PATH`, and `OMB_AUTONOMY_SIGNING_KEY_FILE` into the server and sidecar, and set `OMB_CONNECTOR_SIDECAR_REQUIRED=1` on the server. Mount `COMPOSIO_API_KEY_FILE`, `OMB_MCP_SECRETS_FILE`, and the connector-only state directory on the sidecar only. Do not expose the sidecar port outside an internal container network.
 
+Set `OMB_CONNECTOR_CONFIG_FILE` on the sidecar to the main container's
+read-only `config.json` mount. Hosted MCP Settings writes then send secret
+values directly to the sidecar, persist only empty key-name placeholders in
+the main `/data`, and run connection tests in the sidecar. The secret file must
+be writable only by the sidecar UID so later UI updates preserve the same
+boundary.
+
 Set `OMB_EXACT_NONCE_FILE` to a sidecar-owned mode-0600 path in that connector state directory. It preserves single-use capability replay protection across sidecar restarts.
 
 In this mode the OMB container, Codex, Claude, and bot shells receive no Composio or custom-MCP provider credentials. The sidecar independently rechecks policy and exact capabilities before execution, rejects mixed batches atomically, and consumes outbound/operator-exception capabilities once. Provider connection inventory and account-management calls also traverse the private sidecar. The Composio key becomes host-managed; the general settings API refuses to replace it.
