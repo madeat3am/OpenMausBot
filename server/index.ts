@@ -2907,8 +2907,15 @@ async function startTurn(
   }
   if (bot.busy) throw Object.assign(new Error("the bot is already working — interrupt it first"), { status: 409 });
   const threadId = opts?.threadId ?? bot.threadId;
-  // a webhook turn, or one inherited from a bot already running unattended
+  // A webhook turn, or one inherited from a bot already running unattended,
+  // remains outside the operator-attended authority boundary.
   if (opts?.automationSource === "webhook" || opts?.unattended) markUnattended(bot.id);
+  // Manual and scheduled routines are definitions the operator created and
+  // enabled. They must not inherit a stale webhook mark from an earlier run
+  // on the same bot, or Auto would behave differently for up to 30 minutes.
+  else if (opts?.automationSource === "manual" || opts?.automationSource === "schedule") {
+    clearUnattended(bot.id);
+  }
   // a person typing into this bot ends the unattended window immediately
   else if (opts?.automationSource === undefined && !opts?.commsDepth && !opts?.cardContinuation) {
     clearUnattended(bot.id);

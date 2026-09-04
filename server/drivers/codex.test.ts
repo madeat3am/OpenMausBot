@@ -59,6 +59,7 @@ describe("CodexDriver turns (fake app-server)", () => {
     delete process.env.FAKE_CODEX_PARTIAL_FAILS;
     delete process.env.FAKE_CODEX_STATE;
     delete process.env.FAKE_CODEX_RETRY_SCALE;
+    delete process.env.FAKE_CODEX_STDERR;
     delete process.env.OPENAI_API_KEY;
     delete process.env.BOX_TOKEN;
     delete process.env.OMB_TTS_KEY;
@@ -508,12 +509,31 @@ describe("CodexDriver turns (fake app-server)", () => {
   });
 
   it("rejects a second turn while one is in flight", async () => {
+    process.env.FAKE_CODEX_STDERR = "Codex will use the bundled bubblewrap in the meantime.\n";
     await create({ mode: "approval" }); // approval mode parks the turn open
     await instance.adapter.sendTurn({ threadId: "t-busy", text: "one" });
     await recorder.until((e) => e.type === "request.opened");
     await expect(instance.adapter.sendTurn({ threadId: "t-busy", text: "two" })).rejects.toThrow(/already running/);
     await instance.adapter.interruptTurn("t-busy");
-    await recorder.until((e) => e.type === "turn.completed");
+    await expect(recorder.until((e) => e.type === "turn.completed")).resolves.toMatchObject({
+      ok: false,
+      stopReason: "interrupted",
+    });
+    expect(recorder.events.some((e) => e.type === "runtime.error")).toBe(false);
+  });
+
+  it("still reports an unexpected clean exit when stderr contains a startup warning", async () => {
+    process.env.FAKE_CODEX_STDERR = "Codex will use the bundled bubblewrap in the meantime.\n";
+    await create({ mode: "exit-before-result" });
+
+    await instance.adapter.sendTurn({ threadId: "t-exit", text: "one" });
+    await expect(recorder.until((e) => e.type === "runtime.error")).resolves.toMatchObject({
+      message: "codex exited 0 before turn/completed",
+    });
+    await expect(recorder.until((e) => e.type === "turn.completed")).resolves.toMatchObject({
+      ok: false,
+      stopReason: "exit_before_result",
+    });
   });
 
   it("a missing binary surfaces as a failed turn, and snapshot says unavailable", async () => {

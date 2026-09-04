@@ -136,7 +136,7 @@ jobs:
           rm "$RUNNER_TEMP/cert.p12"
 
       - name: Package both architectures
-        run: pnpm package:mac -- --config.extraMetadata.buildRevision="${{ needs.prepare.outputs.sha }}"
+        run: pnpm package:mac --config.extraMetadata.buildRevision="${{ needs.prepare.outputs.sha }}"
 
       - name: "Gate: both packaged apps carry the pinned revision"
         run: >-
@@ -278,7 +278,7 @@ jobs:
       - name: Clean generated output
         shell: bash
         run: rm -rf dist dist-server release
-      - run: pnpm package:win -- --config.extraMetadata.buildRevision="${{ needs.prepare.outputs.sha }}"
+      - run: pnpm package:win --config.extraMetadata.buildRevision="${{ needs.prepare.outputs.sha }}"
         shell: bash
       - run: node scripts/verify-packaged-revision.mjs "${{ needs.prepare.outputs.sha }}" release/win-unpacked/resources/app.asar
         shell: bash
@@ -355,7 +355,7 @@ jobs:
         run: pnpm build:cua:linux
       - name: Prove overlay-free X11 input routing
         run: dbus-run-session -- xvfb-run -a pnpm smoke:cua-x11-input
-      - run: pnpm package:linux -- --config.extraMetadata.buildRevision="${{ needs.prepare.outputs.sha }}"
+      - run: pnpm package:linux --config.extraMetadata.buildRevision="${{ needs.prepare.outputs.sha }}"
       - run: node scripts/verify-packaged-revision.mjs "${{ needs.prepare.outputs.sha }}" release/linux-unpacked/resources/app.asar
       - name: Verify the packaged updater target
         run: |

@@ -59,11 +59,11 @@ export function looksDestructive(text: string): boolean {
 const COMMAND_TOOLS = new Set(["bash", "shell", "execute", "run_command", "computer_exec", "terminal"]);
 
 // Composio exposes provider reads and writes through generic MCP tools. The
-// summary is model-authored and is not a safe basis for deciding whether an
-// email, message, event, or account change is harmless. Keep these calls out
-// of both bot Auto mode and remembered "Always allow" grants so OMB always
-// presents the native approval card. Discovery helpers are pre-approved by
-// the drivers and do not reach this path.
+// summary is model-authored, so a remembered per-tool grant is too coarse.
+// Explicit Bot Auto mode may authorize these calls for person-started turns
+// and operator-authored routines; webhook-originated turns remain blocked by
+// the unattended guard below. Discovery helpers are pre-approved by the
+// drivers and do not reach this path.
 function isComposioAction(tool: string): boolean {
   const lower = tool.toLowerCase();
   const name = tool.split("__").at(-1)?.toUpperCase() ?? "";
@@ -133,7 +133,7 @@ export function autoVerdict(
     scope?: "local-computer";
   },
 ): AutoVerdict {
-  if (isComposioAction(tool)) return { approve: null, source: "no-grant" };
+  const composioAction = isComposioAction(tool);
   // the guards outrank the grants, so an "always allow" can never widen
   // into them
   const destructive = matchFirst(DESTRUCTIVE, summary) ?? matchFirst(DESTRUCTIVE, tool);
@@ -163,6 +163,11 @@ export function autoVerdict(
     if (destructive) return { approve: null, source: "destructive-guard", rule: destructive };
     if (sensitive) return { approve: null, source: "sensitive-guard", rule: sensitive };
     return { approve: null, source: "no-grant" };
+  }
+  if (composioAction) {
+    return bot.autoApprove
+      ? { approve: `auto-approved ${tool}`, source: "auto-mode" }
+      : { approve: null, source: "no-grant" };
   }
   if (context?.scope === "local-computer" && !bot.autoApprove) {
     // Host control is not covered by a remembered always-allow grant.

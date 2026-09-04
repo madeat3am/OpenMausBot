@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
+import { resolve } from "node:path";
 
 const require = createRequire(import.meta.url);
 const electron = require("electron");
@@ -10,9 +11,10 @@ if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(expected ?? "") || archives.length =
 }
 
 for (const archive of archives) {
+  const packageJson = resolve(archive, "package.json");
   const revision = execFileSync(
     electron,
-    ["-e", "process.stdout.write(require(process.argv[1]).buildRevision || '')", `${archive}/package.json`],
+    ["-e", "process.stdout.write(require(process.argv[1]).buildRevision || '')", packageJson],
     {
       encoding: "utf8",
       env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },

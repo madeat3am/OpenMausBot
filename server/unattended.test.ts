@@ -66,6 +66,17 @@ async function waitForRunThread(runId: string, ms = 20_000) {
   return null;
 }
 
+async function waitForRoutineRun(routineId: string, ms = 20_000) {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    const { body } = await api("GET", "/api/routines");
+    const run = (body.runs ?? []).find((r: { routineId: string }) => r.routineId === routineId);
+    if (run?.threadId) return run as { id: string; threadId: string; status: string };
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return null;
+}
+
 posixOnly("unattended turns keep asking", () => {
   beforeAll(async () => {
     chmodSync(FAKE_CLI, 0o755);
@@ -167,6 +178,44 @@ posixOnly("unattended turns keep asking", () => {
       expect(card.card.requestId).toBeTruthy();
       // and it must not already be answered
       expect(card.card.answered).toBeUndefined();
+
+      // Settle the webhook card, then schedule trusted work on the same bot.
+      // The routine must clear the webhook's in-memory unattended mark rather
+      // than inheriting it for the next 30 minutes.
+      expect((await api("POST", `/api/bots/${bot.id}/respond`, {
+        requestId: card.card.requestId,
+        behavior: "deny",
+      })).status).toBe(200);
+      await expect.poll(async () => {
+        const state = await api("GET", "/api/bots?messages=0");
+        return state.body.bots.find((candidate: { id: string }) => candidate.id === bot.id)?.busy;
+      }, { timeout: 10_000 }).toBe(false);
+
+      const scheduled = await api("POST", "/api/routines", {
+        name: "Trusted scheduled follow-up",
+        prompt: "Perform the scheduled action",
+        botId: bot.id,
+        runOn: "maus",
+        enabled: true,
+        schedule: { type: "once", at: Date.now() + 750 },
+      });
+      expect(scheduled.status).toBe(201);
+      const scheduledRun = await waitForRoutineRun(scheduled.body.routine.id);
+      expect(scheduledRun, "the scheduled routine never started").not.toBeNull();
+      await expect.poll(async () => {
+        const { body } = await api("GET", "/api/routines");
+        return body.runs.find((run: { id: string }) => run.id === scheduledRun!.id)?.status;
+      }, { timeout: 20_000 }).toBe("completed");
+      const scheduledMessages = await api("GET", `/api/threads/${scheduledRun!.threadId}/messages`);
+      expect(scheduledMessages.body.messages.some(
+        (message: { kind: string; tool?: { name?: string } }) =>
+          message.kind === "activity" && message.tool?.name?.startsWith("auto-approved "),
+      )).toBe(true);
+      expect(scheduledMessages.body.messages.some(
+        (message: { kind: string; card?: { requestId?: string } }) =>
+          message.kind === "options" && Boolean(message.card?.requestId),
+      )).toBe(false);
+      await api("DELETE", `/api/routines/${scheduled.body.routine.id}`);
     },
     60_000,
   );

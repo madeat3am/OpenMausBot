@@ -938,10 +938,10 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
               <div className="mt-0.5 text-[13px] text-ink-secondary">
                 {bot.computer === "local"
                   ? bot.autoApprove
-                    ? "Keeps going on this computer — you'll still be asked about anything destructive, and about questions it asks you."
+                    ? "Keeps going on this computer, including connected-app actions you assign or enable in a routine. Webhooks, destructive or sensitive actions, and questions still ask."
                     : "Approve each action on this computer yourself. Turn on to let this bot keep working without stopping to ask."
                   : bot.autoApprove
-                  ? "Keeps going on its own — you'll still be asked about anything destructive, and about questions it asks you."
+                  ? "Keeps going on its own, including connected-app actions you assign or enable in a routine. Webhooks, destructive or sensitive actions, and questions still ask."
                   : "Approve each action yourself. Turn on to let this bot keep working without stopping to ask."}
               </div>
             </div>
