@@ -44,6 +44,7 @@ function toolLabel(tool?: string): string {
     stage_skill: "enable a learned skill",
     update_skill: "update a learned skill",
     outbound_proposal: "send a reviewed message",
+    operator_exception: "perform an exact protected action",
   };
   return nice[tool] ?? bare;
 }
@@ -62,6 +63,7 @@ export function ApprovalCard({
   const isRoutineRequest = Boolean(card.routineRequest);
   const isSkillRequest = Boolean(card.skillRequest);
   const isOutboundRequest = Boolean(card.outboundProposal);
+  const isOperatorException = Boolean(card.operatorException);
   const routineAction = card.routineRequest?.operation.action;
   const skillAction = card.skillRequest?.action;
   const routineSettledLabel = routineAction ? ROUTINE_SETTLED_LABEL[routineAction] : undefined;
@@ -70,7 +72,7 @@ export function ApprovalCard({
     ? routineAction === "create" ? "schedule_routine" : "manage_routine"
     : isSkillRequest
       ? skillAction === "update" ? "update_skill" : "stage_skill"
-    : isOutboundRequest ? "outbound_proposal" : card.tool;
+    : isOutboundRequest ? "outbound_proposal" : isOperatorException ? "operator_exception" : card.tool;
 
   return (
     <div
@@ -90,7 +92,7 @@ export function ApprovalCard({
       {/* what, exactly */}
       <pre
         tabIndex={0}
-        aria-label={isOutboundRequest ? "Outbound draft and proof" : isRoutineRequest ? "Routine details" : isSkillRequest ? "Skill details" : "Approval details"}
+        aria-label={isOutboundRequest ? "Outbound draft and proof" : isOperatorException ? "Exact protected action" : isRoutineRequest ? "Routine details" : isSkillRequest ? "Skill details" : "Approval details"}
         className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-inset px-3 py-2 font-mono text-[12.5px] leading-relaxed text-ink"
       >
         {card.subtitle}

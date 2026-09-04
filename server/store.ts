@@ -21,6 +21,7 @@ import type { RoutineRunCardData } from "../shared/routine-run.ts";
 import type { SkillRequestCardData } from "../shared/skill-request.ts";
 import type { GroupGoalRunCardData } from "../shared/group-goal-run.ts";
 import type { OutboundProposalCardData } from "../shared/outbound-proposal.ts";
+import type { OperatorExceptionCardData } from "../shared/operator-exception.ts";
 
 export type MausColor =
   | "green"
@@ -67,6 +68,9 @@ export interface OptionCardData {
   /** A communications proposal whose reviewed provider arguments remain in
    * the protected server store. Send/Revise/Cancel are harness-native. */
   outboundProposal?: OutboundProposalCardData;
+  /** Exact move-to-trash or non-admin collaborator proposal. The provider
+   * request remains in the protected server store until one confirmation. */
+  operatorException?: OperatorExceptionCardData;
 }
 
 export interface ConnectorCardData {

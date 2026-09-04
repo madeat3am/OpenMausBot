@@ -24,7 +24,11 @@ export const CREDENTIAL_ENV_NAMES = [
   "COMPOSIO_WEBHOOK_SECRET",
   "COMPOSIO_WEBHOOK_SECRET_FILE",
   "OMB_AUTONOMY_POLICY_PATH",
+  "OMB_AUTONOMY_SIGNING_KEY_FILE",
+  "OMB_EXACT_NONCE_FILE",
   "OMB_MCP_SECRETS_FILE",
+  "COMPOSIO_API_KEY_FILE",
+  "OMB_CONNECTOR_SIDECAR_TOKEN_FILE",
   // Browser capability files and app-owned state paths are private even
   // though they are not traditional API credentials.
   "OMB_BROWSER_CONNECTION",

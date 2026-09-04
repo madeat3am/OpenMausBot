@@ -25,12 +25,23 @@ import {
   actionsFromMcpPayload,
   AutonomyAuthority,
   AUTONOMY_DECISION_SCHEMA,
+  isOperatorException,
   type AutonomyDecision,
   type ToolAction,
 } from "./autonomy-policy.ts";
 import { CustomMcpManager } from "./custom-mcp-manager.ts";
+import {
+  closeCustomMcpSidecar,
+  callComposioSidecar,
+  connectorSidecarConfigured,
+  relayComposioSidecar,
+  relayCustomMcpSidecar,
+  requireConnectorSidecarWhenConfigured,
+  type ExactRelayAuthorization,
+} from "./connector-sidecar-client.ts";
 import { OutboundExecutor } from "./outbound-executor.ts";
 import { OutboundProposalStore, type OutboundProposal } from "./outbound-proposals.ts";
+import { OperatorExceptionStore, type OperatorExceptionProposal } from "./operator-exceptions.ts";
 import { requestReview, resolveAutoReviewMode, shouldReview } from "./auto-review.ts";
 import { updateClaudeCli } from "./claude-update.ts";
 import {
@@ -235,7 +246,7 @@ import { readCuaConnection } from "./local-computer.ts";
 import { LocalVmIdleTimer } from "./local-vm-idle.ts";
 import { LocalVmLease, LocalVmLeasePool } from "./local-vm-lease.ts";
 import { RepeatDetector, callKey } from "./repeat-detector.ts";
-import { redactSecretsInText } from "./redact.ts";
+import { redactSecrets, redactSecretsInText } from "./redact.ts";
 import * as vps from "./vps-computer.ts";
 import { RoutineManager, type RoutineRun, type RoutineRunOn, type RoutineRunTrigger } from "./routines.ts";
 import { CalendarCallManager, type CalendarCall } from "./calendar-calls.ts";
@@ -306,6 +317,7 @@ const MIME: Record<string, string> = {
 };
 
 ensureDirs();
+requireConnectorSidecarWhenConfigured();
 const autonomyAuthority = new AutonomyAuthority();
 const autonomyDb = new AutonomyDatabase(DATA_DIR);
 const customMcpManager = new CustomMcpManager();
@@ -320,10 +332,64 @@ const DESKTOP_MANAGED = process.env.OMB_DESKTOP_PARENT === "1";
 // Where remote clients reach this server (a proxy's public address); pairing URLs use it.
 const PUBLIC_URL = process.env.OMB_PUBLIC_URL?.trim().replace(/\/+$/, "") || null;
 const cfg = loadConfig();
+if (connectorSidecarConfigured()) cfg.composio = { ...cfg.composio, apiKey: "sidecar-managed" };
 const outboundProposals = new OutboundProposalStore(DATA_DIR);
+const operatorExceptions = new OperatorExceptionStore(DATA_DIR);
+const connectedServices = () => connectorSidecarConfigured()
+  ? callComposioSidecar<Awaited<ReturnType<typeof composio.connectedServices>>>("connectedServices")
+  : composio.connectedServices(cfg);
+const connectionStatus = (slugs: string[]) => connectorSidecarConfigured()
+  ? callComposioSidecar<Awaited<ReturnType<typeof composio.connectionStatus>>>("connectionStatus", [slugs])
+  : composio.connectionStatus(cfg, slugs);
+const listToolkits = () => connectorSidecarConfigured()
+  ? callComposioSidecar<Awaited<ReturnType<typeof composio.listToolkits>>>("listToolkits")
+  : composio.listToolkits(cfg);
+const toolkitCard = (slug: string) => connectorSidecarConfigured()
+  ? callComposioSidecar<Awaited<ReturnType<typeof composio.toolkitCard>>>("toolkitCard", [slug])
+  : composio.toolkitCard(cfg, slug);
+const authorizeService = (slug: string, alias?: string) => connectorSidecarConfigured()
+  ? callComposioSidecar<Awaited<ReturnType<typeof composio.authorizeService>>>("authorizeService", [slug, alias])
+  : composio.authorizeService(cfg, slug, alias);
+const removeAccount = (slug: string, accountId: string) => connectorSidecarConfigured()
+  ? callComposioSidecar<Awaited<ReturnType<typeof composio.removeAccount>>>("removeAccount", [slug, accountId])
+  : composio.removeAccount(cfg, slug, accountId);
+const removeService = (slug: string) => connectorSidecarConfigured()
+  ? callComposioSidecar<Awaited<ReturnType<typeof composio.removeService>>>("removeService", [slug])
+  : composio.removeService(cfg, slug);
+const relayComposio = async (
+  payload: Record<string, unknown>,
+  transportSessionId?: string,
+  capability?: string,
+  exact?: ExactRelayAuthorization,
+) => {
+  if (connectorSidecarConfigured()) {
+    return relayComposioSidecar(payload, transportSessionId, capability, exact);
+  }
+  if (exact && !autonomyAuthority.consumeExact(exact.token, exact.kind, exact.action, exact.proposalDigest)) {
+    throw new Error("exact capability is invalid, expired, replayed, or mismatched");
+  }
+  return composio.relayMcp(cfg, payload as never, transportSessionId);
+};
+const relayCustomMcp = async (
+  serverName: string,
+  payload: Record<string, unknown>,
+  sessionId?: string,
+  capability?: string,
+  exact?: ExactRelayAuthorization,
+) => {
+  if (connectorSidecarConfigured()) {
+    return relayCustomMcpSidecar(serverName, payload, sessionId, capability, exact);
+  }
+  if (exact && !autonomyAuthority.consumeExact(exact.token, exact.kind, exact.action, exact.proposalDigest)) {
+    throw new Error("exact capability is invalid, expired, replayed, or mismatched");
+  }
+  const target = customMcpServers(cfg)[serverName];
+  if (!target) throw new Error("custom MCP server is unavailable");
+  return customMcpManager.relay(serverName, target, payload, sessionId);
+};
 const outboundExecutor = new OutboundExecutor(
   autonomyAuthority,
-  (payload, transportSessionId) => composio.relayMcp(cfg, payload as never, transportSessionId),
+  (payload, transportSessionId, exact) => relayComposio(payload, transportSessionId, undefined, exact),
 );
 const registry = new ProviderRegistry(BUILT_IN_DRIVERS);
 await registry.load(instanceConfigs(cfg));
@@ -1705,7 +1771,7 @@ function closeOpenApprovals(threadId: string): void {
   for (const message of store.messagesFor(threadId)) {
     const card = message.card;
     if (!card?.requestId || card.answered || card.dismissed) continue;
-    if (card.routineRequest || card.skillRequest || card.outboundProposal) continue;
+    if (card.routineRequest || card.skillRequest || card.outboundProposal || card.operatorException) continue;
     store.patchMessage(threadId, message.id, { card: { ...card, answered: "unavailable", dismissed: true } });
     askMessageByRequest.delete(`${threadId}:${card.requestId}`);
   }
@@ -1740,6 +1806,127 @@ function outboundSubtitle(proposal: OutboundProposal): string {
     `Why this draft: ${proposal.rationale}`,
     `Proof: Communications ${proposal.communicationsReceipt.id}; Human Voice ${proposal.humanVoiceReceipt.id}; ${proposal.sourceReferences.length} current source${proposal.sourceReferences.length === 1 ? "" : "s"}`,
   ].filter(Boolean).join("\n\n");
+}
+
+function operatorExceptionCard(proposal: OperatorExceptionProposal) {
+  return {
+    schema: proposal.schema,
+    proposalId: proposal.proposalId,
+    actionDigest: proposal.actionDigest,
+    tool: proposal.action.tool,
+    ...(proposal.action.accountAlias ? { accountAlias: proposal.action.accountAlias } : {}),
+    status: proposal.status,
+  };
+}
+
+function operatorExceptionSubtitle(proposal: OperatorExceptionProposal): string {
+  return [
+    `Tool: ${proposal.action.tool}`,
+    proposal.action.accountAlias ? `Account: ${proposal.action.accountAlias}` : "",
+    `Arguments: ${JSON.stringify(redactSecrets(proposal.action.arguments), null, 2)}`,
+    `Exact action digest: ${proposal.actionDigest}`,
+  ].filter(Boolean).join("\n");
+}
+
+function mcpResultFailed(bytes: Uint8Array): boolean {
+  try {
+    const value = JSON.parse(Buffer.from(bytes).toString("utf8")) as { error?: unknown; result?: { isError?: unknown } };
+    return Boolean(value.error || value.result?.isError === true);
+  } catch {
+    return true;
+  }
+}
+
+async function resolveOperatorException(
+  res: ServerResponse,
+  args: { botId: string; botName?: string; threadId: string; requestId: string; behavior: "allow" | "deny" | "answer" },
+): Promise<boolean> {
+  const cardMessage = store.messagesFor(args.threadId).find(
+    (message) => message.card?.requestId === args.requestId && message.card.operatorException,
+  );
+  const card = cardMessage?.card;
+  if (!cardMessage || !card?.operatorException) return false;
+  const proposal = operatorExceptions.get(card.operatorException.proposalId);
+  if (!proposal || proposal.threadId !== args.threadId || proposal.botId !== args.botId) {
+    json(res, 409, { error: "the protected operator exception is unavailable or belongs to another conversation" });
+    return true;
+  }
+  if (card.operatorException.actionDigest !== proposal.actionDigest || !operatorExceptions.actionStillMatches(proposal)) {
+    json(res, 422, { error: "the protected action changed after review; create a new proposal" });
+    return true;
+  }
+  if (proposal.status !== "pending") {
+    json(res, 200, { ok: proposal.status === "executed", outcome: proposal.status, alreadySettled: true });
+    return true;
+  }
+  if (args.behavior !== "allow") {
+    const settled = operatorExceptions.transition(proposal.proposalId, ["pending"], "cancelled", { outcomeReason: "operator cancelled" });
+    store.patchMessage(args.threadId, cardMessage.id, {
+      card: { ...card, answered: "deny", dismissed: true, operatorException: operatorExceptionCard(settled) },
+    });
+    appendDecision(DATA_DIR, {
+      threadId: args.threadId, requestId: args.requestId, botId: args.botId, botName: args.botName,
+      tool: proposal.action.tool, summary: `exact action ${proposal.actionDigest}`, decision: "user-denied", source: "user",
+    });
+    json(res, 200, { ok: true, outcome: "cancelled" });
+    return true;
+  }
+
+  operatorExceptions.transition(proposal.proposalId, ["pending"], "executing");
+  let success = false;
+  let providerId: string | undefined;
+  let reason: string | undefined;
+  try {
+    const token = autonomyAuthority.issueExact("operator-exception", proposal.action);
+    const exact = { token, kind: "operator-exception" as const, action: proposal.action };
+    if (proposal.action.transport === "composio") {
+      const upstream = await relayComposio(proposal.payload, proposal.transportSessionId, undefined, exact);
+      providerId = providerReceiptId(upstream.bytes);
+      success = upstream.status >= 200 && upstream.status < 300 && !mcpResultFailed(upstream.bytes);
+      if (!success) reason = `provider rejected the exact action (HTTP ${upstream.status})`;
+    } else {
+      const upstream = await relayCustomMcp(proposal.action.server, proposal.payload, proposal.transportSessionId, undefined, exact);
+      const bytes = Buffer.from(JSON.stringify(upstream.response ?? {}));
+      providerId = providerReceiptId(bytes);
+      success = Boolean(upstream.response) && !mcpResultFailed(bytes);
+      if (!success) reason = "provider rejected the exact action";
+    }
+  } catch (error) {
+    reason = `provider outcome is unknown; do not retry without verifying state — ${error instanceof Error ? error.message : String(error)}`;
+  }
+  const settled = operatorExceptions.transition(proposal.proposalId, ["executing"], success ? "executed" : "failed", {
+    ...(providerId ? { providerResultId: providerId } : {}),
+    ...(reason ? { outcomeReason: reason } : {}),
+  });
+  store.patchMessage(args.threadId, cardMessage.id, {
+    card: {
+      ...card,
+      answered: success ? "allow" : "failed",
+      dismissed: true,
+      held: reason,
+      operatorException: operatorExceptionCard(settled),
+    },
+  });
+  autonomyDb.recordDecision({
+    schema: AUTONOMY_DECISION_SCHEMA,
+    allowed: success,
+    code: success ? "exact-operator-exception" : "provider-effect-failed",
+    reason: success ? "executed exact stored action after one-time operator confirmation" : reason ?? "provider effect failed",
+    ruleId: `operator-exception:${proposal.proposalId}`,
+    tool: proposal.action.tool,
+    accountAlias: proposal.action.accountAlias,
+  }, proposal.action, providerId);
+  appendDecision(DATA_DIR, {
+    threadId: args.threadId, requestId: args.requestId, botId: args.botId, botName: args.botName,
+    tool: proposal.action.tool, summary: `exact action ${proposal.actionDigest}`,
+    decision: success ? "user-approved" : "provider-failed", source: "user",
+  });
+  store.appendMessage(args.threadId, {
+    role: "bot", kind: "activity",
+    tool: { name: success ? `Protected action completed${providerId ? ` · receipt ${providerId}` : ""}` : `Protected action held — ${reason}`, ok: success },
+  });
+  json(res, success ? 200 : 409, { ok: success, outcome: settled.status, providerResultId: providerId, error: reason });
+  return true;
 }
 
 async function resolveOutboundProposal(
@@ -6965,18 +7152,73 @@ const server = createServer(async (req, res) => {
         }
         const decisions = extracted.actions.map((action) => autonomyAuthority.authorize(capability, action));
         if (decisions.some((decision) => !decision.allowed)) {
+          const context = autonomyAuthority.verify(capability);
+          if (
+            extracted.actions.length === 1
+            && context?.wakeKind === "operator"
+            && isOperatorException(extracted.actions[0]!)
+            && connectorThread(context.botId, context.threadId)
+          ) {
+            const proposal = operatorExceptions.create({
+              botId: context.botId,
+              threadId: context.threadId,
+              action: extracted.actions[0]!,
+              payload: body,
+              ...(typeof req.headers["mcp-session-id"] === "string" ? { transportSessionId: req.headers["mcp-session-id"] } : {}),
+            });
+            const existing = store.messagesFor(context.threadId).find(
+              (message) => message.card?.operatorException?.proposalId === proposal.proposalId,
+            );
+            if (!existing) {
+              const owner = connectorThread(context.botId, context.threadId)!;
+              const from = store.bot(context.botId)!;
+              store.appendMessage(context.threadId, {
+                role: "bot",
+                kind: "options",
+                ...(owner.group ? { from: { botId: from.id, name: from.name, color: from.color } } : {}),
+                card: {
+                  title: "Allow this exact protected action once?",
+                  subtitle: operatorExceptionSubtitle(proposal),
+                  options: ["Allow once", "Cancel"],
+                  requestId: proposal.proposalId,
+                  tool: "operator_exception",
+                  held: "Only this exact move-to-trash or non-admin collaborator change can run.",
+                  operatorException: operatorExceptionCard(proposal),
+                },
+              });
+              appendDecision(DATA_DIR, {
+                threadId: context.threadId, requestId: proposal.proposalId, botId: from.id, botName: from.name,
+                tool: proposal.action.tool, summary: `exact action ${proposal.actionDigest}`, decision: "card-shown", source: "operator-exception",
+              });
+            }
+            autonomyDb.recordDecision(decisions[0]!, extracted.actions[0]!);
+            return json(res, 200, {
+              jsonrpc: "2.0",
+              id: body?.id,
+              result: {
+                isError: true,
+                content: [{ type: "text", text: JSON.stringify({
+                  schema: AUTONOMY_DECISION_SCHEMA,
+                  outcome: "awaiting-operator-confirmation",
+                  approvalCardCreated: true,
+                  proposalId: proposal.proposalId,
+                  decisions,
+                }) }],
+              },
+            });
+          }
           const rejected = decisions.map((decision): AutonomyDecision => decision.allowed
             ? { ...decision, allowed: false, code: "mixed-batch-denied", reason: "the entire batch was denied before execution" }
             : decision);
           rejected.forEach((decision, index) => autonomyDb.recordDecision(decision, extracted.actions[index]!));
           return json(res, 200, deniedMcpResponse(body?.id, rejected));
         }
-        const upstream = await composio.relayMcp(
-          cfg,
+        const upstream = await relayComposio(
           body,
           Array.isArray(req.headers["mcp-session-id"])
             ? req.headers["mcp-session-id"][0]
             : req.headers["mcp-session-id"],
+          capability,
         );
         const providerId = providerReceiptId(upstream.bytes);
         decisions.forEach((decision, index) => autonomyDb.recordDecision(decision, extracted.actions[index]!, providerId));
@@ -6997,13 +7239,16 @@ const server = createServer(async (req, res) => {
           return json(res, 400, { error: "invalid custom MCP server" });
         }
         if (method === "DELETE") {
-          if (sessionId) customMcpManager.close(sessionId);
+          if (sessionId) {
+            if (connectorSidecarConfigured()) await closeCustomMcpSidecar(serverName, sessionId);
+            else customMcpManager.close(sessionId);
+          }
           res.writeHead(204, { "cache-control": "no-store" });
           return res.end();
         }
         if (method !== "POST") return json(res, 405, { error: "method not allowed" });
-        const target = customMcpServers(cfg)[serverName];
-        if (!target) return json(res, 404, { error: "custom MCP server is unavailable" });
+        const target = connectorSidecarConfigured() ? null : customMcpServers(cfg)[serverName];
+        if (!connectorSidecarConfigured() && !target) return json(res, 404, { error: "custom MCP server is unavailable" });
         const body = await readBody(req);
         const extracted = actionsFromCustomMcpPayload(serverName, body);
         const capability = Array.isArray(req.headers["x-openmaus-autonomy-capability"])
@@ -7028,10 +7273,60 @@ const server = createServer(async (req, res) => {
         }
         const decisions = extracted.actions.map((action) => autonomyAuthority.authorize(capability, action));
         if (decisions.some((decision) => !decision.allowed)) {
+          const context = autonomyAuthority.verify(capability);
+          if (
+            extracted.actions.length === 1
+            && context?.wakeKind === "operator"
+            && isOperatorException(extracted.actions[0]!)
+            && connectorThread(context.botId, context.threadId)
+          ) {
+            const proposal = operatorExceptions.create({
+              botId: context.botId,
+              threadId: context.threadId,
+              action: extracted.actions[0]!,
+              payload: body,
+              ...(typeof sessionId === "string" ? { transportSessionId: sessionId } : {}),
+            });
+            const existing = store.messagesFor(context.threadId).find(
+              (message) => message.card?.operatorException?.proposalId === proposal.proposalId,
+            );
+            if (!existing) {
+              const owner = connectorThread(context.botId, context.threadId)!;
+              const from = store.bot(context.botId)!;
+              store.appendMessage(context.threadId, {
+                role: "bot", kind: "options",
+                ...(owner.group ? { from: { botId: from.id, name: from.name, color: from.color } } : {}),
+                card: {
+                  title: "Allow this exact protected action once?",
+                  subtitle: operatorExceptionSubtitle(proposal),
+                  options: ["Allow once", "Cancel"],
+                  requestId: proposal.proposalId,
+                  tool: "operator_exception",
+                  held: "Only this exact move-to-trash or non-admin collaborator change can run.",
+                  operatorException: operatorExceptionCard(proposal),
+                },
+              });
+              appendDecision(DATA_DIR, {
+                threadId: context.threadId, requestId: proposal.proposalId, botId: from.id, botName: from.name,
+                tool: proposal.action.tool, summary: `exact action ${proposal.actionDigest}`, decision: "card-shown", source: "operator-exception",
+              });
+            }
+            autonomyDb.recordDecision(decisions[0]!, extracted.actions[0]!);
+            return json(res, 200, {
+              jsonrpc: "2.0", id: body?.id,
+              result: { isError: true, content: [{ type: "text", text: JSON.stringify({
+                schema: AUTONOMY_DECISION_SCHEMA,
+                outcome: "awaiting-operator-confirmation",
+                approvalCardCreated: true,
+                proposalId: proposal.proposalId,
+                decisions,
+              }) }] },
+            });
+          }
           decisions.forEach((decision, index) => autonomyDb.recordDecision(decision, extracted.actions[index]!));
           return json(res, 200, deniedMcpResponse(body?.id, decisions));
         }
-        const relayed = await customMcpManager.relay(serverName, target, body, sessionId);
+        const relayed = await relayCustomMcp(serverName, body, sessionId, capability);
         const responseBytes = Buffer.from(JSON.stringify(relayed.response ?? {}));
         const providerId = providerReceiptId(responseBytes);
         decisions.forEach((decision, index) => autonomyDb.recordDecision(decision, extracted.actions[index]!, providerId));
@@ -7083,7 +7378,7 @@ const server = createServer(async (req, res) => {
         if (!composio.configured(cfg) || owner.bot.composio === false) {
           return json(res, 409, { error: "connected apps are not enabled for this bot" });
         }
-        const connectionState: Record<string, { connected?: boolean }> = await composio.connectionStatus(cfg, slugs).catch(() => ({}));
+        const connectionState: Record<string, { connected?: boolean }> = await connectionStatus(slugs).catch(() => ({}));
         const messageIds: string[] = [];
         for (const slug of slugs) {
           const existing = store.messagesFor(threadId).find(
@@ -7093,7 +7388,7 @@ const server = createServer(async (req, res) => {
             messageIds.push(existing.id);
             continue;
           }
-          const toolkit = await composio.toolkitCard(cfg, slug);
+          const toolkit = await toolkitCard(slug);
           const connected = connectionState[slug]?.connected === true;
           const message = store.appendMessage(threadId, {
             role: "bot",
@@ -9313,6 +9608,13 @@ const server = createServer(async (req, res) => {
         behavior,
         message: body.message,
       })) return;
+      if (await resolveOperatorException(res, {
+        botId: bot.id,
+        botName: bot.name,
+        threadId: bot.threadId,
+        requestId: String(body.requestId),
+        behavior,
+      })) return;
       if (resolveAndSendRoutine(res, {
         botId: bot.id,
         botName: bot.name,
@@ -9362,6 +9664,17 @@ const server = createServer(async (req, res) => {
           requestId,
           behavior,
           message: body.message,
+        })) return;
+      }
+      const operatorExceptionMessage = store.messagesFor(threadId).find(
+        (message) => message.card?.requestId === requestId && message.card.operatorException,
+      );
+      if (operatorExceptionMessage?.card?.operatorException) {
+        const ownerId = operatorExceptionMessage.from?.botId ?? store.botByThread(threadId)?.id;
+        const owner = ownerId ? store.bot(ownerId) : null;
+        if (!owner) return json(res, 409, { error: "the operator exception owner is unavailable" });
+        if (await resolveOperatorException(res, {
+          botId: owner.id, botName: owner.name, threadId, requestId, behavior,
         })) return;
       }
       const skillCard = store.messagesFor(threadId).find(
@@ -9997,6 +10310,9 @@ const server = createServer(async (req, res) => {
       // persisting, and save the non-secret ids needed to reuse that Session.
       const requestedComposioKey = patch.composio?.apiKey;
       if (requestedComposioKey !== undefined) {
+        if (process.env.OMB_CONNECTOR_SIDECAR_REQUIRED === "1") {
+          return json(res, 409, { error: "the Composio credential is host-managed by the connector sidecar" });
+        }
         if (requestedComposioKey.trim()) {
           try {
             const prepared = await composio.prepareProjectSession(requestedComposioKey, cfg.composio);
@@ -10221,7 +10537,7 @@ const server = createServer(async (req, res) => {
 
     // ── connectors (Composio) ──
     if (method === "GET" && path === "/api/connectors/catalog") {
-      const { cards, source } = await composio.listToolkits(cfg);
+      const { cards, source } = await listToolkits();
       return json(res, 200, { configured: composio.configured(cfg), mode: composio.connectionMode(cfg), source, cards });
     }
     if (method === "GET" && path === "/api/connectors/connected") {
@@ -10236,7 +10552,7 @@ const server = createServer(async (req, res) => {
           services: {},
         });
       }
-      return json(res, 200, { configured: true, credentialStore: "ok", services: await composio.connectedServices(cfg) });
+      return json(res, 200, { configured: true, credentialStore: "ok", services: await connectedServices() });
     }
     if (method === "GET" && path === "/api/connectors") {
       const services = (url.searchParams.get("services") ?? "").split(",").filter(Boolean);
@@ -10248,18 +10564,18 @@ const server = createServer(async (req, res) => {
           services: {},
         });
       }
-      const status = await composio.connectionStatus(cfg, services.length ? services : composio.CURATED_SLUGS);
+      const status = await connectionStatus(services.length ? services : composio.CURATED_SLUGS);
       return json(res, 200, { configured: true, services: status });
     }
     m = path.match(/^\/api\/connectors\/([\w-]+)\/authorize$/);
     if (m && method === "POST") {
       const body = await readBody(req);
-      return json(res, 200, await composio.authorizeService(cfg, m[1], body.alias));
+      return json(res, 200, await authorizeService(m[1], body.alias));
     }
     m = path.match(/^\/api\/connectors\/([\w-]+)\/accounts\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})$/);
-    if (m && method === "DELETE") return json(res, 200, await composio.removeAccount(cfg, m[1], m[2]));
+    if (m && method === "DELETE") return json(res, 200, await removeAccount(m[1], m[2]));
     m = path.match(/^\/api\/connectors\/([\w-]+)$/);
-    if (m && method === "DELETE") return json(res, 200, await composio.removeService(cfg, m[1]));
+    if (m && method === "DELETE") return json(res, 200, await removeService(m[1]));
 
     // Inline credential cards never receive the credential value. Electron
     // saves it through the OS-backed store first; this route only verifies
@@ -10308,7 +10624,7 @@ const server = createServer(async (req, res) => {
           connector: { ...connector, status: "authorizing", error: undefined, dismissed: false },
         });
         try {
-          return json(res, 200, await composio.authorizeService(cfg, connector.slug));
+          return json(res, 200, await authorizeService(connector.slug));
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
           store.patchMessage(threadId, message.id, {
@@ -10318,7 +10634,7 @@ const server = createServer(async (req, res) => {
         }
       }
       if (m[3] === "status" && method === "GET") {
-        const state = (await composio.connectionStatus(cfg, [connector.slug]))[connector.slug];
+        const state = (await connectionStatus([connector.slug]))[connector.slug];
         const failed = /failed|expired|revoked|error/i.test(state?.status ?? "");
         const next = {
           ...connector,

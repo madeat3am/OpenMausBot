@@ -55,6 +55,8 @@ const ENTRY_POINTS = [
   "vps-container-mcp.ts",
   "permission-proxy.ts",
   "connector-proxy.ts",
+  "connector-sidecar.ts",
+  "connector-sidecar-client.ts",
   "custom-mcp-proxy.ts",
   "drivers/agents-proxy.ts",
   "drivers/dweb-proxy.ts",

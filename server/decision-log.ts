@@ -48,6 +48,7 @@ export type DecisionSource =
   | "routine"
   | "skill"
   | "outbound-proposal"
+  | "operator-exception"
   | "user"
   | "auto-review"
   | "auto-review-shadow";

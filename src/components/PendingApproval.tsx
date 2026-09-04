@@ -41,6 +41,10 @@ export function isOutboundApproval(pending: Pending): boolean {
   return Boolean(pending.message.card?.outboundProposal);
 }
 
+export function isOperatorExceptionApproval(pending: Pending): boolean {
+  return Boolean(pending.message.card?.operatorException);
+}
+
 /** Open approvals on a thread, oldest first — answered/dismissed drop out. */
 export function pendingApprovals(messages: Message[]): Pending[] {
   return messages
@@ -62,6 +66,10 @@ export function spokenApprovalPrompt(pending: Pending, requester: string): strin
   const isRoutineRequest = isRoutineApproval(pending);
   const isSkillRequest = isSkillApproval(pending);
   const isOutboundRequest = isOutboundApproval(pending);
+  const isOperatorException = isOperatorExceptionApproval(pending);
+  if (isOperatorException) {
+    return `${requester} wants to perform the exact protected action shown on screen. Should I allow it once?`;
+  }
   if (isOutboundRequest) {
     const title = pending.message.card?.title.trim() || "Send this reviewed draft?";
     return `${requester} asks: ${title}${/[.!?]$/.test(title) ? "" : "."} Review the recipient, content, account, and proof on screen.`;
@@ -80,6 +88,7 @@ export function spokenApprovalPrompt(pending: Pending, requester: string): strin
 
 function label(pending: Pending): string {
   if (isOutboundApproval(pending)) return "Send this reviewed draft";
+  if (isOperatorExceptionApproval(pending)) return "Confirm this exact protected action";
   if (isSkillApproval(pending)) {
     return pending.message.card?.skillRequest?.action === "update"
       ? "Update this learned skill"
@@ -111,10 +120,11 @@ export const PendingApprovalPanel = memo(function PendingApprovalPanel({
   index: number;
 }) {
   const isOutboundRequest = isOutboundApproval(pending);
+  const isOperatorException = isOperatorExceptionApproval(pending);
   return (
     <div
       role="region"
-      aria-label={isOutboundRequest ? "Pending outbound confirmation" : isSkillApproval(pending) ? "Pending skill confirmation" : isRoutineApproval(pending) ? "Pending routine confirmation" : "Pending approval"}
+      aria-label={isOutboundRequest ? "Pending outbound confirmation" : isOperatorException ? "Pending exact action confirmation" : isSkillApproval(pending) ? "Pending skill confirmation" : isRoutineApproval(pending) ? "Pending routine confirmation" : "Pending approval"}
       className="rounded-t-2xl border-b border-hairline/50 bg-control/40 px-4 py-3"
     >
       <div className="flex flex-wrap items-center gap-2" aria-live="polite">
@@ -128,6 +138,8 @@ export const PendingApprovalPanel = memo(function PendingApprovalPanel({
         <span className="font-mono text-[11px] text-ink-secondary">
           {isOutboundRequest
             ? "outbound_proposal"
+            : isOperatorException
+            ? "operator_exception"
             : isSkillApproval(pending)
             ? pending.message.card?.skillRequest?.action === "update" ? "update_skill" : "stage_skill"
             : isRoutineApproval(pending)
@@ -140,7 +152,7 @@ export const PendingApprovalPanel = memo(function PendingApprovalPanel({
       {/* never truncated — long commands wrap and scroll */}
       <pre
         tabIndex={0}
-        aria-label={isOutboundRequest ? "Outbound draft and proof to review" : isSkillApproval(pending) ? "Skill details to review" : isRoutineApproval(pending) ? "Routine details to review" : "Approval details to review"}
+        aria-label={isOutboundRequest ? "Outbound draft and proof to review" : isOperatorException ? "Exact protected action to review" : isSkillApproval(pending) ? "Skill details to review" : isRoutineApproval(pending) ? "Routine details to review" : "Approval details to review"}
         className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-[12px] leading-relaxed text-ink"
       >
         {pending.detail}
@@ -169,7 +181,8 @@ export function PendingApprovalActions({
   const isRoutineRequest = isRoutineApproval(pending);
   const isSkillRequest = isSkillApproval(pending);
   const isOutboundRequest = isOutboundApproval(pending);
-  const durableRequest = isRoutineRequest || isSkillRequest || isOutboundRequest;
+  const isOperatorException = isOperatorExceptionApproval(pending);
+  const durableRequest = isRoutineRequest || isSkillRequest || isOutboundRequest || isOperatorException;
   const reviewedSha256 = pending.message.card?.skillRequest
     ? reviewedSkillSha256(pending.message.card.skillRequest)
     : undefined;

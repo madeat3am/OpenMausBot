@@ -1,4 +1,5 @@
 import type { AutonomyAuthority, ToolAction } from "./autonomy-policy.ts";
+import type { ExactRelayAuthorization } from "./connector-sidecar-client.ts";
 import type { OutboundProposal, OutboundProviderReadback } from "./outbound-proposals.ts";
 
 interface RelayResult {
@@ -8,7 +9,11 @@ interface RelayResult {
   transportSessionId?: string;
 }
 
-export type OutboundRelay = (payload: Record<string, unknown>, transportSessionId?: string) => Promise<RelayResult>;
+export type OutboundRelay = (
+  payload: Record<string, unknown>,
+  transportSessionId?: string,
+  exact?: ExactRelayAuthorization,
+) => Promise<RelayResult>;
 
 export interface OutboundExecutionResult {
   status: "sent" | "failed";
@@ -105,7 +110,12 @@ export class OutboundExecutor {
     }
     sessionId = initialize.transportSessionId;
 
-    const before = await this.relay(callPayload(`outbound-read-${proposal.proposalId}`, proposal.providerReadAction), sessionId);
+    const readCapability = this.authority.issueExact("outbound-readback", proposal.providerReadAction, proposal.canonicalDigest, 30 * 60_000, now);
+    const before = await this.relay(
+      callPayload(`outbound-read-${proposal.proposalId}`, proposal.providerReadAction),
+      sessionId,
+      { token: readCapability, kind: "outbound-readback", action: proposal.providerReadAction, proposalDigest: proposal.canonicalDigest },
+    );
     const beforeState = readback(before, now, proposal.idempotencyKey);
     const providerReadback: OutboundProviderReadback = {
       observedAt: beforeState.observedAt,
@@ -124,19 +134,24 @@ export class OutboundExecutor {
     }
 
     const capability = this.authority.issueExact("outbound-send", proposal.providerAction, proposal.canonicalDigest, 30 * 60_000, now);
-    if (!this.authority.consumeExact(capability, "outbound-send", proposal.providerAction, proposal.canonicalDigest, now)) {
-      return { status: "failed", recovered: false, providerReadback, reason: "exact send capability was invalid" };
-    }
-
     try {
-      const sent = await this.relay(callPayload(`outbound-send-${proposal.proposalId}`, proposal.providerAction), sessionId);
+      const sent = await this.relay(
+        callPayload(`outbound-send-${proposal.proposalId}`, proposal.providerAction),
+        sessionId,
+        { token: capability, kind: "outbound-send", action: proposal.providerAction, proposalDigest: proposal.canonicalDigest },
+      );
       const sentBody = decoded(sent);
       if (sent.status < 200 || sent.status >= 300 || nestedError(sentBody.value)) {
         return { status: "failed", recovered: false, providerReadback, reason: "provider rejected the send" };
       }
       return { status: "sent", recovered: false, providerResultId: providerResultId(sentBody.value), providerReadback: { ...providerReadback, detail: "provider state reread before send" } };
     } catch {
-      const after = await this.relay(callPayload(`outbound-recover-${proposal.proposalId}`, proposal.providerReadAction), sessionId);
+      const recoveryCapability = this.authority.issueExact("outbound-readback", proposal.providerReadAction, proposal.canonicalDigest, 30 * 60_000, Date.now());
+      const after = await this.relay(
+        callPayload(`outbound-recover-${proposal.proposalId}`, proposal.providerReadAction),
+        sessionId,
+        { token: recoveryCapability, kind: "outbound-readback", action: proposal.providerReadAction, proposalDigest: proposal.canonicalDigest },
+      );
       const afterState = readback(after, Date.now(), proposal.idempotencyKey);
       const recoveredReadback: OutboundProviderReadback = {
         observedAt: afterState.observedAt,

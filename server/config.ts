@@ -538,7 +538,11 @@ export const WORKSPACE_CREDENTIAL_ENV = [
   "COMPOSIO_WEBHOOK_SECRET",
   "COMPOSIO_WEBHOOK_SECRET_FILE",
   "OMB_AUTONOMY_POLICY_PATH",
+  "OMB_AUTONOMY_SIGNING_KEY_FILE",
+  "OMB_EXACT_NONCE_FILE",
   "OMB_MCP_SECRETS_FILE",
+  "COMPOSIO_API_KEY_FILE",
+  "OMB_CONNECTOR_SIDECAR_TOKEN_FILE",
   // Harness-private filesystem hints are not credentials themselves, but
   // exposing them to a shell-capable agent points straight at app-owned
   // state. The built-in browser master is delivered privately in memory.

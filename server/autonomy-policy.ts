@@ -1,5 +1,5 @@
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { appendFileSync, chmodSync, readFileSync, writeFileSync } from "node:fs";
 
 import { z } from "zod";
 
@@ -100,7 +100,7 @@ interface CapabilityPayload extends CapabilityContext {
 
 interface ExactCapabilityPayload {
   schema: "openmausbot.exact-effect-capability.v1";
-  kind: "outbound-send" | "operator-exception";
+  kind: "outbound-send" | "outbound-readback" | "operator-exception";
   actionDigest: string;
   proposalDigest?: string;
   expiresAt: number;
@@ -195,7 +195,7 @@ const capabilitySchema = z.object({
 
 const exactCapabilitySchema = z.object({
   schema: z.literal("openmausbot.exact-effect-capability.v1"),
-  kind: z.enum(["outbound-send", "operator-exception"]),
+  kind: z.enum(["outbound-send", "outbound-readback", "operator-exception"]),
   actionDigest: z.string().regex(/^[a-f0-9]{64}$/),
   proposalDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   expiresAt: z.number().int().positive(),
@@ -206,10 +206,28 @@ export class AutonomyAuthority {
   readonly state: PolicyState;
   private readonly key: Buffer;
   private readonly consumedExactNonces = new Set<string>();
+  private readonly exactNonceFile?: string;
 
-  constructor(state = loadAutonomyPolicy(), key = randomBytes(32)) {
+  constructor(state = loadAutonomyPolicy(), key = loadAutonomySigningKey(), exactNonceFile = process.env.OMB_EXACT_NONCE_FILE?.trim()) {
     this.state = state;
     this.key = key;
+    this.exactNonceFile = exactNonceFile || undefined;
+    if (this.exactNonceFile) {
+      const keep: string[] = [];
+      try {
+        for (const line of readFileSync(this.exactNonceFile, "utf8").split("\n")) {
+          const [nonce, expires] = line.trim().split(" ");
+          if (!nonce || !expires || Number(expires) <= Date.now()) continue;
+          this.consumedExactNonces.add(nonce);
+          keep.push(`${nonce} ${expires}`);
+        }
+      } catch {
+        // First launch has no replay ledger. Failure to create or append the
+        // path is handled fail-closed before provider I/O in consumeExact.
+      }
+      writeFileSync(this.exactNonceFile, keep.length ? `${keep.join("\n")}\n` : "", { mode: 0o600 });
+      chmodSync(this.exactNonceFile, 0o600);
+    }
   }
 
   issue(context: CapabilityContext, ttlMs = 30 * 60_000, now = Date.now()): string | null {
@@ -291,6 +309,15 @@ export class AutonomyAuthority {
       if (payload.actionDigest !== exactActionDigest(action)) return false;
       if ((payload.proposalDigest ?? undefined) !== (proposalDigest ?? undefined)) return false;
       this.consumedExactNonces.add(payload.nonce);
+      if (this.exactNonceFile) {
+        try {
+          appendFileSync(this.exactNonceFile, `${payload.nonce} ${payload.expiresAt}\n`, { mode: 0o600 });
+          chmodSync(this.exactNonceFile, 0o600);
+        } catch {
+          this.consumedExactNonces.delete(payload.nonce);
+          return false;
+        }
+      }
       return true;
     } catch {
       return false;
@@ -341,6 +368,15 @@ export class AutonomyAuthority {
     }
     return denied(action, "no-matching-rule", "no autonomy rule matches this bot, wake, account, tool, and arguments");
   }
+}
+
+function loadAutonomySigningKey(path = process.env.OMB_AUTONOMY_SIGNING_KEY_FILE): Buffer {
+  if (!path?.trim()) return randomBytes(32);
+  const encoded = readFileSync(path, "utf8").trim();
+  if (!encoded) throw new Error("autonomy signing key is empty");
+  const key = /^[a-f0-9]{64}$/i.test(encoded) ? Buffer.from(encoded, "hex") : Buffer.from(encoded, "base64url");
+  if (key.byteLength < 32) throw new Error("autonomy signing key must contain at least 32 bytes");
+  return key;
 }
 
 function denied(action: ToolAction, code: string, reason: string, effect?: DeniedEffect): AutonomyDecision {

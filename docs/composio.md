@@ -23,6 +23,14 @@ Codex and Claude pre-approve only OpenMausBot's guarded connector proxy. The pro
 
 Missing or invalid policy and expired capabilities deny provider actions. OAuth renewal and other operator-only prerequisites are terminal blockers; connect or repair accounts from **Connected apps**, not from a bot turn. Decision storage contains rule, account alias, tool, argument digest, provider result reference, and outcome, never raw arguments.
 
+## Credential-isolated hosted mode
+
+Hosted deployments can run connector execution in a distinct-UID sidecar. Set `OMB_CONNECTOR_SIDECAR_URL`, mount the same owner-generated `OMB_CONNECTOR_SIDECAR_TOKEN_FILE`, `OMB_AUTONOMY_POLICY_PATH`, and `OMB_AUTONOMY_SIGNING_KEY_FILE` into the server and sidecar, and set `OMB_CONNECTOR_SIDECAR_REQUIRED=1` on the server. Mount `COMPOSIO_API_KEY_FILE`, `OMB_MCP_SECRETS_FILE`, and the connector-only state directory on the sidecar only. Do not expose the sidecar port outside an internal container network.
+
+Set `OMB_EXACT_NONCE_FILE` to a sidecar-owned mode-0600 path in that connector state directory. It preserves single-use capability replay protection across sidecar restarts.
+
+In this mode the OMB container, Codex, Claude, and bot shells receive no Composio or custom-MCP provider credentials. The sidecar independently rechecks policy and exact capabilities before execution, rejects mixed batches atomically, and consumes outbound/operator-exception capabilities once. Provider connection inventory and account-management calls also traverse the private sidecar. The Composio key becomes host-managed; the general settings API refuses to replace it.
+
 ## Signed trigger wakes
 
 The hosted surface accepts Composio V3 trigger callbacks at `POST /api/webhooks/composio` when `COMPOSIO_WEBHOOK_SECRET` or `COMPOSIO_WEBHOOK_SECRET_FILE` is configured. It verifies the standard raw-body signature and timestamp with a five-minute tolerance, deduplicates stable event/log ids for 30 days, and suppresses unchanged material for 24 hours. Exact trigger-to-bot routes come from the autonomy policy.

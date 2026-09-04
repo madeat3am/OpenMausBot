@@ -21,6 +21,7 @@ import type { RoutineRequestCardData } from "../../shared/routine-request";
 import type { RoutineRunCardData } from "../../shared/routine-run";
 import type { GroupGoalRunCardData } from "../../shared/group-goal-run";
 import type { OutboundProposalCardData } from "../../shared/outbound-proposal";
+import type { OperatorExceptionCardData } from "../../shared/operator-exception";
 import {
   reviewedSkillSha256,
   skillRequestBehavior,
@@ -79,6 +80,8 @@ export interface OptionCardData {
   /** Reviewed outbound communications proposal; Send/Revise/Cancel are
    * resolved by the harness rather than a resumed model turn. */
   outboundProposal?: OutboundProposalCardData;
+  /** Exact attended exception; executable provider arguments stay server-side. */
+  operatorException?: OperatorExceptionCardData;
 }
 
 export interface ConnectorCardData {
