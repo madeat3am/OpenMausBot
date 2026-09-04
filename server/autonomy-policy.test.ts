@@ -168,16 +168,34 @@ describe("autonomy policy", () => {
   });
 
   it("inspects the isolated Todoist broker like Composio and preserves atomic batches", () => {
-    expect(actionsFromCustomMcpPayload("todoist", {
+    const extracted = actionsFromCustomMcpPayload("todoist", {
       method: "tools/call",
       params: { name: "COMPOSIO_MULTI_EXECUTE_TOOL", arguments: { tools: [
         { slug: "TODOIST_GET_ALL_TASKS", arguments: {} },
         { slug: "GMAIL_FETCH_EMAILS", arguments: {} },
       ] } },
-    })).toMatchObject({ actions: [
+    });
+    expect(extracted).toMatchObject({ actions: [
       { transport: "custom-mcp", server: "todoist", tool: "TODOIST_GET_ALL_TASKS" },
       { transport: "custom-mcp", server: "todoist", tool: "GMAIL_FETCH_EMAILS" },
     ] });
+    const policy = parseAutonomyPolicy({
+      schema: "openmausbot.autonomy-policy.v1",
+      revision: "isolated-todoist",
+      rules: [{
+        id: "todoist-read",
+        botId: "ops",
+        wakeKinds: ["routine"],
+        routineIds: ["morning"],
+        transport: "custom-mcp",
+        server: "todoist",
+        tools: ["TODOIST_GET_ALL_TASKS"],
+        effect: "read",
+      }],
+    });
+    const authority = new AutonomyAuthority({ policy: policy.policy, digest: policy.digest, revision: "isolated-todoist", status: "resolved" }, Buffer.alloc(32, 12));
+    const capability = authority.issue({ botId: "ops", threadId: "thread-1", wakeKind: "routine", routineId: "morning" })!;
+    expect(extracted.actions.map((action) => authority.authorize(capability, action).allowed)).toEqual([true, false]);
     expect(actionsFromCustomMcpPayload("todoist", {
       method: "tools/call",
       params: { name: "COMPOSIO_MULTI_EXECUTE_TOOL", arguments: { tools: [{}] } },
