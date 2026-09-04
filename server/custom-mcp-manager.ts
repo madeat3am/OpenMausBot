@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { dirname } from "node:path";
 
 import { augmentedPath } from "./env-path.ts";
 import { createLineSplitter } from "./mcp-bridge.ts";
@@ -29,6 +30,24 @@ function publicError(message: string): Error {
   return new Error(`custom MCP unavailable: ${message}`);
 }
 
+export function customMcpChildCommand(server: CustomMcpServer): { command: string; args: string[] } {
+  if (process.env.OMB_MCP_CHILD_BWRAP !== "1") return { command: server.command, args: server.args };
+  const hidden = new Set<string>();
+  for (const name of ["OMB_MCP_SECRETS_FILE", "OMB_AUTONOMY_POLICY_PATH", "OMB_AUTONOMY_SIGNING_KEY_FILE", "OMB_CONNECTOR_CONFIG_FILE", "OMB_EXACT_NONCE_FILE"]) {
+    const value = process.env[name]?.trim();
+    if (value?.startsWith("/")) hidden.add(dirname(value));
+  }
+  return {
+    command: "/usr/bin/bwrap",
+    args: [
+      "--die-with-parent", "--new-session", "--unshare-user", "--unshare-pid", "--unshare-uts", "--unshare-ipc",
+      "--uid", "0", "--gid", "0", "--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+      ...[...hidden].sort().flatMap((path) => ["--tmpfs", path]),
+      "--", server.command, ...server.args,
+    ],
+  };
+}
+
 /** The MCP child gets a deliberately small ambient environment plus only its
  * own secret subtree. In particular it never inherits OpenMausBot provider,
  * policy, connector, or sibling-MCP credentials from the server process. */
@@ -57,7 +76,8 @@ export class CustomMcpManager {
       if (existing.serverName !== serverName) throw publicError("session belongs to another server");
       return existing;
     }
-    const child = spawnCli(server.command, server.args, {
+    const childCommand = customMcpChildCommand(server);
+    const child = spawnCli(childCommand.command, childCommand.args, {
       cwd: process.cwd(),
       env: customMcpChildEnvironment(server.env),
       stdio: ["pipe", "pipe", "pipe"],

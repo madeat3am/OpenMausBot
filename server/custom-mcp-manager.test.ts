@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { CustomMcpManager, customMcpChildEnvironment } from "./custom-mcp-manager.ts";
+import { CustomMcpManager, customMcpChildCommand, customMcpChildEnvironment } from "./custom-mcp-manager.ts";
 
 const dirs: string[] = [];
 afterEach(() => dirs.splice(0).forEach((dir) => rmSync(dir, { recursive: true, force: true })));
@@ -15,6 +15,19 @@ describe("guarded custom MCP manager", () => {
     expect(env.OMB_MCP_SECRETS_FILE).toBeUndefined();
     expect(env.OMB_AUTONOMY_POLICY_PATH).toBeUndefined();
     expect(env.COMPOSIO_API_KEY).toBeUndefined();
+  });
+
+  it("wraps each hosted child in bubblewrap and hides connector state", () => {
+    process.env.OMB_MCP_CHILD_BWRAP = "1";
+    process.env.OMB_MCP_SECRETS_FILE = "/authority/sidecar/mcp-secrets.json";
+    process.env.OMB_CONNECTOR_CONFIG_FILE = "/authority/sidecar/connector-config.json";
+    const command = customMcpChildCommand({ command: "node", args: ["server.mjs"], env: {} });
+    expect(command.command).toBe("/usr/bin/bwrap");
+    expect(command.args).toContain("--unshare-pid");
+    expect(command.args).toEqual(expect.arrayContaining(["--tmpfs", "/authority/sidecar", "--", "node", "server.mjs"]));
+    delete process.env.OMB_MCP_CHILD_BWRAP;
+    delete process.env.OMB_MCP_SECRETS_FILE;
+    delete process.env.OMB_CONNECTOR_CONFIG_FILE;
   });
 
   it("keeps one stdio session and relays responses by JSON-RPC id", async () => {
