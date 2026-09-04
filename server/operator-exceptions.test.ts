@@ -37,7 +37,9 @@ describe("operator exception proposals", () => {
     const first = store.create(input, 100);
     expect(store.create(input, 101).proposalId).toBe(first.proposalId);
     expect(new OperatorExceptionStore(dir).get(first.proposalId)).toMatchObject({ status: "pending", action: input.action });
-    expect(statSync(join(dir, "operator-exceptions.json")).mode & 0o777).toBe(0o600);
+    if (process.platform !== "win32") {
+      expect(statSync(join(dir, "operator-exceptions.json")).mode & 0o777).toBe(0o600);
+    }
     expect(() => store.create({ ...input, action: { ...input.action, tool: "GMAIL_DELETE_MESSAGE", arguments: { permanent: true } } })).toThrow(/not an operator exception/);
   });
 
@@ -56,6 +58,8 @@ describe("operator exception proposals", () => {
     expect(first.consumeExact(token, "operator-exception", action)).toBe(true);
     expect(new AutonomyAuthority(undefined, key, ledger).consumeExact(token, "operator-exception", action)).toBe(false);
     expect(readFileSync(ledger, "utf8")).toContain(" ");
-    expect(statSync(ledger).mode & 0o777).toBe(0o600);
+    if (process.platform !== "win32") {
+      expect(statSync(ledger).mode & 0o777).toBe(0o600);
+    }
   });
 });
