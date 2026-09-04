@@ -1,6 +1,7 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "openmausbot-composio",
+  "account_id": "5c719bd1a36fdeb0d2a8d738685c5700",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-18",
   "compatibility_flags": ["nodejs_compat"],
@@ -15,7 +16,7 @@
     {
       "binding": "DB",
       "database_name": "openmausbot-composio",
-      "database_id": "435bcde1-c017-416f-b041-7ffc508e9d88",
+      "database_id": "3e94d5f7-790a-4649-8aaa-908ff556e153",
       "migrations_dir": "migrations"
     }
   ],

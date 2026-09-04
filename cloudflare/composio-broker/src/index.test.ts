@@ -136,6 +136,7 @@ describe("connected-apps broker boundaries", () => {
     expect(JSON.parse(String(fetchCalls[0].init?.body))).toMatchObject({
       user_id: "omb_user",
       sandbox: { enable: false },
+      workbench: { enable: false },
       multi_account: multiAccount,
     });
     expect(fetchCalls.some((call) => call.url.endsWith("/tool_router/session/trs_new") && !call.init?.method)).toBe(true);

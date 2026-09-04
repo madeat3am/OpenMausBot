@@ -206,6 +206,10 @@ async function createSession(env: Env, userId: string) {
     body: JSON.stringify({
       user_id: userId,
       sandbox: { enable: false },
+      // Composio documents `sandbox` as the preferred key, but the live v3
+      // endpoint still echoes and enforces the fully-supported `workbench`
+      // alias. Send both so either server shape disables remote compute.
+      workbench: { enable: false },
       manage_connections: {
         enable: true,
         enable_wait_for_connections: true,
