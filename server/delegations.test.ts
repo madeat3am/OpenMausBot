@@ -1,4 +1,3 @@
-import { findLatestDelegationReceipt, recordDelegationReceipt } from "./delegations.ts";
 // Async peer handoff (`delegate_bot`) — pure logic. Each test stands up a
 // real Store with throwaway bots, a fake comms-bus (records broadcasts),
 // and a runTarget stub that captures the would-be turn so the test can
@@ -24,6 +23,7 @@ import {
   pendingDelegationInfo,
   pendingDelegationSnapshot,
   queueDelegation,
+  findLatestDelegationReceipt,
   recordDelegationReceipt,
   releaseDelegationsWaitingOn,
   summarizeDelegatedActivity,
