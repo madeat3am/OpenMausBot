@@ -14,6 +14,10 @@ const terminalReceipt = z.object({
   status: z.literal("completed"),
   finishedAt: z.number().int().positive(),
 }).strict();
+const humanVoiceRubric = z.object({
+  version: z.literal("openmausbot.human-voice-rubric.v1"),
+  applied: z.literal(true),
+}).strict();
 const attachment = z.object({
   name: short,
   mime: short,
@@ -31,6 +35,7 @@ const actionSchema = z.object({
   server: short,
   tool: short,
   arguments: z.record(z.string(), z.unknown()),
+  providerAccountId: short,
   accountAlias: short.optional(),
 }).strict();
 
@@ -38,23 +43,34 @@ const proposalInputSchema = z.object({
   originatingThreadId: short,
   coordinatorBotId: short,
   communicationsReceipt: terminalReceipt,
-  humanVoiceReceipt: terminalReceipt,
+  reviewClass: z.enum(["routine", "high-stakes"]),
+  humanVoiceRubric,
+  humanVoiceReceipt: terminalReceipt.optional(),
+  providerAccountId: short,
   accountAlias: short,
+  providerChannelId: short,
   channel: short,
   purpose: short,
   relationshipBoundary: short,
+  providerRecipientIds: z.array(short).min(1).max(64),
   recipients: z.array(short).min(1).max(64),
   subject: z.string().max(2_000).optional(),
   body: z.string().min(1).max(200_000),
   attachments: z.array(attachment).max(32).default([]),
-  providerDraftId: short.optional(),
+  providerDraftId: short,
   sourceReferences: z.array(sourceReference).min(1).max(100),
   materialFacts: z.enum(["verified", "missing", "conflicting"]),
   rationale: z.string().trim().min(1).max(2_000),
   providerAction: actionSchema,
   providerReadAction: actionSchema,
-  idempotencyKey: short,
-}).strict();
+}).strict().superRefine((value, ctx) => {
+  if (value.reviewClass === "high-stakes" && !value.humanVoiceReceipt) {
+    ctx.addIssue({ code: "custom", path: ["humanVoiceReceipt"], message: "high-stakes proposals require terminal Human Voice review" });
+  }
+  if (value.providerRecipientIds.length !== value.recipients.length) {
+    ctx.addIssue({ code: "custom", path: ["providerRecipientIds"], message: "provider recipient ids must match displayed recipients" });
+  }
+});
 
 export type OutboundProposalInput = z.input<typeof proposalInputSchema>;
 export interface OutboundProviderReadback {
@@ -71,11 +87,30 @@ export interface OutboundProposal extends z.infer<typeof proposalInputSchema> {
   status: OutboundProposalStatus;
   createdAt: number;
   updatedAt: number;
+  approvalExpiresAt: number;
+  /** OMB-owned attempt identity. It is intentionally not injected into tool
+   * arguments: many provider write schemas (including GMAIL_SEND_DRAFT) do
+   * not accept an idempotency field. */
+  idempotencyKey: string;
   providerReadback?: OutboundProviderReadback;
   outcomeReason?: string;
 }
 
-interface DiskState { schema: "openmausbot.outbound-proposals-store.v1"; proposals: OutboundProposal[] }
+interface DiskState { schema: "openmausbot.outbound-proposals-store.v1"; proposals: unknown[] }
+
+const DRAFT_ARGUMENT_KEYS = ["draft_id", "draftId", "provider_draft_id", "providerDraftId"];
+
+function boundArgument(action: z.infer<typeof actionSchema>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = action.arguments[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
+function providerFromTool(tool: string): string {
+  return tool.trim().split("_", 1)[0]!.toLowerCase();
+}
 
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
@@ -101,11 +136,16 @@ function proposalInput(value: unknown): z.infer<typeof proposalInputSchema> {
     originatingThreadId: row.originatingThreadId,
     coordinatorBotId: row.coordinatorBotId,
     communicationsReceipt: row.communicationsReceipt,
+    reviewClass: row.reviewClass,
+    humanVoiceRubric: row.humanVoiceRubric,
     humanVoiceReceipt: row.humanVoiceReceipt,
+    providerAccountId: row.providerAccountId,
     accountAlias: row.accountAlias,
+    providerChannelId: row.providerChannelId,
     channel: row.channel,
     purpose: row.purpose,
     relationshipBoundary: row.relationshipBoundary,
+    providerRecipientIds: row.providerRecipientIds,
     recipients: row.recipients,
     subject: row.subject,
     body: row.body,
@@ -116,7 +156,6 @@ function proposalInput(value: unknown): z.infer<typeof proposalInputSchema> {
     rationale: row.rationale,
     providerAction: row.providerAction,
     providerReadAction: row.providerReadAction,
-    idempotencyKey: row.idempotencyKey,
   });
 }
 
@@ -126,12 +165,22 @@ function validStored(value: unknown): value is OutboundProposal {
   return row.schema === OUTBOUND_PROPOSAL_SCHEMA
     && typeof row.proposalId === "string"
     && typeof row.canonicalDigest === "string"
+    && /^[a-f0-9]{64}$/.test(row.canonicalDigest)
+    && row.idempotencyKey === `omb-outbound:${row.proposalId}`
+    && Number.isSafeInteger(row.createdAt)
+    && Number.isSafeInteger(row.updatedAt)
+    && Number.isSafeInteger(row.approvalExpiresAt)
+    && row.approvalExpiresAt === row.createdAt! + 30 * 60_000
     && (() => { try { proposalInput(row); return true; } catch { return false; } })()
     && ["pending", "held", "revision_requested", "cancelled", "sending", "sent", "failed"].includes(String(row.status));
 }
 
 export class OutboundProposalStore {
   private proposals: OutboundProposal[] = [];
+  /** Invalid older rows are retained byte-for-byte as non-executable history.
+   * A current proposal is never reconstructed from fields that were absent at
+   * the time the operator reviewed it. */
+  private preservedLegacyProposals: unknown[] = [];
   private readonly file: string;
 
   constructor(dataDir: string, file = join(dataDir, "outbound-proposals.json")) {
@@ -140,6 +189,21 @@ export class OutboundProposalStore {
       const disk = JSON.parse(readFileSync(file, "utf8")) as Partial<DiskState>;
       if (disk.schema === "openmausbot.outbound-proposals-store.v1" && Array.isArray(disk.proposals)) {
         this.proposals = disk.proposals.filter(validStored);
+        this.preservedLegacyProposals = disk.proposals.filter((proposal) => !validStored(proposal));
+        let interrupted = false;
+        this.proposals = this.proposals.map((proposal) => {
+          if (proposal.status !== "sending") return proposal;
+          interrupted = true;
+          const observedAt = Date.now();
+          return {
+            ...proposal,
+            status: "failed",
+            updatedAt: observedAt,
+            outcomeReason: "send outcome is ambiguous after restart; no retry was attempted",
+            providerReadback: { observedAt, detail: "server restarted during the provider attempt" },
+          };
+        });
+        if (interrupted) this.persist();
       }
     } catch {
       // First launch or corrupt legacy state: fail closed with no approvals.
@@ -151,25 +215,41 @@ export class OutboundProposalStore {
     if (input.providerAction.transport !== "composio" || input.providerAction.server !== "composio") {
       throw new Error("outbound sends must use the guarded Composio provider path");
     }
-    if (input.providerAction.accountAlias !== input.accountAlias) {
+    if (input.providerAction.providerAccountId !== input.providerAccountId) {
       throw new Error("provider action account does not match the proposal");
     }
-    if (input.providerReadAction.accountAlias !== input.accountAlias) {
+    if (input.providerReadAction.providerAccountId !== input.providerAccountId) {
       throw new Error("provider readback account does not match the proposal");
+    }
+    if (input.providerReadAction.transport !== "composio" || input.providerReadAction.server !== "composio") {
+      throw new Error("outbound readback must use the guarded Composio provider path");
+    }
+    const expectedProvider = input.providerChannelId.trim().toLowerCase();
+    if (providerFromTool(input.providerAction.tool) !== expectedProvider || providerFromTool(input.providerReadAction.tool) !== expectedProvider) {
+      throw new Error("provider action channel does not match the proposal");
+    }
+    if (boundArgument(input.providerAction, DRAFT_ARGUMENT_KEYS) !== input.providerDraftId) {
+      throw new Error("provider send action is not bound to the approved draft");
+    }
+    if (boundArgument(input.providerReadAction, DRAFT_ARGUMENT_KEYS) !== input.providerDraftId) {
+      throw new Error("provider readback action is not bound to the approved draft");
     }
     if (input.sourceReferences.some((source) => source.relationshipBoundary !== input.relationshipBoundary)) {
       throw new Error("cross-relationship evidence is forbidden");
     }
     const stale = input.sourceReferences.some((source) => source.observedAt > now || source.freshUntil < now);
     const status: OutboundProposalStatus = input.materialFacts === "verified" && !stale ? "pending" : "held";
+    const proposalId = randomUUID();
     const proposal: OutboundProposal = {
       schema: OUTBOUND_PROPOSAL_SCHEMA,
-      proposalId: randomUUID(),
+      proposalId,
       ...input,
       canonicalDigest: proposalDigest(input),
+      idempotencyKey: `omb-outbound:${proposalId}`,
       status,
       createdAt: now,
       updatedAt: now,
+      approvalExpiresAt: now + 30 * 60_000,
       ...(status === "held" ? { outcomeReason: stale ? "source evidence is stale" : `material facts are ${input.materialFacts}` } : {}),
     };
     this.proposals.unshift(proposal);
@@ -200,10 +280,14 @@ export class OutboundProposalStore {
   }
 
   actionStillMatches(proposal: OutboundProposal): boolean {
-    return proposal.canonicalDigest === proposalDigest(proposalInput(proposal));
+    return proposal.idempotencyKey === `omb-outbound:${proposal.proposalId}`
+      && proposal.canonicalDigest === proposalDigest(proposalInput(proposal));
   }
 
   private persist(): void {
-    writeFileAtomic(this.file, JSON.stringify({ schema: "openmausbot.outbound-proposals-store.v1", proposals: this.proposals }, null, 2), { mode: 0o600 });
+    writeFileAtomic(this.file, JSON.stringify({
+      schema: "openmausbot.outbound-proposals-store.v1",
+      proposals: [...this.proposals, ...this.preservedLegacyProposals],
+    }, null, 2), { mode: 0o600 });
   }
 }

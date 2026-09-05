@@ -9,6 +9,9 @@ import {
   AutonomyAuthority,
   AUTONOMY_DECISION_SCHEMA,
   exactActionDigest,
+  splitIndependentReadPayloads,
+  splitReadBatchMcpResponse,
+  usableMcpReadResponse,
   type AutonomyDecision,
   type ToolAction,
 } from "./autonomy-policy.ts";
@@ -86,11 +89,10 @@ function denied(id: unknown, decisions: AutonomyDecision[]) {
 }
 
 function authorize(actions: ToolAction[], capability: unknown): AutonomyDecision[] {
-  const decisions = actions.map((action) => authority.authorize(typeof capability === "string" ? capability : undefined, action));
-  if (!decisions.some((decision) => !decision.allowed)) return decisions;
-  return decisions.map((decision): AutonomyDecision => decision.allowed
-    ? { ...decision, allowed: false, code: "mixed-batch-denied", reason: "the entire batch was denied before execution" }
-    : decision);
+  return actions.map((action) => authority.authorize(
+    typeof capability === "string" ? capability : undefined,
+    action,
+  ));
 }
 
 function exactAuthorized(value: unknown, actions: ToolAction[]): boolean {
@@ -160,7 +162,40 @@ const server = createServer(async (req, res) => {
         } else {
           const decisions = authorize(extracted.actions, input.capability);
           if (decisions.some((decision) => !decision.allowed)) {
-            return json(res, 200, { status: 200, bodyBase64: Buffer.from(JSON.stringify(denied((payload as { id?: unknown })?.id, decisions))).toString("base64"), contentType: "application/json" });
+            const splitReads = splitIndependentReadPayloads(payload, extracted.actions, decisions);
+            if (splitReads) {
+              let transportSessionId = typeof input.transportSessionId === "string" ? input.transportSessionId : undefined;
+              const results: Array<{ action: ToolAction; response?: unknown }> = [];
+              for (const [index, item] of splitReads.entries()) {
+                if (!decisions[index]!.allowed) {
+                  results.push({ action: item.action });
+                  continue;
+                }
+                let upstream;
+                try {
+                  upstream = await composio.relayMcp(cfg, item.payload as never, transportSessionId);
+                } catch {
+                  results.push({ action: item.action });
+                  continue;
+                }
+                transportSessionId = upstream.transportSessionId ?? transportSessionId;
+                const text = Buffer.from(upstream.bytes).toString("utf8");
+                let response: unknown = text;
+                try { response = JSON.parse(text); } catch {}
+                results.push({ action: item.action, ...(usableMcpReadResponse(upstream.status, response) ? { response } : {}) });
+              }
+              const response = splitReadBatchMcpResponse((payload as { id?: unknown })?.id, results);
+              return json(res, 200, {
+                status: 200,
+                bodyBase64: Buffer.from(JSON.stringify(response)).toString("base64"),
+                contentType: "application/json",
+                ...(transportSessionId ? { transportSessionId } : {}),
+              });
+            }
+            const rejected = decisions.map((decision): AutonomyDecision => decision.allowed
+              ? { ...decision, allowed: false, code: "mixed-batch-denied", reason: "the entire batch was denied before execution" }
+              : decision);
+            return json(res, 200, { status: 200, bodyBase64: Buffer.from(JSON.stringify(denied((payload as { id?: unknown })?.id, rejected))).toString("base64"), contentType: "application/json" });
           }
         }
       }

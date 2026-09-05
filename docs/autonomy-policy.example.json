@@ -3,39 +3,21 @@
   "revision": "replace-with-private-revision",
   "rules": [
     {
-      "id": "personal-admin-todoist",
-      "botId": "replace-with-bot-id",
-      "wakeKinds": ["operator", "routine", "webhook"],
-      "triggerIds": ["todoist-events"],
-      "transport": "composio",
-      "server": "composio",
-      "tools": ["TODOIST_UPSERT_TASK", "TODOIST_GET_TASKS"],
-      "accountAliases": ["replace-with-private-alias"],
-      "effect": "todoist_upsert"
-    },
-    {
       "id": "communications-origin-thread",
       "botId": "replace-with-bot-id",
-      "wakeKinds": ["operator", "routine"],
+      "wakeKinds": ["operator", "routine", "delegated"],
       "transport": "composio",
       "server": "composio",
       "tools": ["SLACK_SEND_MESSAGE"],
-      "accountAliases": ["replace-with-private-alias"],
+      "providerAccountIds": ["replace-with-connected-account-id"],
+      "accountAliases": ["replace-with-display-alias"],
       "effect": "thread_reply",
       "authority": "operator-promoted",
       "constraints": {
+        "originatingThreadOnly": true,
         "recipientAliases": ["replace-with-private-recipient-alias"],
         "purposes": ["replace-with-approved-purpose"]
       }
-    },
-    {
-      "id": "client-ops-wiki-read",
-      "botId": "replace-with-bot-id",
-      "wakeKinds": ["operator", "routine", "webhook"],
-      "transport": "custom-mcp",
-      "server": "replace-with-custom-mcp-name",
-      "tools": ["replace-with-exact-tool-name"],
-      "effect": "read"
     }
   ],
   "webhooks": [

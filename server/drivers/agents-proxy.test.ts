@@ -225,6 +225,7 @@ describe("agents-proxy MCP surface", () => {
       "list_routines",
       "propose_routine",
       "propose_routine_action",
+      "routine_checkpoint",
       "propose_outbound",
       "skills_list",
       "skill_manage",

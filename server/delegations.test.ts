@@ -236,6 +236,18 @@ describe("drainDelegations", () => {
     expect(fromChips[0]?.comm?.groupId).toBe(targetChips[0]?.comm?.groupId);
   });
 
+  it("lets Poppy dispatch a cross-section delegation at the final queue edge", async () => {
+    store.patchBot(from.id, { name: "Poppy", chiefOfStaff: true, section: "Ops" });
+    store.patchBot(target.id, { section: "Finance" });
+    queueDelegation(commsBus, store.bot(from.id)!, { toBotId: target.id, message: "reconcile invoices", depth: 0 }, 1);
+    drainDelegations(commsBus, approvalBus, from.threadId, (toBotId, message, commsDepth) => {
+      runTargetCalls.push({ toBotId, message, commsDepth });
+    });
+
+    await waitFor(() => runTargetCalls.length === 1);
+    expect(runTargetCalls[0]).toMatchObject({ toBotId: target.id, commsDepth: 1 });
+  });
+
   it("includes the reason line in the prefixed message when one is given", async () => {
     queueDelegation(
       commsBus,

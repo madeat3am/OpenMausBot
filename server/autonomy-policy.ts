@@ -15,11 +15,14 @@ export const ALLOWED_EFFECTS = [
   "crm_note_upsert",
   "wiki_upsert",
   "omb_admin",
+  /** Any non-outbound, non-hard-denied provider write that runs under the
+   * default-allow path (Drive uploads, GitHub issues, Monday updates, ...). */
+  "internal_write",
 ] as const;
 
 export const DENIED_EFFECTS = ["money", "delete", "permission", "credential", "security"] as const;
 
-const wakeKindSchema = z.enum(["operator", "routine", "webhook"]);
+const wakeKindSchema = z.enum(["operator", "routine", "webhook", "delegated"]);
 const transportSchema = z.enum(["composio", "custom-mcp"]);
 const effectSchema = z.enum(ALLOWED_EFFECTS);
 const shortId = z.string().trim().min(1).max(160);
@@ -33,12 +36,16 @@ const constraintsSchema = z.object({
 const ruleSchema = z.object({
   id: shortId,
   botId: shortId,
-  wakeKinds: z.array(wakeKindSchema).min(1).max(3),
+  wakeKinds: z.array(wakeKindSchema).min(1).max(4),
   routineIds: z.array(shortId).max(100).optional(),
   triggerIds: z.array(shortId).max(100).optional(),
   transport: transportSchema,
   server: shortId,
   tools: z.array(shortId).min(1).max(200),
+  /** Stable provider connection ids are the authorization boundary. Aliases
+   * remain accepted for older policy rows, but are display labels only once
+   * this field is present. */
+  providerAccountIds: z.array(shortId).max(100).optional(),
   accountAliases: z.array(shortId).max(100).optional(),
   effect: effectSchema,
   /** Outbound sends never become autonomous merely because a broad policy
@@ -112,6 +119,7 @@ export interface ToolAction {
   server: string;
   tool: string;
   arguments: Record<string, unknown>;
+  providerAccountId?: string;
   accountAlias?: string;
 }
 
@@ -123,6 +131,7 @@ export interface AutonomyDecision {
   ruleId?: string;
   effect?: AllowedEffect | DeniedEffect;
   tool: string;
+  providerAccountId?: string;
   accountAlias?: string;
 }
 
@@ -328,7 +337,34 @@ export class AutonomyAuthority {
     const hardDenied = hardDeniedEffect(action);
     if (hardDenied) return denied(action, "hard-deny", `${hardDenied} effects are never autonomous`, hardDenied);
     if (isDiscoveryAction(action)) {
-      return { schema: AUTONOMY_DECISION_SCHEMA, allowed: true, code: "discovery", reason: "non-effecting discovery", effect: "read", tool: action.tool, ...(action.accountAlias ? { accountAlias: action.accountAlias } : {}) };
+      return {
+        schema: AUTONOMY_DECISION_SCHEMA,
+        allowed: true,
+        code: "discovery",
+        reason: "non-effecting discovery",
+        effect: "read",
+        tool: action.tool,
+        ...(action.providerAccountId ? { providerAccountId: action.providerAccountId } : {}),
+        ...(action.accountAlias ? { accountAlias: action.accountAlias } : {}),
+      };
+    }
+    // Operator decision (2026-09-04/05): the autonomy boundary is OUTBOUND.
+    // Reads, drafts, and reversible internal writes run for every bot, wake
+    // kind, and connected account with no rule lookup and no capability
+    // dependency, so a stale capability or a renamed account alias can never
+    // deny evidence gathering. Only hard-denied effects (above) and outbound
+    // sends (below, operator-promoted rules + exact one-time approval) are gated.
+    if (!isOutboundAction(action)) {
+      return {
+        schema: AUTONOMY_DECISION_SCHEMA,
+        allowed: true,
+        code: "default-allow",
+        reason: "non-outbound effects run without a rule",
+        effect: classifyDefaultEffect(action),
+        tool: action.tool,
+        ...(action.providerAccountId ? { providerAccountId: action.providerAccountId } : {}),
+        ...(action.accountAlias ? { accountAlias: action.accountAlias } : {}),
+      };
     }
     const capability = this.verify(token, now);
     if (!capability) return denied(action, "invalid-capability", "missing, expired, or invalid autonomy capability");
@@ -341,7 +377,10 @@ export class AutonomyAuthority {
         && (!capability.routineId || !rule.routineIds.includes(capability.routineId))) continue;
       if (capability.wakeKind === "webhook" && rule.triggerIds
         && (!capability.triggerId || !rule.triggerIds.includes(capability.triggerId))) continue;
-      if (rule.accountAliases && (!action.accountAlias || !rule.accountAliases.includes(action.accountAlias))) continue;
+      if (rule.providerAccountIds
+        && (!action.providerAccountId || !rule.providerAccountIds.includes(action.providerAccountId))) continue;
+      if (!rule.providerAccountIds && rule.accountAliases
+        && (!action.accountAlias || !rule.accountAliases.includes(action.accountAlias))) continue;
       if (rule.constraints?.originatingThreadOnly && !argumentMatches(action.arguments, ["threadId", "thread_id"], capability.threadId)) continue;
       if (rule.constraints?.recipientAliases) {
         const recipient = stringArgument(action.arguments, ["recipientAlias", "recipient_alias", "recipient", "to"]);
@@ -363,6 +402,7 @@ export class AutonomyAuthority {
         ruleId: rule.id,
         effect: rule.effect,
         tool: action.tool,
+        ...(action.providerAccountId ? { providerAccountId: action.providerAccountId } : {}),
         ...(action.accountAlias ? { accountAlias: action.accountAlias } : {}),
       };
     }
@@ -380,7 +420,16 @@ function loadAutonomySigningKey(path = process.env.OMB_AUTONOMY_SIGNING_KEY_FILE
 }
 
 function denied(action: ToolAction, code: string, reason: string, effect?: DeniedEffect): AutonomyDecision {
-  return { schema: AUTONOMY_DECISION_SCHEMA, allowed: false, code, reason, ...(effect ? { effect } : {}), tool: action.tool, ...(action.accountAlias ? { accountAlias: action.accountAlias } : {}) };
+  return {
+    schema: AUTONOMY_DECISION_SCHEMA,
+    allowed: false,
+    code,
+    reason,
+    ...(effect ? { effect } : {}),
+    tool: action.tool,
+    ...(action.providerAccountId ? { providerAccountId: action.providerAccountId } : {}),
+    ...(action.accountAlias ? { accountAlias: action.accountAlias } : {}),
+  };
 }
 
 function stringArgument(args: Record<string, unknown>, keys: string[]): string | undefined {
@@ -410,6 +459,48 @@ function hardDeniedEffect(action: ToolAction): DeniedEffect | null {
   return null;
 }
 
+const OUTBOUND_TOOL = /(^|_)(SEND|REPLY|FORWARD|POST|PUBLISH|SHARE|INVITE|RSVP)(_|$)/;
+const CALENDAR_WRITE = /^GOOGLECALENDAR_(CREATE|UPDATE|PATCH|QUICK_ADD|INSERT)/;
+
+function nestedRecord(args: Record<string, unknown>, key: string): Record<string, unknown> | null {
+  const value = args[key];
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+/** Outbound = anything that reaches another person: sends, replies, forwards,
+ * posts, publishes, shares, invitations, RSVPs, and calendar writes that carry
+ * attendees or provider notifications. Everything else is an internal effect. */
+export function isOutboundAction(action: ToolAction): boolean {
+  const tool = action.tool.toUpperCase();
+  if (OUTBOUND_TOOL.test(tool)) return true;
+  if (!CALENDAR_WRITE.test(tool)) return false;
+  const scopes = [action.arguments, nestedRecord(action.arguments, "event"), nestedRecord(action.arguments, "body")]
+    .filter((scope): scope is Record<string, unknown> => scope !== null);
+  for (const scope of scopes) {
+    const attendees = scope.attendees ?? scope.attendee_emails ?? scope.attendeeEmails;
+    if (Array.isArray(attendees) ? attendees.length > 0 : typeof attendees === "string" && attendees.trim() !== "") return true;
+    for (const key of ["sendUpdates", "send_updates", "sendNotifications", "send_notifications"]) {
+      const value = scope[key];
+      if (value === true || (typeof value === "string" && value.trim() !== "" && value.toLowerCase() !== "none")) return true;
+    }
+  }
+  return false;
+}
+
+/** Best-fit effect label for a default-allowed action; drives split-read
+ * fan-out (only `read` decisions split) and decision-log reporting. */
+export function classifyDefaultEffect(action: ToolAction): AllowedEffect {
+  if (isIndependentReadAction(action)) return "read";
+  const tool = action.tool.toUpperCase();
+  const server = action.server.toLowerCase();
+  if (/DRAFT/.test(tool)) return "communication_draft";
+  if (/^TODOIST_/.test(tool) || server === "todoist") return "todoist_upsert";
+  if (/CALENDAR_/.test(tool)) return "calendar_upsert";
+  if (/^TWENTY_/.test(tool) || server === "citadel-twenty") return "crm_note_upsert";
+  if (/WIKI/.test(tool) || server === "citadel-wiki" || server === "anythingllm") return "wiki_upsert";
+  return "internal_write";
+}
+
 /** The only hard-denied operations that can cross an attended, exact,
  * one-time operator confirmation. Permanent deletion and admin/ownership
  * changes deliberately do not match. */
@@ -431,12 +522,26 @@ function actionFromNested(value: unknown): ToolAction | null {
   if (!tool) return null;
   const args = [row.arguments, row.args, row.input].find((item) => item && typeof item === "object" && !Array.isArray(item));
   const argumentsRecord = (args ?? {}) as Record<string, unknown>;
+  const accountIdKeys = ["connected_account_id", "connectedAccountId", "provider_account_id", "providerAccountId"];
+  const rowProviderAccountId = stringArgument(row, accountIdKeys);
+  const argumentProviderAccountId = stringArgument(argumentsRecord, accountIdKeys);
+  // Composio executes the row-level selector. A contradictory nested value
+  // must never authorize a different account than the provider will use.
+  if (rowProviderAccountId && argumentProviderAccountId && rowProviderAccountId !== argumentProviderAccountId) return null;
+  // COMPOSIO_MULTI_EXECUTE_TOOL selects its connection at the row level.
+  // A nested-only value is just a provider-tool argument and cannot stand
+  // in for the account the broker will actually execute against.
+  const providerAccountId = rowProviderAccountId;
+  const explicitAlias = stringArgument({ ...row, ...argumentsRecord }, ["account", "account_alias", "accountAlias"]);
   return {
     transport: "composio",
     server: "composio",
     tool,
     arguments: argumentsRecord,
-    accountAlias: stringArgument({ ...row, ...argumentsRecord }, ["account", "account_alias", "accountAlias", "connected_account_id", "connectedAccountId"]),
+    providerAccountId,
+    // Migration-only fallback for alias-keyed policies written before
+    // providerAccountIds became the authorization boundary.
+    accountAlias: explicitAlias ?? providerAccountId,
   };
 }
 
@@ -460,7 +565,106 @@ export function actionsFromMcpPayload(payload: unknown): { actions: ToolAction[]
     if (actions.some((action) => action === null)) return { actions: [], error: "multi-execute contains an unrecognized action" };
     return { actions: actions as ToolAction[] };
   }
-  return { actions: [{ transport: "composio", server: "composio", tool, arguments: args, accountAlias: stringArgument(args, ["account", "account_alias", "accountAlias", "connected_account_id", "connectedAccountId"]) }] };
+  const providerAccountId = stringArgument(args, ["connected_account_id", "connectedAccountId", "provider_account_id", "providerAccountId"]);
+  return { actions: [{
+    transport: "composio",
+    server: "composio",
+    tool,
+    arguments: args,
+    providerAccountId,
+    accountAlias: stringArgument(args, ["account", "account_alias", "accountAlias"]) ?? providerAccountId,
+  }] };
+}
+
+/** Multi-read calls are convenience fan-out, not transactions. They may be
+ * split so one unavailable account does not suppress unrelated evidence.
+ * Writes stay all-or-nothing because their atomic intent cannot be inferred
+ * safely from a provider batch. */
+export function isIndependentReadAction(action: ToolAction): boolean {
+  if (hardDeniedEffect(action)) return false;
+  const tool = action.tool.toUpperCase();
+  return /(^|_)(GET|LIST|SEARCH|FETCH|FIND|LOOKUP|QUERY|READ|RETRIEVE|DOWNLOAD|CHECK|DESCRIBE|VIEW)(_|$)/.test(tool);
+}
+
+export function splitIndependentReadPayloads(
+  payload: unknown,
+  actions: ToolAction[],
+  decisions: AutonomyDecision[],
+): Array<{ action: ToolAction; payload: Record<string, unknown> }> | null {
+  if (
+    actions.length < 2 ||
+    decisions.length !== actions.length ||
+    !actions.every((action, index) =>
+      decisions[index]?.effect === "read" ||
+      (decisions[index]?.allowed === false && isIndependentReadAction(action)))
+  ) return null;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const request = payload as Record<string, unknown>;
+  const params = request.params;
+  if (!params || typeof params !== "object" || Array.isArray(params)) return null;
+  const paramsRecord = params as Record<string, unknown>;
+  if (paramsRecord.name !== "COMPOSIO_MULTI_EXECUTE_TOOL") return null;
+  const rawArguments = paramsRecord.arguments;
+  if (!rawArguments || typeof rawArguments !== "object" || Array.isArray(rawArguments)) return null;
+  const argumentRecord = rawArguments as Record<string, unknown>;
+  const key = Array.isArray(argumentRecord.tools) ? "tools" : Array.isArray(argumentRecord.actions) ? "actions" : null;
+  if (!key) return null;
+  const rows = argumentRecord[key] as unknown[];
+  if (rows.length !== actions.length) return null;
+  return actions.map((action, index) => ({
+    action,
+    payload: {
+      ...request,
+      params: {
+        ...paramsRecord,
+        arguments: { ...argumentRecord, [key]: [rows[index]] },
+      },
+    },
+  }));
+}
+
+export function splitReadBatchMcpResponse(
+  id: unknown,
+  results: Array<{ action: ToolAction; response?: unknown }>,
+) {
+  return {
+    jsonrpc: "2.0",
+    id,
+    result: {
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          schema: "openmausbot.split-read-results.v1",
+          results: results.map(({ action, response }) => ({
+            tool: action.tool,
+            ...(action.providerAccountId ? { providerAccountId: action.providerAccountId } : {}),
+            ...(action.accountAlias ? { accountAlias: action.accountAlias } : {}),
+            outcome: response === undefined ? "unavailable" : "completed",
+            ...(response === undefined ? {} : { response }),
+          })),
+        }),
+      }],
+      isError: results.every((result) => result.response === undefined),
+    },
+  };
+}
+
+/** HTTP success alone is not a provider outcome: MCP transports commonly
+ * return typed failures inside a 200 JSON-RPC envelope. */
+export function usableMcpReadResponse(status: number, value: unknown): boolean {
+  if (status < 200 || status >= 300) return false;
+  if (typeof value === "string") {
+    const candidate = value.trim();
+    if (!candidate.startsWith("{") && !candidate.startsWith("[")) return true;
+    try { return usableMcpReadResponse(status, JSON.parse(candidate)); } catch { return true; }
+  }
+  if (Array.isArray(value)) return value.every((item) => usableMcpReadResponse(status, item));
+  if (!value || typeof value !== "object") return true;
+  const row = value as Record<string, unknown>;
+  if (row.error) return false;
+  if (row.isError === true) return false;
+  if (row.successful === false) return false;
+  return Object.values(row).every((item) => usableMcpReadResponse(status, item));
 }
 
 /** Extract the exact effecting call for a named custom MCP. Handshakes,
@@ -500,12 +704,14 @@ export function actionsFromCustomMcpPayload(
   const args = row.arguments && typeof row.arguments === "object" && !Array.isArray(row.arguments)
     ? row.arguments as Record<string, unknown>
     : {};
+  const providerAccountId = stringArgument(args, ["connected_account_id", "connectedAccountId", "provider_account_id", "providerAccountId"]);
   return { actions: [{
     transport: "custom-mcp",
     server,
     tool,
     arguments: args,
-    accountAlias: stringArgument(args, ["account", "account_alias", "accountAlias"]),
+    providerAccountId,
+    accountAlias: stringArgument(args, ["account", "account_alias", "accountAlias"]) ?? providerAccountId,
   }] };
 }
 
@@ -518,6 +724,7 @@ export function exactActionDigest(action: ToolAction): string {
     transport: action.transport,
     server: action.server,
     tool: action.tool,
+    providerAccountId: action.providerAccountId ?? null,
     accountAlias: action.accountAlias ?? null,
     arguments: action.arguments,
   })).digest("hex");

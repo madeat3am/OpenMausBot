@@ -35,8 +35,9 @@ export function chiefOfStaffSystemPrompt(
   const chief = bots.find((bot) => bot.id === chiefId);
   const chiefSection = sectionKey(chief?.section);
   const sectionName = chiefSection || "General";
+  const globalCoordinator = chief?.name.trim().toLowerCase() === "poppy";
   const team = bots.filter(
-    (bot) => bot.id !== chiefId && !bot.hidden && sectionKey(bot.section) === chiefSection,
+    (bot) => bot.id !== chiefId && !bot.hidden && (globalCoordinator || sectionKey(bot.section) === chiefSection),
   );
   const listed = team.slice(0, ROSTER_MAX_BOTS);
   const overflow = team.length - listed.length;
@@ -62,12 +63,13 @@ export function chiefOfStaffSystemPrompt(
         "You may assign work to more than one teammate when the request genuinely benefits. Stay responsive while they work, then combine their returned results when the user asks for a synthesis.",
       ].join(" ")
     : "Your current engine cannot contact teammates. Be honest about that limitation and ask the user to choose a delegation-compatible engine before promising coordinated work.";
-  const outbound = chief?.name.trim().toLowerCase() === "poppy"
-    ? "For every outbound communication, acknowledge the request promptly, then delegate evidence gathering and drafting to Communications and a separate final pass to Human Voice. Wait for both terminal callbacks. If either reports missing, conflicting, stale, or cross-relationship evidence, hold the work and explain the conflict instead of asking to send. Otherwise call propose_outbound exactly once with both terminal receipt ids, the provider draft and reread actions, freshness, provenance, and one recommended concise draft. Never send from your own turn and never present a generic provider approval card."
+  const outbound = globalCoordinator
+    ? "For outbound communication, acknowledge the request promptly and delegate evidence gathering and drafting to Communications, which applies the inline Human Voice rubric. For high-stakes, client-sensitive, or brand-sensitive communication, also delegate a separate final pass to Human Voice. Wait only for the specialists required by that message. If a required reviewer reports missing, conflicting, stale, or cross-relationship evidence, hold the work and explain the conflict instead of asking to send. Otherwise call propose_outbound exactly once with the required terminal receipt ids, canonical provider account/channel/recipient ids, provider draft and reread actions, freshness, provenance, and one recommended concise draft. Never send from your own turn and never present a generic provider approval card."
     : "";
 
   return [
     `You are the Chief of Staff for the ${sectionName} section. You are the user's primary contact for this section's team of bots.`,
+    globalCoordinator ? "You are the sole global coordinator across all visible specialist bots. Other chiefs remain section-scoped." : "Stay within this section; Poppy owns cross-section coordination.",
     "Own the outcome: understand the request, decide what to handle yourself, coordinate the right specialists when useful, and return one concise consolidated answer.",
     "Acknowledge assigned work, select the exact owning specialist, and wait for its terminal callback before closing the request. A queue id proves assignment, not completion. In the final response include stable provider or receipt ids and the authoritative readback when an external effect was requested.",
     "If policy denies an action or a provider prerequisite is unavailable, report that terminal outcome plainly. Never imply success from a request, queue acknowledgement, draft, or transport receipt alone.",

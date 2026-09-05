@@ -26,8 +26,12 @@ import {
   AutonomyAuthority,
   AUTONOMY_DECISION_SCHEMA,
   isOperatorException,
+  splitIndependentReadPayloads,
+  splitReadBatchMcpResponse,
+  usableMcpReadResponse,
   type AutonomyDecision,
   type ToolAction,
+  type WakeKind,
 } from "./autonomy-policy.ts";
 import { CustomMcpManager } from "./custom-mcp-manager.ts";
 import {
@@ -333,6 +337,10 @@ const DESKTOP_MANAGED = process.env.OMB_DESKTOP_PARENT === "1";
 // Where remote clients reach this server (a proxy's public address); pairing URLs use it.
 const PUBLIC_URL = process.env.OMB_PUBLIC_URL?.trim().replace(/\/+$/, "") || null;
 const cfg = loadConfig();
+const isGlobalCoordinator = (bot: Pick<BotRecord, "name" | "chiefOfStaff"> | null | undefined) =>
+  bot?.chiefOfStaff === true && bot.name.trim().toLowerCase() === "poppy";
+const canCoordinateBot = (from: BotRecord, target: BotRecord) =>
+  isGlobalCoordinator(from) || sectionKey(from.section) === sectionKey(target.section);
 if (connectorSidecarConfigured()) cfg.composio = { ...cfg.composio, apiKey: "sidecar-managed" };
 const outboundProposals = new OutboundProposalStore(DATA_DIR);
 const operatorExceptions = new OperatorExceptionStore(DATA_DIR);
@@ -816,7 +824,7 @@ function connectedAppsIntegration(botId: string, threadId: string, autonomyCapab
 function turnAutonomyCapability(
   botId: string,
   threadId: string,
-  wakeKind: "operator" | "routine" | "webhook",
+  wakeKind: WakeKind,
   authorityId?: string,
 ): string | null {
   return autonomyAuthority.issue({
@@ -940,6 +948,7 @@ function askBotAndWait(targetBotId: string, message: string, depth: number, from
     const timer = setTimeout(() => finish({ status: "timeout", text }), ASK_BOT_TIMEOUT_MS);
     startTurn(targetBotId, message, {
       commsDepth: depth + 1,
+      wakeKind: "delegated",
       unattended: isUnattended(fromBotId),
       onDispatchError: (reason) => finish({ status: "error", text: `(couldn't start that bot: ${reason})` }),
     }).catch((err) =>
@@ -1121,6 +1130,9 @@ type GroupTurnOperation = {
   cancelled: boolean;
   cancellation: AbortController;
   providerHandshakePending: boolean;
+  wakeKind?: WakeKind;
+  authorityId?: string;
+  timeoutMinutes?: number;
   goalRun?: {
     runId: string;
     cardMessageId: string;
@@ -1227,6 +1239,7 @@ function beginGroupTurnOperation(
   groupId: string,
   threadId: string,
   botIds: Iterable<string> = [],
+  capability?: { wakeKind?: WakeKind; authorityId?: string; timeoutMinutes?: number },
 ): GroupTurnOperation {
   const operation = {
     id: randomUUID(),
@@ -1235,6 +1248,7 @@ function beginGroupTurnOperation(
     cancelled: false,
     cancellation: new AbortController(),
     providerHandshakePending: false,
+    ...capability,
   };
   const operations = groupTurnOperations.get(groupId) ?? new Set<GroupTurnOperation>();
   operations.add(operation);
@@ -1797,9 +1811,12 @@ function outboundCard(proposal: OutboundProposal) {
     schema: proposal.schema,
     proposalId: proposal.proposalId,
     digest: proposal.canonicalDigest,
+    approvalExpiresAt: proposal.approvalExpiresAt,
+    reviewClass: proposal.reviewClass,
     channel: proposal.channel,
     accountAlias: proposal.accountAlias,
     purpose: proposal.purpose,
+    providerRecipientIds: proposal.providerRecipientIds,
     recipients: proposal.recipients,
     ...(proposal.subject ? { subject: proposal.subject } : {}),
     attachmentCount: proposal.attachments.length,
@@ -1816,10 +1833,12 @@ function outboundSubtitle(proposal: OutboundProposal): string {
   return [
     `Account: ${proposal.accountAlias} · ${proposal.channel} · ${proposal.purpose}`,
     `To: ${proposal.recipients.join(", ")}`,
+    `Canonical recipient IDs: ${proposal.providerRecipientIds.join(", ")}`,
     `${subject}${proposal.body}`,
     attachments,
     `Why this draft: ${proposal.rationale}`,
-    `Proof: Communications ${proposal.communicationsReceipt.id}; Human Voice ${proposal.humanVoiceReceipt.id}; ${proposal.sourceReferences.length} current source${proposal.sourceReferences.length === 1 ? "" : "s"}`,
+    `Proof: Communications ${proposal.communicationsReceipt.id}; ${proposal.humanVoiceReceipt ? `Human Voice ${proposal.humanVoiceReceipt.id}` : `inline Human Voice rubric ${proposal.humanVoiceRubric.version}`}; ${proposal.sourceReferences.length} current source${proposal.sourceReferences.length === 1 ? "" : "s"}`,
+    `Approval expires: ${new Date(proposal.approvalExpiresAt).toISOString()}`,
   ].filter(Boolean).join("\n\n");
 }
 
@@ -1874,6 +1893,7 @@ async function resolveOperatorException(
     json(res, 200, { ok: proposal.status === "executed", outcome: proposal.status, alreadySettled: true });
     return true;
   }
+
   if (args.behavior !== "allow") {
     const settled = operatorExceptions.transition(proposal.proposalId, ["pending"], "cancelled", { outcomeReason: "operator cancelled" });
     store.patchMessage(args.threadId, cardMessage.id, {
@@ -1967,6 +1987,17 @@ async function resolveOutboundProposal(
     return true;
   }
 
+  if (proposal.approvalExpiresAt <= Date.now()) {
+    const settled = outboundProposals.transition(proposal.proposalId, ["pending"], "cancelled", {
+      outcomeReason: "the exact 30-minute approval window expired",
+    });
+    store.patchMessage(args.threadId, cardMessage.id, {
+      card: { ...card, answered: "unavailable", dismissed: true, outboundProposal: outboundCard(settled) },
+    });
+    json(res, 409, { error: "the exact 30-minute approval window expired; create a fresh proposal" });
+    return true;
+  }
+
   const revise = args.behavior === "answer" && String(args.message ?? "").trim().toLowerCase() === "revise";
   if (args.behavior !== "allow") {
     const status = revise ? "revision_requested" : "cancelled";
@@ -1995,7 +2026,13 @@ async function resolveOutboundProposal(
     return true;
   }
   const sending = outboundProposals.transition(proposal.proposalId, ["pending"], "sending");
-  const result = await outboundExecutor.execute(sending);
+  const result = await outboundExecutor.execute(sending).catch(() => ({
+    status: "failed" as const,
+    recovered: false,
+    providerResultId: undefined,
+    providerReadback: { observedAt: Date.now(), detail: "outbound executor failed before a provider outcome" },
+    reason: "the outbound provider path failed; no retry was attempted",
+  }));
   const settled = outboundProposals.transition(proposal.proposalId, ["sending"], result.status, {
     providerReadback: result.providerReadback,
     ...(result.reason ? { outcomeReason: result.reason } : {}),
@@ -2018,6 +2055,7 @@ async function resolveOutboundProposal(
     ruleId: `proposal:${proposal.proposalId}`,
     effect: "thread_reply",
     tool: proposal.providerAction.tool,
+    providerAccountId: proposal.providerAccountId,
     accountAlias: proposal.accountAlias,
   }, proposal.providerAction, result.providerResultId);
   appendDecision(DATA_DIR, {
@@ -3101,6 +3139,7 @@ const runDelegatedTurn: Parameters<typeof drainDelegations>[3] = (toBotId, text,
     };
     return startTurn(toBotId, text, {
       commsDepth,
+      wakeKind: "delegated",
       unattended: isUnattended(store.botByThread(sourceThreadId)?.id),
       // startTurn schedules provider/integration setup after marking the bot
       // busy. Those asynchronous setup failures do not emit turn.completed,
@@ -3342,6 +3381,10 @@ async function startTurn(
     automationSource?: RoutineRunTrigger;
     /** Owning routine id or policy trigger id for a bounded capability. */
     authorityId?: string;
+    /** Delegated turns are neither operator nor automation wakes. Keeping
+     * their identity explicit lets policy grant normal reads without
+     * accidentally inheriting direct-operator authority. */
+    wakeKind?: WakeKind;
     /** the caller was already running unattended, so this turn is too */
     unattended?: boolean;
     /** Resume an agent after the user completed an inline connection or credential card.
@@ -3517,11 +3560,11 @@ async function startTurn(
       // them — a key in the config says the connections exist, not that
       // this engine can reach them — and only to a bot the user has not
       // switched off: the key is workspace-wide, the grant is per bot.
-      const wakeKind = opts?.automationSource === "webhook"
+      const wakeKind = opts?.wakeKind ?? (opts?.automationSource === "webhook"
         ? "webhook"
         : opts?.automationSource === "schedule" || opts?.automationSource === "manual"
           ? "routine"
-          : "operator";
+          : "operator");
       const autonomyCapability = turnAutonomyCapability(bot.id, threadId, wakeKind, opts?.authorityId);
       if (bot.composio !== false && composio.configured(cfg) && instance.adapter.capabilities.composioMcp === true) {
         const connection = await connectedAppsIntegration(bot.id, threadId, autonomyCapability);
@@ -3750,7 +3793,7 @@ async function startTurn(
         (candidate) =>
           candidate.id !== bot.id &&
           !candidate.hidden &&
-          sectionKey(candidate.section) === sectionKey(bot.section),
+          canCoordinateBot(bot, candidate),
       );
       if (
         commsDepth < MAX_COMMS_DEPTH &&
@@ -4116,11 +4159,23 @@ routines = new RoutineManager({
   startTurn: (botId, threadId, prompt, runOn, triggerSource, authorityId, onDispatchError) =>
     startTurn(botId, prompt, { threadId, runOn, automationSource: triggerSource, authorityId, onDispatchError })
       .then(() => undefined),
-  startGoal: async (groupId, threadId, prompt, coordinatorBotId, runId, _onDispatchError) => {
+  startGoal: async (
+    groupId,
+    threadId,
+    prompt,
+    coordinatorBotId,
+    runId,
+    authorityId,
+    timeoutMinutes,
+    _onDispatchError,
+  ) => {
     startGroupTurn(groupId, prompt, undefined, undefined, "goal", undefined, {
       threadId,
       goalCoordinatorBotId: coordinatorBotId,
       goalRunId: runId,
+      wakeKind: "routine",
+      authorityId,
+      timeoutMinutes,
     });
   },
   interruptTurn: async (botId, threadId, runOn) => {
@@ -4234,7 +4289,7 @@ const routineRequests = new RoutineRequestService({
     const proposer = store.bot(proposerBotId);
     const targetBot = store.bot(target.botId);
     if (!targetBot) return `@${target.name} no longer exists, so this routine cannot be scheduled for it`;
-    if (!proposer || sectionKey(targetBot.section) !== sectionKey(proposer.section)) {
+    if (!proposer || !canCoordinateBot(proposer, targetBot)) {
       return `@${target.name} is no longer in this section, so this routine cannot be scheduled for it`;
     }
     return null;
@@ -4404,6 +4459,9 @@ type GroupTurnOrchestration = {
   result: { replyText?: string; outcome?: GroupMemberTurnOutcome; stopReason?: string | null };
   onClaimed?: () => void;
   onTurnStarted?: (turnId: string) => void;
+  wakeKind?: WakeKind;
+  authorityId?: string;
+  timeoutMinutes?: number;
 };
 
 function serializeRoomContext(threadId: string, userName: string): string {
@@ -4537,8 +4595,8 @@ async function runGroupMemberTurn(
   if (selectedSkills.some((skill) => skill.manifest.requiredCapabilities.includes("phoneMcp"))) {
     integrations.phone = phoneIntegration();
   }
-  const wakeKind = isUnattended(bot.id) ? "webhook" : "operator";
-  const autonomyCapability = turnAutonomyCapability(bot.id, threadId, wakeKind);
+  const wakeKind = orchestration?.wakeKind ?? (isUnattended(bot.id) ? "webhook" : "operator");
+  const autonomyCapability = turnAutonomyCapability(bot.id, threadId, wakeKind, orchestration?.authorityId);
   try {
     if (bot.composio !== false && composio.configured(cfg) && instance.adapter.capabilities.composioMcp === true) {
       const connection = await connectedAppsIntegration(bot.id, threadId, autonomyCapability);
@@ -4718,7 +4776,7 @@ async function runGroupMemberTurn(
     if (providerTurnId) retireProviderTurn(providerTurnId);
     else markCancelledProviderHandshake(threadId, retirementOwner);
   };
-  const timeoutMinutes = roomTurnTimeoutMinutes(cfg);
+  const timeoutMinutes = orchestration?.timeoutMinutes ?? roomTurnTimeoutMinutes(cfg);
   const outcome = await new Promise<GroupMemberTurnOutcome>((resolve) => {
     let done = false;
     let unsub = () => {};
@@ -5015,6 +5073,9 @@ async function runGroupGoalStep(args: {
           onTurnStarted: (turnId) => {
             if (coordinatorTurn && !coordinatorTurn.turnId) coordinatorTurn.turnId = turnId;
           },
+          wakeKind: args.operation.wakeKind,
+          authorityId: args.operation.authorityId,
+          timeoutMinutes: args.operation.timeoutMinutes,
         },
       );
       if (result.outcome === "busy") continue;
@@ -5258,6 +5319,10 @@ type StartGroupTurnOptions = {
   goalCoordinatorBotId?: string;
   /** Correlates a room goal card with its durable RoutineRun receipt. */
   goalRunId?: string;
+  /** Scheduled room goals keep their routine authority and run ceiling. */
+  wakeKind?: WakeKind;
+  authorityId?: string;
+  timeoutMinutes?: number;
 };
 
 function startGroupTurn(
@@ -5352,6 +5417,11 @@ function startGroupTurn(
     groupId,
     threadId,
     goalCoordinator ? [] : responders.map((responder) => responder.id),
+    {
+      wakeKind: options.wakeKind,
+      authorityId: options.authorityId,
+      timeoutMinutes: options.timeoutMinutes,
+    },
   );
   if (goalCoordinator) {
     const runId = options.goalRunId?.trim() || `goal-${Date.now().toString(36)}-${randomUUID()}`;
@@ -6498,6 +6568,10 @@ const server = createServer(async (req, res) => {
         receivedAt,
         materialDigest: composioEventMaterialDigest(event),
         triggerSlug: event.metadata.trigger_slug,
+        providerAccountId: event.metadata.connected_account_id,
+        // Pre-canonical builds stored the immutable connection id in the
+        // alias column. Keep it for the 24-hour migration window while all
+        // new authorization and deduplication use providerAccountId.
         accountAlias: event.metadata.connected_account_id,
       });
       if (outcome !== "accepted") return json(res, 200, { accepted: false, outcome });
@@ -6594,7 +6668,7 @@ const server = createServer(async (req, res) => {
             (b) =>
               b.id !== self &&
               !b.hidden &&
-              sectionKey(b.section) === sectionKey(sender.section),
+              canCoordinateBot(sender, b),
           )
           .map((b) => ({
             id: b.id,
@@ -6630,6 +6704,46 @@ const server = createServer(async (req, res) => {
             .map((routine) => agentRoutine(routine, latestRuns.get(routine.id))),
         });
       }
+      if (method === "POST" && path === "/api/internal/routine-checkpoints") {
+        const body = await readBody(req);
+        const fromBotId = String(body?.fromBotId ?? "");
+        const fromThreadId = String(body?.fromThreadId ?? "");
+        const action = String(body?.action ?? "");
+        try {
+          if (action === "read") {
+            const checkpoint = routines!.checkpointForRun(fromThreadId, fromBotId, body?.source);
+            const sourceKey = typeof body?.sourceKey === "string" ? body.sourceKey.trim() : "";
+            return json(res, 200, {
+              schema: "openmausbot.routine-checkpoint.v1",
+              routineId: checkpoint.routineId,
+              source: checkpoint.source,
+              watermark: checkpoint.watermark ?? null,
+              ...(sourceKey ? { sourceKeySeen: checkpoint.sourceKeys.includes(sourceKey) } : {}),
+              completedSourceKeyCount: checkpoint.sourceKeys.length,
+              updatedAt: checkpoint.updatedAt || null,
+            });
+          }
+          if (action === "commit") {
+            const committed = routines!.commitCheckpointForRun(fromThreadId, fromBotId, {
+              source: body?.source,
+              sourceKey: body?.sourceKey,
+              watermark: body?.watermark,
+            });
+            return json(res, 200, {
+              schema: "openmausbot.routine-checkpoint.v1",
+              routineId: committed.checkpoint.routineId,
+              source: committed.checkpoint.source,
+              watermark: committed.checkpoint.watermark ?? null,
+              duplicate: committed.duplicate,
+              completedSourceKeyCount: committed.checkpoint.sourceKeys.length,
+              updatedAt: committed.checkpoint.updatedAt,
+            });
+          }
+          return json(res, 400, { error: "action must be read or commit" });
+        } catch (error) {
+          return json(res, 409, { error: error instanceof Error ? error.message : "routine checkpoint unavailable" });
+        }
+      }
       if (method === "POST" && path === "/api/internal/routine-requests") {
         const parsed = routineRequestEnvelopeSchema.safeParse(await readBody(req));
         if (!parsed.success) return json(res, 400, { error: "invalid routine proposal" });
@@ -6655,7 +6769,7 @@ const server = createServer(async (req, res) => {
             if (!target) {
               return json(res, 404, { error: "no bot with that id — call list_bots and copy the exact id from the result" });
             }
-            if (sectionKey(target.section) !== sectionKey(from.section)) {
+            if (!canCoordinateBot(from, target)) {
               return json(res, 403, { error: "that bot belongs to a different section" });
             }
             forBot = { botId: target.id, name: target.name };
@@ -6717,10 +6831,15 @@ const server = createServer(async (req, res) => {
             ? { id: receipt.id, status: "completed" as const, finishedAt: receipt.finishedAt }
             : null;
         };
+        const reviewClass = submitted.reviewClass === "routine" ? "routine" : "high-stakes";
         const communicationsReceipt = terminalReceipt(submitted.communicationsReceipt, "Communications");
         const humanVoiceReceipt = terminalReceipt(submitted.humanVoiceReceipt, "Human Voice");
-        if (!communicationsReceipt || !humanVoiceReceipt) {
-          return json(res, 409, { error: "terminal Communications and Human Voice delegation receipts are required" });
+        if (!communicationsReceipt || (reviewClass === "high-stakes" && !humanVoiceReceipt)) {
+          return json(res, 409, {
+            error: reviewClass === "high-stakes"
+              ? "terminal Communications and Human Voice delegation receipts are required"
+              : "a terminal Communications delegation receipt is required",
+          });
         }
         let proposal: OutboundProposal;
         try {
@@ -6729,7 +6848,8 @@ const server = createServer(async (req, res) => {
             originatingThreadId: fromThreadId,
             coordinatorBotId: from.id,
             communicationsReceipt,
-            humanVoiceReceipt,
+            reviewClass,
+            ...(humanVoiceReceipt ? { humanVoiceReceipt } : {}),
           });
         } catch (error) {
           return json(res, 400, { error: error instanceof Error ? error.message : "invalid outbound proposal" });
@@ -6851,7 +6971,7 @@ const server = createServer(async (req, res) => {
         // hard refusal — every peer turn has an accountable sender.
         const from = store.bot(fromBotId);
         if (!from) return json(res, 403, { error: "unknown sender" });
-        if (sectionKey(from.section) !== sectionKey(target.section)) {
+        if (!canCoordinateBot(from, target)) {
           return json(res, 403, { error: "that bot belongs to a different section" });
         }
         const fromThreadId = String(body.fromThreadId ?? from.threadId);
@@ -6906,7 +7026,7 @@ const server = createServer(async (req, res) => {
           const freshFrom = store.bot(fromBotId);
           const freshTarget = store.bot(toBotId);
           if (!freshFrom || !freshTarget) return json(res, 404, { error: "no such bot" });
-          if (sectionKey(freshFrom.section) !== sectionKey(freshTarget.section)) {
+          if (!canCoordinateBot(freshFrom, freshTarget)) {
             return json(res, 200, { error: "that bot moved to a different section" });
           }
           if (!store.taskByThread(freshFrom.id, fromThreadId)) {
@@ -7020,7 +7140,7 @@ const server = createServer(async (req, res) => {
         if (!from) return json(res, 404, { error: "no such bot" });
         const target = store.bot(toBotId);
         if (!target) return json(res, 404, { error: "no such bot" });
-        if (sectionKey(from.section) !== sectionKey(target.section)) {
+        if (!canCoordinateBot(from, target)) {
           return json(res, 403, { error: "that bot belongs to a different section" });
         }
         const fromThreadId = String(body.fromThreadId ?? from.threadId);
@@ -7175,6 +7295,51 @@ const server = createServer(async (req, res) => {
         }
         const decisions = extracted.actions.map((action) => autonomyAuthority.authorize(capability, action));
         if (decisions.some((decision) => !decision.allowed)) {
+          const splitReads = splitIndependentReadPayloads(body, extracted.actions, decisions);
+          if (splitReads) {
+            let transportSessionId = Array.isArray(req.headers["mcp-session-id"])
+              ? req.headers["mcp-session-id"][0]
+              : req.headers["mcp-session-id"];
+            const results: Array<{ action: ToolAction; response?: unknown }> = [];
+            for (const [index, item] of splitReads.entries()) {
+              const decision = decisions[index]!;
+              if (!decision.allowed) {
+                autonomyDb.recordDecision(decision, item.action);
+                results.push({ action: item.action });
+                continue;
+              }
+              let upstream;
+              try {
+                upstream = await relayComposio(item.payload, transportSessionId, capability);
+              } catch {
+                autonomyDb.recordDecision({
+                  ...decision,
+                  allowed: false,
+                  code: "provider-read-unavailable",
+                  reason: "the provider read transport failed after authorization",
+                }, item.action);
+                results.push({ action: item.action });
+                continue;
+              }
+              transportSessionId = upstream.transportSessionId ?? transportSessionId;
+              const text = Buffer.from(upstream.bytes).toString("utf8");
+              let response: unknown = text;
+              try { response = JSON.parse(text); } catch {}
+              const usable = usableMcpReadResponse(upstream.status, response);
+              autonomyDb.recordDecision(usable ? decision : {
+                ...decision,
+                allowed: false,
+                code: "provider-read-unavailable",
+                reason: "the provider read failed after authorization",
+              }, item.action, providerReceiptId(upstream.bytes));
+              results.push({ action: item.action, ...(usable ? { response } : {}) });
+            }
+            const response = splitReadBatchMcpResponse(body?.id, results);
+            const headers: Record<string, string> = { "content-type": "application/json", "cache-control": "no-store" };
+            if (transportSessionId) headers["mcp-session-id"] = transportSessionId;
+            res.writeHead(200, headers);
+            return res.end(Buffer.from(JSON.stringify(response)));
+          }
           const context = autonomyAuthority.verify(capability);
           if (
             extracted.actions.length === 1

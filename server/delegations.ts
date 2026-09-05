@@ -550,7 +550,9 @@ function dropIfSectionsChanged(
   sourceThreadId: string,
   item: PendingDelegationItem,
 ): boolean {
-  if (sectionKey(sender.section) === sectionKey(target.section)) return false;
+  const poppyCoordinatesGlobally = sender.chiefOfStaff === true
+    && sender.name.trim().toLowerCase() === "poppy";
+  if (poppyCoordinatesGlobally || sectionKey(sender.section) === sectionKey(target.section)) return false;
   const result = `@${sender.name} and @${target.name} now belong to different sections`;
   recordDelegationReceipt({
     id: item.id,

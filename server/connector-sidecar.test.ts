@@ -127,18 +127,30 @@ describe("connector execution sidecar", () => {
     expect(Buffer.from(mixedEnvelope.bodyBase64, "base64").toString("utf8")).toContain("entire batch was denied");
     expect(providerCalls).toBe(0);
 
+    // Reads never depend on a rule now (default-allow), so an all-read batch is
+    // relayed to the provider whole, in one call, and its response returned as-is.
+    const reads = await post({ capability, payload: call([
+      { tool_slug: "GMAIL_FETCH_EMAILS", account: "personal", arguments: {} },
+      { tool_slug: "SLACK_FETCH_MESSAGES", arguments: {} },
+    ]) });
+    expect(reads.status).toBe(200);
+    const readsEnvelope = await reads.json() as { status: number; bodyBase64: string };
+    expect(readsEnvelope.status).toBe(200);
+    expect(JSON.parse(Buffer.from(readsEnvelope.bodyBase64, "base64").toString("utf8"))).toMatchObject({ result: { content: [{ text: "ok" }] } });
+    expect(providerCalls).toBe(1);
+
     const allowed = await post({ capability, payload: call([{ tool_slug: "GMAIL_FETCH_EMAILS", account: "personal", arguments: {} }]) });
     expect(await allowed.json()).toEqual(expect.objectContaining({ status: 200 }));
-    expect(providerCalls).toBe(1);
+    expect(providerCalls).toBe(2);
 
     const action: ToolAction = { transport: "composio", server: "composio", tool: "GMAIL_MOVE_TO_TRASH", accountAlias: "personal", arguments: { message_id: "m-1" } };
     const exact = authority.issueExact("operator-exception", action, undefined, 30_000);
     const exceptionPayload = call([{ tool_slug: action.tool, account: action.accountAlias, arguments: action.arguments }]);
     const exactBody = { payload: exceptionPayload, exact: { token: exact, kind: "operator-exception", action } };
     expect((await post(exactBody)).status).toBe(200);
-    expect(providerCalls).toBe(2);
+    expect(providerCalls).toBe(3);
     expect((await post(exactBody)).status).toBe(403);
-    expect(providerCalls).toBe(2);
+    expect(providerCalls).toBe(3);
 
     const control = async (method: string, args: unknown[]) => {
       const response = await fetch(`http://127.0.0.1:${port}/v1/custom-mcp-control`, {

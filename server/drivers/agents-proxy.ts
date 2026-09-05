@@ -360,19 +360,39 @@ const TOOLS = [
     },
   },
   {
+    name: "routine_checkpoint",
+    description:
+      "During an active routine run, read or commit that routine's durable per-source watermark and source-key idempotency state. Read before processing provider items. Commit a source key only after its native effect/readback succeeds. A duplicate=true response means the item was already completed and must not be repeated.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        action: { type: "string", enum: ["read", "commit"] },
+        source: { type: "string", description: "Stable provider/source name, such as gmail or todoist." },
+        source_key: { type: "string", description: "Immutable provider item or requested-outcome key. Required for commit; optional on read to test whether it was completed." },
+        watermark: { type: "string", description: "Provider cursor or timestamp to resume from. Accepted only on commit." },
+      },
+      required: ["action", "source"],
+    },
+  },
+  {
     name: "propose_outbound",
     description:
-      "Poppy-only: present one reviewed outbound communication after terminal Communications and Human Voice delegations. This creates a native Send/Revise/Cancel card; it never sends. Missing, conflicting, stale, or cross-relationship evidence is held. Use the exact task ids returned by delegate_bot and exact provider draft/read/send arguments. End the turn after proposing.",
+      "Poppy-only: present one reviewed outbound communication. Routine drafts need terminal Communications review with the inline Human Voice rubric; high-stakes, client-sensitive, or brand-sensitive drafts also need terminal Human Voice review. This creates a native Send/Revise/Cancel card; it never sends. Missing, conflicting, stale, or cross-relationship evidence is held. Use canonical provider ids, exact task ids returned by delegate_bot, and exact provider draft/read/send arguments. End the turn after proposing.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
         communications_receipt_id: { type: "string" },
         human_voice_receipt_id: { type: "string" },
+        review_class: { type: "string", enum: ["routine", "high-stakes"] },
+        provider_account_id: { type: "string" },
         account_alias: { type: "string" },
+        provider_channel_id: { type: "string" },
         channel: { type: "string" },
         purpose: { type: "string" },
         relationship_boundary: { type: "string", description: "Resolved person or client relationship boundary shared by every source." },
+        provider_recipient_ids: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 64 },
         recipients: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 64 },
         subject: { type: "string" },
         body: { type: "string" },
@@ -398,11 +418,10 @@ const TOOLS = [
         },
         material_facts: { type: "string", enum: ["verified", "missing", "conflicting"] },
         rationale: { type: "string" },
-        provider_action: { type: "object", description: "Exact guarded provider send action: transport, server, tool, accountAlias, arguments." },
-        provider_read_action: { type: "object", description: "Exact guarded provider reread action run immediately before send." },
-        idempotency_key: { type: "string" },
+        provider_action: { type: "object", description: "Exact guarded provider send action: transport, server, tool, providerAccountId, optional display accountAlias, arguments." },
+        provider_read_action: { type: "object", description: "Exact guarded provider reread action with the same providerAccountId, run immediately before send." },
       },
-      required: ["communications_receipt_id", "human_voice_receipt_id", "account_alias", "channel", "purpose", "relationship_boundary", "recipients", "body", "source_references", "material_facts", "rationale", "provider_action", "provider_read_action", "idempotency_key"],
+      required: ["communications_receipt_id", "review_class", "provider_account_id", "account_alias", "provider_channel_id", "channel", "purpose", "relationship_boundary", "provider_recipient_ids", "recipients", "body", "provider_draft_id", "source_references", "material_facts", "rationale", "provider_action", "provider_read_action"],
     },
   },
   {
@@ -743,11 +762,16 @@ async function callTool(name: string, args: Json): Promise<{ text: string; isErr
         fromThreadId: THREAD_ID,
         proposal: {
           communicationsReceipt: { id: args.communications_receipt_id },
-          humanVoiceReceipt: { id: args.human_voice_receipt_id },
+          ...(args.human_voice_receipt_id ? { humanVoiceReceipt: { id: args.human_voice_receipt_id } } : {}),
+          reviewClass: args.review_class,
+          humanVoiceRubric: { version: "openmausbot.human-voice-rubric.v1", applied: true },
+          providerAccountId: args.provider_account_id,
           accountAlias: args.account_alias,
+          providerChannelId: args.provider_channel_id,
           channel: args.channel,
           purpose: args.purpose,
           relationshipBoundary: args.relationship_boundary,
+          providerRecipientIds: args.provider_recipient_ids,
           recipients: args.recipients,
           subject: args.subject,
           body: args.body,
@@ -758,7 +782,6 @@ async function callTool(name: string, args: Json): Promise<{ text: string; isErr
           rationale: args.rationale,
           providerAction: args.provider_action,
           providerReadAction: args.provider_read_action,
-          idempotencyKey: args.idempotency_key,
         },
       }),
     });
@@ -768,6 +791,26 @@ async function callTool(name: string, args: Json): Promise<{ text: string; isErr
     return {
       text: `A Send/Revise/Cancel card is now visible for outbound proposal ${r.proposalId}. The protected provider arguments remain server-side and nothing has been sent. End this turn and wait for the user's decision.`,
     };
+  }
+  if (name === "routine_checkpoint") {
+    if (args.action !== "read" && args.action !== "commit") {
+      return { text: "routine_checkpoint needs action read or commit.", isError: true };
+    }
+    if (args.action === "commit" && !args.source_key) {
+      return { text: "routine_checkpoint commit needs source_key.", isError: true };
+    }
+    const r = await api("/api/internal/routine-checkpoints", {
+      method: "POST",
+      body: JSON.stringify({
+        fromBotId: BOT_ID,
+        fromThreadId: THREAD_ID,
+        action: args.action,
+        source: args.source,
+        sourceKey: args.source_key,
+        watermark: args.watermark,
+      }),
+    });
+    return { text: JSON.stringify(r) };
   }
   if (name === "skills_list") {
     const query = new URLSearchParams({ fromBotId: BOT_ID, fromThreadId: THREAD_ID });

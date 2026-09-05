@@ -15,9 +15,13 @@ export interface OutboundProposalCardData {
   schema: typeof OUTBOUND_PROPOSAL_SCHEMA;
   proposalId: string;
   digest: string;
+  approvalExpiresAt: number;
+  reviewClass: "routine" | "high-stakes";
   channel: string;
   accountAlias: string;
   purpose: string;
+  /** Immutable provider identities covered by this exact approval. */
+  providerRecipientIds: string[];
   recipients: string[];
   subject?: string;
   attachmentCount: number;

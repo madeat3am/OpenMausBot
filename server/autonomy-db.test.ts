@@ -33,6 +33,33 @@ describe("autonomy database", () => {
     db.close();
   });
 
+  it("suppresses legacy alias receipts while keeping canonical accounts distinct", () => {
+    const dir = mkdtempSync(join(tmpdir(), "omb-autonomy-db-"));
+    dirs.push(dir);
+    const db = new AutonomyDatabase(dir);
+    const base = {
+      receivedAt: 1_000_000_000,
+      materialDigest: "a".repeat(64),
+      triggerSlug: "GMAIL_NEW_MESSAGE",
+      accountAlias: "personal",
+    };
+    expect(db.acceptComposioEvent({ ...base, eventId: "legacy" })).toBe("accepted");
+    expect(db.acceptComposioEvent({
+      ...base,
+      eventId: "canonical-same",
+      receivedAt: base.receivedAt + 1,
+      providerAccountId: "connected-account-1",
+    })).toBe("suppressed");
+    expect(db.acceptComposioEvent({
+      ...base,
+      eventId: "canonical-other",
+      receivedAt: base.receivedAt + 2,
+      providerAccountId: "connected-account-2",
+      accountAlias: "renamed-personal",
+    })).toBe("accepted");
+    db.close();
+  });
+
   it("retains redacted decisions for one year and then removes them", () => {
     const dir = mkdtempSync(join(tmpdir(), "omb-autonomy-db-"));
     dirs.push(dir);

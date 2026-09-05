@@ -282,9 +282,12 @@ describe("ApprovalCard outbound proposals", () => {
         schema: "openmausbot.outbound-proposal.v1",
         proposalId: "proposal-1",
         digest: "a".repeat(64),
+        approvalExpiresAt: 1_800_001,
+        reviewClass: "high-stakes",
         channel: "gmail",
         accountAlias: "personal",
         purpose: "acceptance-test",
+        providerRecipientIds: ["acct:self@example.com"],
         recipients: ["self@example.com"],
         subject: "Acceptance",
         attachmentCount: 0,
@@ -298,6 +301,7 @@ describe("ApprovalCard outbound proposals", () => {
     const message = outboundMessage();
     const markup = renderToStaticMarkup(createElement(ApprovalCard, { message }));
     expect(markup).toContain("send a reviewed message");
+    expect(markup).toContain("Canonical recipient IDs: acct:self@example.com");
     expect(markup).toContain("self@example.com");
     expect(markup).toContain("Communications c-1");
     expect(markup).toContain("Waiting for Send, Revise, or Cancel");

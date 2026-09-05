@@ -21,6 +21,7 @@ export class AutonomyDatabase {
         code TEXT NOT NULL,
         rule_id TEXT,
         effect TEXT,
+        provider_account_id TEXT,
         account_alias TEXT,
         tool TEXT NOT NULL,
         argument_digest TEXT NOT NULL,
@@ -32,25 +33,40 @@ export class AutonomyDatabase {
         received_at INTEGER NOT NULL,
         material_digest TEXT NOT NULL,
         trigger_slug TEXT NOT NULL,
+        provider_account_id TEXT,
         account_alias TEXT
       );
       CREATE INDEX IF NOT EXISTS composio_events_received ON composio_events(received_at);
-      CREATE INDEX IF NOT EXISTS composio_events_material ON composio_events(trigger_slug, account_alias, material_digest, received_at);
     `);
+    this.ensureColumn("decision_receipts", "provider_account_id", "TEXT");
+    this.ensureColumn("composio_events", "provider_account_id", "TEXT");
+    this.database.exec(`
+      DROP INDEX IF EXISTS composio_events_material;
+      CREATE INDEX IF NOT EXISTS composio_events_material_v2
+        ON composio_events(trigger_slug, provider_account_id, material_digest, received_at);
+    `);
+  }
+
+  private ensureColumn(table: string, column: string, declaration: string): void {
+    const columns = this.database.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name?: unknown }>;
+    if (!columns.some((candidate) => candidate.name === column)) {
+      this.database.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${declaration}`);
+    }
   }
 
   recordDecision(decision: AutonomyDecision, action: ToolAction, providerResultId?: string, now = Date.now()): number {
     this.cleanupDecisions(now);
     const result = this.database.prepare(`
       INSERT INTO decision_receipts
-        (decided_at, outcome, code, rule_id, effect, account_alias, tool, argument_digest, provider_result_id, reason)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (decided_at, outcome, code, rule_id, effect, provider_account_id, account_alias, tool, argument_digest, provider_result_id, reason)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       now,
       decision.allowed ? "allowed" : "denied",
       decision.code,
       decision.ruleId ?? null,
       decision.effect ?? null,
+      decision.providerAccountId ?? action.providerAccountId ?? null,
       decision.accountAlias ?? null,
       action.tool,
       argumentDigest(action),
@@ -70,6 +86,7 @@ export class AutonomyDatabase {
     receivedAt: number;
     materialDigest: string;
     triggerSlug: string;
+    providerAccountId?: string;
     accountAlias?: string;
   }, suppressionMs = 24 * 60 * 60_000): "accepted" | "duplicate" | "suppressed" {
     this.cleanupEvents(input.receivedAt);
@@ -77,13 +94,36 @@ export class AutonomyDatabase {
     if (existing) return "duplicate";
     const equivalent = this.database.prepare(`
       SELECT 1 FROM composio_events
-      WHERE trigger_slug = ? AND COALESCE(account_alias, '') = COALESCE(?, '')
-        AND material_digest = ? AND received_at > ? LIMIT 1
-    `).get(input.triggerSlug, input.accountAlias ?? null, input.materialDigest, input.receivedAt - suppressionMs);
+      WHERE trigger_slug = ?
+        AND material_digest = ?
+        AND received_at > ?
+        AND (
+          provider_account_id = ?
+          OR (provider_account_id IS NULL AND COALESCE(account_alias, '') = COALESCE(?, ''))
+          OR (? IS NULL AND COALESCE(account_alias, '') = COALESCE(?, ''))
+        )
+      LIMIT 1
+    `).get(
+      input.triggerSlug,
+      input.materialDigest,
+      input.receivedAt - suppressionMs,
+      input.providerAccountId ?? null,
+      input.accountAlias ?? null,
+      input.providerAccountId ?? null,
+      input.accountAlias ?? null,
+    );
     this.database.prepare(`
-      INSERT INTO composio_events (event_id, received_at, material_digest, trigger_slug, account_alias)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(input.eventId, input.receivedAt, input.materialDigest, input.triggerSlug, input.accountAlias ?? null);
+      INSERT INTO composio_events
+        (event_id, received_at, material_digest, trigger_slug, provider_account_id, account_alias)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      input.eventId,
+      input.receivedAt,
+      input.materialDigest,
+      input.triggerSlug,
+      input.providerAccountId ?? null,
+      input.accountAlias ?? null,
+    );
     return equivalent ? "suppressed" : "accepted";
   }
 

@@ -134,6 +134,14 @@ export interface RoutineRequestCommit {
   fingerprint: string;
 }
 
+export interface RoutineCheckpoint {
+  routineId: string;
+  source: string;
+  watermark?: string;
+  sourceKeys: string[];
+  updatedAt: number;
+}
+
 type RoutineRequestCommitFor<Action extends RoutineRequestOperation["action"]> =
   Omit<RoutineRequestCommit, "action"> & { action: Action };
 
@@ -159,6 +167,9 @@ interface RoutineFile {
   runs: RoutineRun[];
   /** Durable commit receipts for cross-file confirmation recovery. */
   routineRequestReceipts?: RoutineRequestReceipt[];
+  /** Per-source reconciliation cursors and completed source keys. Kept in the
+   * existing routine file so restarts cannot replay already-applied work. */
+  checkpoints?: RoutineCheckpoint[];
 }
 
 export type RoutineRequestOwner = Pick<RoutineRequestReceipt, "requestId" | "messageId" | "botId" | "threadId">;
@@ -192,6 +203,8 @@ export interface RoutineManagerOptions {
     prompt: string,
     coordinatorBotId: string,
     runId: string,
+    authorityId: string,
+    timeoutMinutes: number | undefined,
     onDispatchError: (message: string) => void,
   ) => Promise<void>;
   interruptTurn?: (botId: string, threadId: string, runOn: RoutineRunOn) => Promise<void>;
@@ -210,6 +223,8 @@ const CATCH_UP_MS = 12 * 60 * 60_000;
 const MAX_DATE_MS = 8_640_000_000_000_000;
 const MAX_RUNS = 2_000;
 const MAX_ATTACHMENTS = 50;
+const MAX_CHECKPOINT_SOURCE_KEYS = 5_000;
+const checkpointText = z.string().trim().min(1).max(2_000);
 const attachmentSchema = z.object({
   id: z.string().trim().min(1).max(200),
   kind: z.enum(["file", "image"]),
@@ -330,6 +345,10 @@ function cloneRun(run: RoutineRun): RoutineRun {
     attachments: cloneAttachments(run.attachments),
     denials: run.denials ? [...run.denials] : undefined,
   };
+}
+
+function cloneCheckpoint(checkpoint: RoutineCheckpoint): RoutineCheckpoint {
+  return { ...checkpoint, sourceKeys: [...checkpoint.sourceKeys] };
 }
 
 /** Keep untrusted local paths inside the same quoted tag shape used by chat. */
@@ -466,6 +485,7 @@ export class RoutineManager {
   private routines: Routine[] = [];
   private runs: RoutineRun[] = [];
   private routineRequestReceipts: RoutineRequestReceipt[] = [];
+  private checkpoints: RoutineCheckpoint[] = [];
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false;
 
@@ -524,6 +544,22 @@ export class RoutineManager {
             Number.isFinite(receipt?.appliedAt)
           )
         : [];
+      this.checkpoints = Array.isArray(disk.checkpoints)
+        ? disk.checkpoints.flatMap((checkpoint) => {
+            const routineId = typeof checkpoint?.routineId === "string" ? checkpoint.routineId.trim() : "";
+            const source = typeof checkpoint?.source === "string" ? checkpoint.source.trim() : "";
+            if (!routineId || !source || !Array.isArray(checkpoint?.sourceKeys)) return [];
+            return [{
+              routineId,
+              source,
+              ...(typeof checkpoint.watermark === "string" && checkpoint.watermark ? { watermark: checkpoint.watermark.slice(0, 2_000) } : {}),
+              sourceKeys: checkpoint.sourceKeys
+                .filter((key): key is string => typeof key === "string" && key.length > 0)
+                .slice(-MAX_CHECKPOINT_SOURCE_KEYS),
+              updatedAt: Number.isSafeInteger(checkpoint.updatedAt) ? checkpoint.updatedAt : 0,
+            }];
+          })
+        : [];
     } catch {
       this.routines = [];
       this.runs = [];
@@ -577,6 +613,41 @@ export class RoutineManager {
         ["running", "waiting"].includes(candidate.status),
     );
     return run ? cloneRun(run) : null;
+  }
+
+  checkpointForRun(threadId: string, botId: string, rawSource: unknown): RoutineCheckpoint {
+    const run = this.checkpointRun(threadId, botId);
+    const source = checkpointText.parse(rawSource);
+    const checkpoint = this.checkpoints.find((candidate) => candidate.routineId === run.routineId && candidate.source === source);
+    return checkpoint
+      ? cloneCheckpoint(checkpoint)
+      : { routineId: run.routineId, source, sourceKeys: [], updatedAt: 0 };
+  }
+
+  commitCheckpointForRun(
+    threadId: string,
+    botId: string,
+    input: { source: unknown; sourceKey: unknown; watermark?: unknown },
+  ): { duplicate: boolean; checkpoint: RoutineCheckpoint } {
+    const run = this.checkpointRun(threadId, botId);
+    const source = checkpointText.parse(input.source);
+    const sourceKey = checkpointText.parse(input.sourceKey);
+    const watermark = input.watermark === undefined ? undefined : checkpointText.parse(input.watermark);
+    let checkpoint = this.checkpoints.find((candidate) => candidate.routineId === run.routineId && candidate.source === source);
+    if (checkpoint?.sourceKeys.includes(sourceKey)) {
+      return { duplicate: true, checkpoint: cloneCheckpoint(checkpoint) };
+    }
+    this.commitMutation(() => {
+      if (!checkpoint) {
+        checkpoint = { routineId: run.routineId, source, sourceKeys: [], updatedAt: this.now() };
+        this.checkpoints.push(checkpoint);
+      }
+      checkpoint.sourceKeys.push(sourceKey);
+      checkpoint.sourceKeys = checkpoint.sourceKeys.slice(-MAX_CHECKPOINT_SOURCE_KEYS);
+      if (watermark !== undefined) checkpoint.watermark = watermark;
+      checkpoint.updatedAt = this.now();
+    });
+    return { duplicate: false, checkpoint: cloneCheckpoint(checkpoint!) };
   }
 
   routineRequestReceipt(requestId: string): RoutineRequestReceipt | null {
@@ -1069,6 +1140,8 @@ export class RoutineManager {
               prompt,
               run.botId,
               run.id,
+              run.routineId,
+              run.timeoutMinutes,
               (message) => this.failThread(task.threadId, message),
             );
           } else {
@@ -1200,6 +1273,15 @@ export class RoutineManager {
     return this.options.botState(target.botId);
   }
 
+  private checkpointRun(threadId: string, botId: string): RoutineRun {
+    const run = this.runs.find((candidate) =>
+      candidate.threadId === threadId &&
+      (candidate.target === "room-goal" || candidate.botId === botId) &&
+      ["running", "waiting"].includes(candidate.status));
+    if (!run) throw new Error("routine checkpoint access requires the active owning run");
+    return run;
+  }
+
   private missingTargetMessage(target: RoutineTarget): string {
     return target === "room-goal"
       ? "The assigned room or coordinator no longer exists"
@@ -1300,6 +1382,7 @@ export class RoutineManager {
       routines: this.routines.map(cloneRoutine),
       runs: this.runs.map(cloneRun),
       receipts: this.routineRequestReceipts.map((receipt) => ({ ...receipt })),
+      checkpoints: this.checkpoints.map(cloneCheckpoint),
     };
     try {
       mutate();
@@ -1308,6 +1391,7 @@ export class RoutineManager {
       this.routines = before.routines;
       this.runs = before.runs;
       this.routineRequestReceipts = before.receipts;
+      this.checkpoints = before.checkpoints;
       throw error;
     }
   }
@@ -1332,6 +1416,7 @@ export class RoutineManager {
       routines: this.routines,
       runs: this.runs,
       routineRequestReceipts: this.routineRequestReceipts,
+      checkpoints: this.checkpoints,
     } satisfies RoutineFile, null, 2), { mode: 0o600 });
   }
 }

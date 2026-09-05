@@ -67,6 +67,20 @@ describe("chiefOfStaffSystemPrompt", () => {
     expect(prompt).not.toContain("delegate_bot");
   });
 
+  it("makes Poppy global while keeping other chiefs section-scoped", () => {
+    const roster = [
+      { id: "poppy", name: "Poppy", section: "Ops" },
+      { id: "ops", name: "Ops Specialist", section: "Ops" },
+      { id: "finance", name: "Finance Specialist", section: "Finance" },
+    ];
+    const poppy = chiefOfStaffSystemPrompt("poppy", roster, true);
+    const ops = chiefOfStaffSystemPrompt("ops", roster, true);
+    expect(poppy).toContain("sole global coordinator");
+    expect(poppy).toContain("Finance Specialist");
+    expect(ops).not.toContain("Finance Specialist");
+    expect(ops).toContain("Poppy owns cross-section coordination");
+  });
+
   it("includes trusted OpenMaus status only when the Chief caller supplies it", () => {
     const status = "TRUSTED OPENMAUSBOT STATUS\nfreshness=fresh; runtime_state=degraded";
 

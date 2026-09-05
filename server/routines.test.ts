@@ -33,6 +33,8 @@ function harness(start = new Date(2026, 7, 17, 8, 0, 0).getTime()) {
     prompt: string;
     coordinatorBotId: string;
     runId: string;
+    authorityId: string;
+    timeoutMinutes?: number;
     onDispatchError: (message: string) => void;
   }> = [];
   const runOns: string[] = [];
@@ -67,8 +69,26 @@ function harness(start = new Date(2026, 7, 17, 8, 0, 0).getTime()) {
       runOns.push(runOn);
       triggerSources.push(triggerSource);
     },
-    startGoal: async (groupId, threadId, prompt, coordinatorBotId, runId, onDispatchError) => {
-      startedGoals.push({ groupId, threadId, prompt, coordinatorBotId, runId, onDispatchError });
+    startGoal: async (
+      groupId,
+      threadId,
+      prompt,
+      coordinatorBotId,
+      runId,
+      authorityId,
+      timeoutMinutes,
+      onDispatchError,
+    ) => {
+      startedGoals.push({
+        groupId,
+        threadId,
+        prompt,
+        coordinatorBotId,
+        runId,
+        authorityId,
+        ...(timeoutMinutes === undefined ? {} : { timeoutMinutes }),
+        onDispatchError,
+      });
     },
     interruptTurn: async (botId, threadId, runOn) => {
       interruptedTurns.push({ botId, threadId, runOn });
@@ -237,6 +257,41 @@ describe("RoutineManager", () => {
     if (process.platform !== "win32") {
       expect(statSync(h.options.file!).mode & 0o777).toBe(0o600);
     }
+  });
+
+  it("persists per-source watermarks and source-key idempotency across restart", async () => {
+    const h = harness();
+    const routine = h.manager.create({
+      name: "Poppy reconcile",
+      prompt: "Reconcile connected sources",
+      botId: "poppy",
+      schedule: { type: "once", at: new Date(2026, 7, 17, 8, 5).getTime() },
+      timeoutMinutes: 45,
+    });
+    h.setNow(routine.nextRunAt!);
+    await h.manager.tick();
+    expect(h.manager.checkpointForRun("thread-1", "poppy", "gmail")).toMatchObject({
+      source: "gmail",
+      sourceKeys: [],
+    });
+    expect(h.manager.commitCheckpointForRun("thread-1", "poppy", {
+      source: "gmail",
+      sourceKey: "message-1",
+      watermark: "cursor-1",
+    })).toMatchObject({ duplicate: false, checkpoint: { watermark: "cursor-1", sourceKeys: ["message-1"] } });
+
+    const reloaded = new RoutineManager(h.options);
+    reloaded.runNow(routine.id);
+    await reloaded.tick();
+    expect(reloaded.checkpointForRun("thread-2", "poppy", "gmail")).toMatchObject({
+      watermark: "cursor-1",
+      sourceKeys: ["message-1"],
+    });
+    expect(reloaded.commitCheckpointForRun("thread-2", "poppy", {
+      source: "gmail",
+      sourceKey: "message-1",
+      watermark: "cursor-2",
+    })).toMatchObject({ duplicate: true, checkpoint: { watermark: "cursor-1", sourceKeys: ["message-1"] } });
   });
 
   it("persists definitions separately from permanent run receipts", async () => {
@@ -926,6 +981,7 @@ describe("RoutineManager", () => {
       botId: "chief-1",
       groupId: "room-1",
       schedule: { type: "once", at: new Date(2026, 7, 17, 8, 1).getTime() },
+      timeoutMinutes: 45,
     });
     h.setNow(routine.nextRunAt!);
     await h.manager.tick();
@@ -949,10 +1005,51 @@ describe("RoutineManager", () => {
       prompt: "Prepare and verify the launch",
       coordinatorBotId: "chief-1",
       runId: run.id,
+      authorityId: routine.id,
+      timeoutMinutes: 45,
     });
     expect(run).toMatchObject({ status: "running", threadId: "goal-thread-1" });
+    expect(h.manager.checkpointForRun("goal-thread-1", "worker-2", "slack")).toMatchObject({
+      routineId: routine.id,
+      source: "slack",
+      sourceKeys: [],
+    });
+    expect(h.manager.commitCheckpointForRun("goal-thread-1", "worker-2", {
+      source: "slack",
+      sourceKey: "message-1",
+    })).toMatchObject({ duplicate: false, checkpoint: { sourceKeys: ["message-1"] } });
+    expect(() => h.manager.checkpointForRun("another-room-thread", "worker-2", "slack")).toThrow(/active owning run/);
     expect(h.manager.listRoutines()[0]).toMatchObject({ target: "bot", groupId: undefined });
     expect(h.taskActivations).toEqual([]);
+  });
+
+  it("restores room-goal checkpoints for a fresh run after restart", async () => {
+    const h = harness();
+    const routine = h.manager.create({
+      name: "Poppy room reconcile",
+      prompt: "Reconcile Slack",
+      target: "room-goal",
+      botId: "chief-1",
+      groupId: "room-1",
+      schedule: { type: "once", at: new Date(2026, 7, 17, 8, 1).getTime() },
+      timeoutMinutes: 45,
+    });
+    h.setNow(routine.nextRunAt!);
+    await h.manager.tick();
+    h.manager.commitCheckpointForRun("goal-thread-1", "worker-2", {
+      source: "slack",
+      sourceKey: "message-1",
+      watermark: "cursor-1",
+    });
+
+    const reloaded = new RoutineManager(h.options);
+    reloaded.runNow(routine.id);
+    await reloaded.tick();
+    expect(reloaded.checkpointForRun("goal-thread-2", "worker-3", "slack")).toMatchObject({
+      routineId: routine.id,
+      sourceKeys: ["message-1"],
+      watermark: "cursor-1",
+    });
   });
 
   it("fails a queued room goal when its room or coordinator disappears", async () => {

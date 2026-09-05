@@ -98,6 +98,12 @@ export function ApprovalCard({
         {card.subtitle}
       </pre>
 
+      {card.outboundProposal && (
+        <div className="mt-2 break-all font-mono text-[11px] text-ink-secondary">
+          Canonical recipient IDs: {card.outboundProposal.providerRecipientIds.join(", ")}
+        </div>
+      )}
+
       {card.skillRequest && <SkillRequestPreview request={card.skillRequest} />}
 
       {card.held && (
