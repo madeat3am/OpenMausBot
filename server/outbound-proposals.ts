@@ -246,7 +246,10 @@ export class OutboundProposalStore {
     if (input.providerReadAction.transport !== "composio" || input.providerReadAction.server !== "composio") {
       throw new Error("outbound readback must use the guarded Composio provider path");
     }
-    const expectedProvider = input.providerChannelId.trim().toLowerCase();
+    // `channel` names the provider (gmail, slack); `providerChannelId` is the
+    // provider-side identity of that channel (mailbox address, Slack channel
+    // id), so the tool-prefix check binds to `channel`.
+    const expectedProvider = input.channel.trim().toLowerCase();
     if (providerFromTool(input.providerAction.tool) !== expectedProvider || providerFromTool(input.providerReadAction.tool) !== expectedProvider) {
       throw new Error("provider action channel does not match the proposal");
     }
