@@ -34,27 +34,46 @@ directly, one grant per business login (`meridian-row`, `seed`), and stores the
 rotating token pair under `FRESHBOOKS_TOKEN_DIR` (default
 `/data/.openmausbot/freshbooks`, the writable data volume). Read-only in v1.
 
+Deployment facts (live 2026-09-05): custom MCP children are spawned by the
+connector sidecar (`deploy-connector-proxy-1`, uid 65532), so the token store is
+`FRESHBOOKS_TOKEN_DIR=/var/lib/openmausbot-connector-proxy/freshbooks` (the
+sidecar's rw state bind; `/data` there is owned by `maus` and read-only for the
+sidecar). `POST /api/mcp/servers` fails with `EROFS` by design (the
+`/run/omb-sidecar` bind is read-only): add a server by editing the three host
+files the way `prepare-omb-connector-secrets.py` writes them — secret values only
+in `~/.config/openmausbot/authority/sidecar/mcp-secrets.json` (65532, 0600),
+placeholder `""` env in `sidecar/connector-config.json` and in the data volume's
+`.openmausbot/config.json` — then `docker compose up -d --force-recreate
+connector-proxy omb` after a bot-idle check.
+
 One-time setup (operator):
 
 1. Create an app at <https://my.freshbooks.com/#/developer> with redirect URI
    exactly `https://127.0.0.1/freshbooks-callback` (HTTPS is mandatory; the page
-   404s on purpose, the `code=` is read from the address bar). Scopes: read
-   invoices, clients, payments, expenses, user profile.
+   shows "refused to connect" on purpose, the `code=` is read from the address
+   bar). One app serves every business.
 2. Escrow `client_id` / `client_secret` in 1Password (`Citadel Runtime` →
-   `Runtime - FreshBooks OAuth Client`) and register the server in OMB with
-   those two env values plus `FRESHBOOKS_TOKEN_DIR=/data/.openmausbot/freshbooks`.
-3. Authorize each business inside the container:
+   `Runtime - FreshBooks OAuth Client`, fields `client_id`, `client_secret`).
+3. Authorize each business. FreshBooks reuses the browser session and never
+   asks which account: sign out first (or use a private window), sign in as the
+   business's owner, then open the authorize URL. Verify the `user.email` in
+   the `auth` readback before trusting the alias (three grants landed on the SEED
+   owner before the Meridian Row login was used). Aliases in production:
+   `meridian-row` (trey@meridianrow.io → Meridian Row LLC `vpEvjV`) and `seed`
+   (chadktracy@gmail.com → SEED Creates, LLC `pJ1jl`; SeismIQ `VxGNX5` is on the
+   same grant but FreshBooks reports that account inactive, HTTP 402).
 
 ```bash
-docker compose exec omb node /custom-mcps/freshbooks-mcp.mjs auth-url
-# open the URL logged in as that business's FreshBooks user, approve, copy code=
-docker compose exec omb node /custom-mcps/freshbooks-mcp.mjs auth --alias meridian-row --code <code>
-docker compose exec omb node /custom-mcps/freshbooks-mcp.mjs auth --alias seed --code <code>
-docker compose exec omb node /custom-mcps/freshbooks-mcp.mjs whoami
+# on the OMB host; credentials come from 1Password over stdin, never argv
+printf '%s\n%s\n%s\n' "$CLIENT_ID" "$CLIENT_SECRET" "$CODE" | docker compose exec -T connector-proxy sh -c '
+  read CID; read CSEC; read CODE
+  export FRESHBOOKS_CLIENT_ID="$CID" FRESHBOOKS_CLIENT_SECRET="$CSEC" \
+         FRESHBOOKS_TOKEN_DIR=/var/lib/openmausbot-connector-proxy/freshbooks
+  node /custom-mcps/freshbooks-mcp.mjs auth --alias <alias> --code "$CODE"'
 ```
 
-(`docker compose exec` needs the same `FRESHBOOKS_*` env the server gets; pass
-`-e` flags or run through the app's MCP once tokens exist.)
+Recovery: token files live in `~/.local/state/openmausbot-connector-proxy/freshbooks/`
+on the host; if lost, repeat step 3 (two minutes per business).
 
 Tools: `freshbooks_list_businesses`, `freshbooks_list_invoices`,
 `freshbooks_get_invoice`, `freshbooks_list_clients`, `freshbooks_list_payments`,
