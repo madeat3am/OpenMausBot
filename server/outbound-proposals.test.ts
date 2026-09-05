@@ -60,6 +60,14 @@ describe("outbound proposals", () => {
     const store = new OutboundProposalStore(dir);
     expect(() => store.create({ ...input(), providerAction: { ...input().providerAction, providerAccountId: "ca_other" } }, 1_000_000)).toThrow(/account/);
     expect(() => store.create({ ...input(), providerAction: { ...input().providerAction, arguments: { draft_id: "draft-2" } } }, 1_000_000)).toThrow(/approved draft/);
+    // the bot-visible MCP server name is the guarded Composio path
+    const aliased = store.create({
+      ...input(),
+      providerAction: { ...input().providerAction, server: "openmausbot_connectors" },
+      providerReadAction: { ...input().providerReadAction, server: "openmausbot_connectors" },
+    }, 1_000_000);
+    expect(aliased.providerAction.server).toBe("composio");
+    expect(aliased.providerReadAction.server).toBe("composio");
     expect(() => store.create({ ...input(), providerReadAction: { ...input().providerReadAction, arguments: { draft_id: "draft-2" } } }, 1_000_000)).toThrow(/approved draft/);
     expect(() => store.create({ ...input(), providerAction: { ...input().providerAction, tool: "SLACK_SEND_MESSAGE" } }, 1_000_000)).toThrow(/channel/);
     expect(() => store.create({ ...input(), providerReadAction: undefined }, 1_000_000)).toThrow();

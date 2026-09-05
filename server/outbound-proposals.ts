@@ -175,6 +175,28 @@ function validStored(value: unknown): value is OutboundProposal {
     && ["pending", "held", "revision_requested", "cancelled", "sending", "sent", "failed"].includes(String(row.status));
 }
 
+
+/** Bots see the guarded Composio path under the MCP server name
+ * `openmausbot_connectors`; the proposal store keys it as `composio`. Accept
+ * the visible name so a coordinator quoting exactly what it was shown does
+ * not fail the whole proposal on a label. */
+const GUARDED_COMPOSIO_SERVER_ALIASES = new Set(["composio", "openmausbot_connectors", "openmausbot-connectors", "openmausbot connectors"]);
+
+function normalizeGuardedServers(raw: unknown): unknown {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+  const row = { ...(raw as Record<string, unknown>) };
+  for (const key of ["providerAction", "providerReadAction"]) {
+    const action = row[key];
+    if (!action || typeof action !== "object" || Array.isArray(action)) continue;
+    const record = action as Record<string, unknown>;
+    if (record.transport === "composio" && typeof record.server === "string"
+      && GUARDED_COMPOSIO_SERVER_ALIASES.has(record.server.trim().toLowerCase())) {
+      row[key] = { ...record, server: "composio" };
+    }
+  }
+  return row;
+}
+
 export class OutboundProposalStore {
   private proposals: OutboundProposal[] = [];
   /** Invalid older rows are retained byte-for-byte as non-executable history.
@@ -211,7 +233,7 @@ export class OutboundProposalStore {
   }
 
   create(raw: unknown, now = Date.now()): OutboundProposal {
-    const input = proposalInput(raw);
+    const input = proposalInput(normalizeGuardedServers(raw));
     if (input.providerAction.transport !== "composio" || input.providerAction.server !== "composio") {
       throw new Error("outbound sends must use the guarded Composio provider path");
     }

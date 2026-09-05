@@ -418,7 +418,7 @@ const TOOLS = [
         },
         material_facts: { type: "string", enum: ["verified", "missing", "conflicting"] },
         rationale: { type: "string" },
-        provider_action: { type: "object", description: "Exact guarded provider send action: transport, server, tool, providerAccountId, optional display accountAlias, arguments." },
+        provider_action: { type: "object", description: "Exact guarded provider send action: transport \"composio\", server \"composio\" (the openmausbot_connectors MCP), tool, providerAccountId (the connected account id, e.g. ca_...), optional display accountAlias, arguments." },
         provider_read_action: { type: "object", description: "Exact guarded provider reread action with the same providerAccountId, run immediately before send." },
       },
       required: ["communications_receipt_id", "review_class", "provider_account_id", "account_alias", "provider_channel_id", "channel", "purpose", "relationship_boundary", "provider_recipient_ids", "recipients", "body", "provider_draft_id", "source_references", "material_facts", "rationale", "provider_action", "provider_read_action"],
