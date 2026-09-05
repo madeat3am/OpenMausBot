@@ -173,7 +173,7 @@ import { BUILT_IN_DRIVERS } from "./drivers/builtIn.ts";
 import { getOrCreateChannel, mirrorActivity, mirrorExchange, mirrorReply, type CommsBus } from "./comms-visibility.ts";
 import { searchMessages } from "./message-db.ts";
 import { promptWithReply, transcriptText } from "./replies.ts";
-import { _loadPending, buildDelegationFailurePrompt, buildDelegationRevivalPrompt, DelegationWakeBudget, discardDelegations, drainDelegations, findDelegationReceipt, pendingDelegationInfo, pendingDelegationSnapshot, pendingThreads, queueDelegation, recordDelegationReceipt, releaseDelegationsWaitingOn, summarizeDelegatedActivity, type QueueResult } from "./delegations.ts";
+import { _loadPending, buildDelegationFailurePrompt, buildDelegationRevivalPrompt, DelegationWakeBudget, discardDelegations, drainDelegations, findDelegationReceipt, findLatestDelegationReceipt, pendingDelegationInfo, pendingDelegationSnapshot, pendingThreads, queueDelegation, recordDelegationReceipt, releaseDelegationsWaitingOn, summarizeDelegatedActivity, type QueueResult } from "./delegations.ts";
 import {
   cancelSteeredMessage,
   drainSteeredMessages,
@@ -6823,11 +6823,16 @@ const server = createServer(async (req, res) => {
           const id = value && typeof value === "object" && !Array.isArray(value)
             ? String((value as Record<string, unknown>).id ?? "")
             : "";
-          const receipt = id ? findDelegationReceipt(id) : null;
-          return receipt
+          const exact = id ? findDelegationReceipt(id) : null;
+          const matches = (receipt: ReturnType<typeof findDelegationReceipt>) => !!receipt
             && receipt.sourceThreadId === fromThreadId
             && receipt.status === "done"
-            && receipt.toBotName.trim().toLowerCase() === requiredName.toLowerCase()
+            && receipt.toBotName.trim().toLowerCase() === requiredName.toLowerCase();
+          // The supplied id is often the specialist's provider receipt rather
+          // than the delegate_bot task id; the durable (thread, bot) binding is
+          // the authority, so fall back to the newest terminal receipt for it.
+          const receipt = matches(exact) ? exact : findLatestDelegationReceipt(fromThreadId, requiredName);
+          return receipt
             ? { id: receipt.id, status: "completed" as const, finishedAt: receipt.finishedAt }
             : null;
         };

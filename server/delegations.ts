@@ -126,6 +126,24 @@ export function findDelegationReceipt(id: string): DelegationReceipt | null {
   return receipts.find((receipt) => receipt.id === id) ?? null;
 }
 
+/** Newest terminal receipt for one delegating thread and target bot name.
+ * Coordinators often quote a provider receipt (a Composio log id) instead of
+ * the delegate_bot task id; the durable record already binds the exact
+ * (source thread, target bot) pair, so the delegation is resolved from that
+ * pair rather than failing the whole proposal on a copied identifier. */
+export function findLatestDelegationReceipt(
+  sourceThreadId: string,
+  toBotName: string,
+  status: DelegationOutcome = "done",
+): DelegationReceipt | null {
+  const wanted = toBotName.trim().toLowerCase();
+  return receipts
+    .filter((receipt) => receipt.sourceThreadId === sourceThreadId
+      && receipt.status === status
+      && receipt.toBotName.trim().toLowerCase() === wanted)
+    .sort((a, b) => b.finishedAt - a.finishedAt)[0] ?? null;
+}
+
 /** A still-queued task's routing info, or null once it dispatched/settled. */
 export function pendingDelegationInfo(id: string): { sourceThreadId: string; toBotId: string; attempts: number } | null {
   for (const [sourceThreadId, items] of pendingDelegations) {

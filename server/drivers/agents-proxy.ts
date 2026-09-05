@@ -383,8 +383,8 @@ const TOOLS = [
       type: "object",
       additionalProperties: false,
       properties: {
-        communications_receipt_id: { type: "string" },
-        human_voice_receipt_id: { type: "string" },
+        communications_receipt_id: { type: "string", description: "The delegate_bot task id of the terminal Communications review for THIS thread (a UUID). If a provider receipt is quoted instead, the newest terminal Communications delegation from this thread is used." },
+        human_voice_receipt_id: { type: "string", description: "The delegate_bot task id of the terminal Human Voice review for this thread (high-stakes only)." },
         review_class: { type: "string", enum: ["routine", "high-stakes"] },
         provider_account_id: { type: "string" },
         account_alias: { type: "string" },

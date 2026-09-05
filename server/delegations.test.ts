@@ -1,3 +1,4 @@
+import { findLatestDelegationReceipt, recordDelegationReceipt } from "./delegations.ts";
 // Async peer handoff (`delegate_bot`) — pure logic. Each test stands up a
 // real Store with throwaway bots, a fake comms-bus (records broadcasts),
 // and a runTarget stub that captures the would-be turn so the test can
@@ -837,5 +838,18 @@ describe("delegated turn status helpers", () => {
     }));
     const lines = summarizeDelegatedActivity(messages, 1_000, 3);
     expect(lines).toEqual(["tool: step-6", "tool: step-7", "tool: step-8"]);
+  });
+});
+
+describe("findLatestDelegationReceipt", () => {
+  it("resolves the newest terminal receipt for a (thread, bot) pair regardless of the quoted id", () => {
+    const now = Date.now();
+    recordDelegationReceipt({ id: "d-old", sourceThreadId: "poppy-1", toBotId: "c", toBotName: "Communications", status: "done", finishedAt: now - 3_000 });
+    recordDelegationReceipt({ id: "d-new", sourceThreadId: "poppy-1", toBotId: "c", toBotName: "Communications", status: "done", finishedAt: now - 2_000 });
+    recordDelegationReceipt({ id: "d-other", sourceThreadId: "poppy-2", toBotId: "c", toBotName: "Communications", status: "done", finishedAt: now - 1_000 });
+    recordDelegationReceipt({ id: "d-err", sourceThreadId: "poppy-1", toBotId: "c", toBotName: "Communications", status: "error", finishedAt: now });
+    expect(findLatestDelegationReceipt("poppy-1", "communications")?.id).toBe("d-new");
+    expect(findLatestDelegationReceipt("poppy-1", "Human Voice")).toBeNull();
+    expect(findLatestDelegationReceipt("poppy-3", "Communications")).toBeNull();
   });
 });
