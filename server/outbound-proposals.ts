@@ -182,9 +182,33 @@ function validStored(value: unknown): value is OutboundProposal {
  * not fail the whole proposal on a label. */
 const GUARDED_COMPOSIO_SERVER_ALIASES = new Set(["composio", "openmausbot_connectors", "openmausbot-connectors", "openmausbot connectors"]);
 
-function normalizeGuardedServers(raw: unknown): unknown {
+/** Timestamps below this are unix seconds (any real ms value is ~1.7e12). */
+const SECONDS_THRESHOLD = 1e11;
+
+function toMilliseconds(value: unknown, now: number): unknown {
+  // Only rescale when the clock itself is a real millisecond epoch; test
+  // fixtures with toy clocks keep their values.
+  return now >= SECONDS_THRESHOLD && typeof value === "number" && Number.isFinite(value) && value > 0 && value < SECONDS_THRESHOLD
+    ? Math.round(value * 1000)
+    : value;
+}
+
+function normalizeGuardedServers(raw: unknown, now: number): unknown {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
   const row = { ...(raw as Record<string, unknown>) };
+  // Coordinators quote provider timestamps in unix seconds; the store compares
+  // against Date.now() milliseconds, so a seconds value would read as 1970 and
+  // hold every proposal as "stale". Normalize both fields to milliseconds.
+  if (Array.isArray(row.sourceReferences)) {
+    row.sourceReferences = row.sourceReferences.map((source) =>
+      source && typeof source === "object" && !Array.isArray(source)
+        ? {
+          ...(source as Record<string, unknown>),
+          observedAt: toMilliseconds((source as Record<string, unknown>).observedAt, now),
+          freshUntil: toMilliseconds((source as Record<string, unknown>).freshUntil, now),
+        }
+        : source);
+  }
   for (const key of ["providerAction", "providerReadAction"]) {
     const action = row[key];
     if (!action || typeof action !== "object" || Array.isArray(action)) continue;
@@ -233,7 +257,7 @@ export class OutboundProposalStore {
   }
 
   create(raw: unknown, now = Date.now()): OutboundProposal {
-    const input = proposalInput(normalizeGuardedServers(raw));
+    const input = proposalInput(normalizeGuardedServers(raw, now));
     if (input.providerAction.transport !== "composio" || input.providerAction.server !== "composio") {
       throw new Error("outbound sends must use the guarded Composio provider path");
     }

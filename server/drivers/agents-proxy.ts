@@ -412,7 +412,7 @@ const TOOLS = [
           items: {
             type: "object",
             additionalProperties: false,
-            properties: { uri: { type: "string" }, relationship_boundary: { type: "string" }, observed_at: { type: "integer" }, fresh_until: { type: "integer" } },
+            properties: { uri: { type: "string" }, relationship_boundary: { type: "string" }, observed_at: { type: "integer", description: "Unix epoch when the source was read (seconds or milliseconds; must be recent)." }, fresh_until: { type: "integer", description: "Unix epoch until which the evidence is fresh (seconds or milliseconds); proposals with expired evidence are held." } },
             required: ["uri", "relationship_boundary", "observed_at", "fresh_until"],
           },
         },

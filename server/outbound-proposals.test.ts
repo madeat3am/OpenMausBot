@@ -68,6 +68,14 @@ describe("outbound proposals", () => {
     }, 1_000_000);
     expect(aliased.providerAction.server).toBe("composio");
     expect(aliased.providerReadAction.server).toBe("composio");
+    // unix-second source timestamps are normalized to milliseconds, not read as 1970
+    const nowMs = 1_800_000_000_000;
+    const seconds = store.create({
+      ...input(),
+      sourceReferences: [{ ...input().sourceReferences[0], observedAt: Math.floor(nowMs / 1000) - 60, freshUntil: Math.floor(nowMs / 1000) + 600 }],
+    }, nowMs);
+    expect(seconds.status).toBe("pending");
+    expect(seconds.sourceReferences[0].observedAt).toBe((Math.floor(nowMs / 1000) - 60) * 1000);
     expect(() => store.create({ ...input(), providerReadAction: { ...input().providerReadAction, arguments: { draft_id: "draft-2" } } }, 1_000_000)).toThrow(/approved draft/);
     expect(() => store.create({ ...input(), providerAction: { ...input().providerAction, tool: "SLACK_SEND_MESSAGE" } }, 1_000_000)).toThrow(/channel/);
     expect(() => store.create({ ...input(), providerReadAction: undefined }, 1_000_000)).toThrow();
