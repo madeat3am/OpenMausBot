@@ -26,10 +26,11 @@ rsync -a --exclude twentycrm-mcp ~/omb/OpenMausBot/custom-mcps/ ~/omb/custom-mcp
 
 ## citadel-freshbooks (direct FreshBooks API)
 
-Why it exists: Composio's FreshBooks toolkit exposes only
-`FRESHBOOKS_LIST_BUSINESSES`, `FRESHBOOKS_LIST_PROJECTS`,
-`FRESHBOOKS_LIST_JOURNAL_ENTRIES2` (verified 2026-09-05), so invoices, clients,
-payments and expenses were unreachable. This server uses FreshBooks OAuth2
+Why it exists: Composio's FreshBooks toolkit (10 tools as of docs version 20260721_00,
+including `FRESHBOOKS_LIST_BUSINESSES`, `FRESHBOOKS_LIST_PROJECTS`,
+`FRESHBOOKS_LIST_JOURNAL_ENTRIES2`, `FRESHBOOKS_LIST_CLIENTS`; verified by Hermes
+2026-09-05 against https://docs.composio.dev/toolkits/freshbooks) has no invoice,
+payment or expense tools, so those were unreachable. This server uses FreshBooks OAuth2
 directly, one grant per business login (`meridian-row`, `seed`), and stores the
 rotating token pair under `FRESHBOOKS_TOKEN_DIR` (default
 `/data/.openmausbot/freshbooks`, the writable data volume). Read-only in v1.
