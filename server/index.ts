@@ -850,18 +850,25 @@ async function guardedCustomMcpIntegrations(autonomyCapability: string | null) {
     }
   }
   const allNames = [...new Set([...localNames, ...sidecarNames])];
-  return Object.fromEntries(allNames.map((name) => [name, {
-    command: process.execPath,
-    args: [SPAWNED_PROXIES.customMcp],
-    env: {
-      ...AGENTS_NODE_FLAG,
-      OMB_HARNESS_URL: `http://127.0.0.1:${PORT}`,
-      OMB_COMMS_TOKEN: COMMS_TOKEN,
-      OMB_CUSTOM_MCP_SERVER: name,
-      OMB_CUSTOM_MCP_SESSION: randomUUID(),
-      ...(autonomyCapability ? { OMB_AUTONOMY_CAPABILITY: autonomyCapability } : {}),
-    },
-  }]));
+  return Object.fromEntries(allNames.map((name) => {
+    const session = randomUUID();
+    return [name, {
+      command: process.execPath,
+      // Server identity rides in argv, which every driver keeps per server.
+      // The Codex driver forwards env by NAME from one shared parent env, so
+      // an env-only identity made every custom proxy answer for the last
+      // mounted server (fleet-wide "tools[name] is not a function").
+      args: [SPAWNED_PROXIES.customMcp, "--server", name, "--session", session],
+      env: {
+        ...AGENTS_NODE_FLAG,
+        OMB_HARNESS_URL: `http://127.0.0.1:${PORT}`,
+        OMB_COMMS_TOKEN: COMMS_TOKEN,
+        OMB_CUSTOM_MCP_SERVER: name,
+        OMB_CUSTOM_MCP_SESSION: session,
+        ...(autonomyCapability ? { OMB_AUTONOMY_CAPABILITY: autonomyCapability } : {}),
+      },
+    }];
+  }));
 }
 
 // ── computer control (who is driving) ──────────────────────────────────

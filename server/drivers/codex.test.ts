@@ -259,6 +259,29 @@ describe("CodexDriver turns (fake app-server)", () => {
     expect(argv).toContain('mcp_servers.notes.default_tools_approval_mode="auto"');
   });
 
+  it("keeps custom proxies distinct in argv and disables hosted Codex Apps", async () => {
+    await create();
+    const dump = join(scratch, "custom-mcp-two.json");
+    process.env.FAKE_CODEX_DUMP = dump;
+    const proxy = (name: string) => ({
+      command: process.execPath,
+      args: ["/tmp/custom-mcp-proxy.js", "--server", name, "--session", `s-${name}`],
+      env: { OMB_CUSTOM_MCP_SERVER: name, OMB_CUSTOM_MCP_SESSION: `s-${name}` },
+    });
+    await instance.adapter.sendTurn({
+      threadId: "t-custom-mcp-two",
+      text: "go",
+      integrations: { custom: { "citadel-buzz": proxy("citadel-buzz"), todoist: proxy("todoist") } },
+    });
+    await recorder.until((event) => event.type === "turn.completed");
+    const seen = JSON.parse(readFileSync(dump, "utf8"));
+    const argv = seen.argv.join(" ");
+    // env is shared by name across servers; identity must survive in per-server args
+    expect(argv).toContain('mcp_servers.citadel-buzz.args=["/tmp/custom-mcp-proxy.js","--server","citadel-buzz","--session","s-citadel-buzz"]');
+    expect(argv).toContain('mcp_servers.todoist.args=["/tmp/custom-mcp-proxy.js","--server","todoist","--session","s-todoist"]');
+    expect(argv).toContain("apps._default.enabled=false");
+  });
+
   it("mounts peer-agent comms without placing the comms token in argv", async () => {
     await create();
     const dump = join(scratch, "agents.json");

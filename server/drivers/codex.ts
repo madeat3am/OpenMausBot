@@ -156,6 +156,11 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
       const launchAttempt = async (attempt: number): Promise<void> => {
         const env = childEnv();
         const appServerArgs = ["app-server", ...codexLocalProviderArgs(env, turn.model)];
+        // Codex's hosted Apps connector (codex_apps: Gmail, Slack, Drive,
+        // GitHub, ...) is bound to the signed-in ChatGPT account and bypasses
+        // the OMB authorization boundary entirely. Connected apps reach a bot
+        // only through the guarded connector proxies below.
+        appServerArgs.push("-c", "apps._default.enabled=false");
         if (turn.integrations?.composio) {
           // This is the harness-owned policy proxy, not a direct provider
           // endpoint. It default-denies exact nested actions before forwarding,

@@ -9,8 +9,13 @@ type JsonRpc = Record<string, unknown>;
 const HARNESS_URL = (process.env.OMB_HARNESS_URL ?? "").replace(/\/$/, "");
 const COMMS_TOKEN = process.env.OMB_COMMS_TOKEN ?? "";
 const CAPABILITY = process.env.OMB_AUTONOMY_CAPABILITY ?? "";
-const SERVER = process.env.OMB_CUSTOM_MCP_SERVER ?? "";
-const SESSION = process.env.OMB_CUSTOM_MCP_SESSION ?? randomUUID();
+// argv wins: env is shared across every proxy a Codex session launches.
+const argValue = (flag: string): string | undefined => {
+  const index = process.argv.indexOf(flag);
+  return index >= 0 ? process.argv[index + 1] : undefined;
+};
+const SERVER = argValue("--server") ?? process.env.OMB_CUSTOM_MCP_SERVER ?? "";
+const SESSION = argValue("--session") ?? process.env.OMB_CUSTOM_MCP_SESSION ?? randomUUID();
 const MAX_RESPONSE_BYTES = 20 * 1024 * 1024;
 
 const send = (message: JsonRpc) => process.stdout.write(`${JSON.stringify(message)}\n`);
