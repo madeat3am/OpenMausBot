@@ -13,6 +13,7 @@ import {
   deriveCompanionPanelStatus,
   deriveTailscalePairingStatus,
   loadCompanionBridgeState,
+  missingBridgeCopy,
   pairingSurfaceCopy,
   shouldHydrateCompanionEmail,
 } from "./CompanionSection";
@@ -38,6 +39,23 @@ describe("companion account action errors", () => {
       "Enter a valid email",
     );
     expect(companionAccountActionError(account("error", "Secure connection needs attention"), null)).toBeNull();
+  });
+});
+
+describe("phone card without a companion bridge", () => {
+  it("sends a remote server's page to the computer that hosts the server", () => {
+    expect(missingBridgeCopy({ remote: true })).toEqual({
+      title: "Use OpenMausBot from your phone",
+      subtitle:
+        "Phone pairing runs on the computer that hosts this server. Open OpenMausBot on that computer to set up a phone.",
+    });
+  });
+
+  it("keeps pointing a plain browser at this computer's desktop app", () => {
+    expect(missingBridgeCopy({ remote: false })).toEqual({
+      title: "Use OpenMausBot from your phone",
+      subtitle: "Open Settings in the OpenMausBot desktop app to set up a phone.",
+    });
   });
 });
 
