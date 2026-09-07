@@ -15,13 +15,23 @@ ipcRenderer.on("package:install", (_event, url) => {
   for (const listener of packageInstallListeners) listener(url);
 });
 
+// Receive-only. Main resolves the paired alias and binds the destination
+// to this origin; no remote page can invoke pairing or read its credential.
+let pendingPoppyTarget = null;
+const poppyListeners = new Set();
+ipcRenderer.on("poppy:open", (_event, envelope) => {
+  if (envelope?.uiOrigin !== location.origin || !envelope.target) return;
+  if (poppyListeners.size === 0) pendingPoppyTarget = envelope.target;
+  else for (const listener of poppyListeners) listener(envelope.target);
+});
+
 // The bridge is built once, then exposed in full only to the local server's
 // UI. A remote server's page (Server menu) gets the safe subset: nothing that
 // captures this screen, touches this computer's files or logins, or runs
 // helpers here. Main enforces the same rule on the sensitive channels.
 const localOrigin = process.argv.find((arg) => arg.startsWith("--omb-local-origin="))?.slice("--omb-local-origin=".length) ?? null;
 const isLocalPage = !localOrigin || location.origin === localOrigin;
-const REMOTE_SAFE = new Set(["platform", "getCapabilities", "onCapabilitiesChanged", "applySkin", "setUnreadCount", "openExternal", "getPathForFile", "permStatus", "environments"]);
+const REMOTE_SAFE = new Set(["platform", "getCapabilities", "onCapabilitiesChanged", "onPoppyOpen", "applySkin", "setUnreadCount", "openExternal", "getPathForFile", "permStatus", "environments"]);
 
 const bridge = {
   /** Host platform ("darwin" | "win32" | "linux") — for platform-aware UI. */
@@ -140,6 +150,15 @@ const bridge = {
     packageInstallListeners.add(cb);
     if (pendingPackageInstallUrl) cb(pendingPackageInstallUrl);
     return () => packageInstallListeners.delete(cb);
+  },
+  onPoppyOpen: (cb) => {
+    poppyListeners.add(cb);
+    if (pendingPoppyTarget) {
+      const target = pendingPoppyTarget;
+      pendingPoppyTarget = null;
+      cb(target);
+    }
+    return () => poppyListeners.delete(cb);
   },
   /** Mirrors durable unread state into the native Dock/taskbar badge. */
   setUnreadCount: (count) => ipcRenderer.send("desktop:unread-count", count),

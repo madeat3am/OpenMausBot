@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   configStatusFromFrame,
+  createPoppyNavigationCoordinator,
   initialState,
   loadSnapshotBoundary,
   openNotificationTarget,
@@ -159,6 +160,164 @@ describe("notification routing", () => {
       bots,
       groups,
     })).toBeNull();
+  });
+});
+
+describe("native Poppy navigation", () => {
+  const poppy = {
+    id: "poppy-1",
+    threadId: "poppy-current",
+    tasks: [
+      { threadId: "poppy-current", title: "Current", createdAt: 2 },
+      { threadId: "poppy-first", title: "First", createdAt: 1 },
+      { threadId: "poppy-second", title: "Second", createdAt: 0 },
+    ],
+    name: "Poppy",
+    chiefOfStaff: true,
+  } as Bot;
+  const target = (threadId: string, revision = 1) => ({
+    botId: poppy.id,
+    threadId,
+    itemAlias: `item-${threadId}`,
+    revision,
+  });
+
+  it("queues until hydration and selects only after an exact switch succeeds", async () => {
+    const dispatch = vi.fn();
+    const switchTask = vi.fn(async (_botId, threadId) => ({ ...poppy, threadId }));
+    const unavailable = vi.fn();
+    const coordinator = createPoppyNavigationCoordinator({
+      getState: () => ({ bots: [poppy] }),
+      dispatch,
+      switchTask,
+      onUnavailable: unavailable,
+    });
+
+    coordinator.enqueue(target("poppy-first"));
+    await Promise.resolve();
+    expect(switchTask).not.toHaveBeenCalled();
+
+    coordinator.setReady(true);
+    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledTimes(2));
+    expect(dispatch.mock.calls.map(([action]) => action.type)).toEqual(["taskSwitched", "select"]);
+    expect(unavailable).not.toHaveBeenCalled();
+  });
+
+  it("trusts a renamed hub and server task when the local task cache lags", async () => {
+    const dispatch = vi.fn();
+    const unavailable = vi.fn();
+    const renamed = {
+      ...poppy,
+      name: "Operations",
+      chiefOfStaff: false,
+      tasks: [{ threadId: "poppy-current", title: "Current", createdAt: 2 }],
+    };
+    const switchTask = vi.fn(async (_botId, threadId) => ({ ...renamed, threadId }));
+    const coordinator = createPoppyNavigationCoordinator({
+      getState: () => ({ bots: [renamed] }),
+      dispatch,
+      switchTask,
+      onUnavailable: unavailable,
+    });
+    coordinator.setReady(true);
+    coordinator.enqueue(target("poppy-created-after-hydration"));
+
+    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledTimes(2));
+    expect(switchTask).toHaveBeenCalledWith(
+      poppy.id,
+      "poppy-created-after-hydration",
+      expect.any(AbortSignal),
+    );
+    expect(unavailable).not.toHaveBeenCalled();
+  });
+
+  it("always checks the exact server task even when the local active thread matches", async () => {
+    const dispatch = vi.fn();
+    const switchTask = vi.fn(async (_botId, threadId) => ({ ...poppy, threadId }));
+    const coordinator = createPoppyNavigationCoordinator({
+      getState: () => ({ bots: [poppy] }),
+      dispatch,
+      switchTask,
+      onUnavailable: vi.fn(),
+    });
+    coordinator.setReady(true);
+    coordinator.enqueue(target("poppy-current"));
+
+    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledTimes(2));
+    expect(switchTask).toHaveBeenCalledOnce();
+    expect(dispatch.mock.calls.map(([action]) => action.type)).toEqual(["taskSwitched", "select"]);
+  });
+
+  it("fails closed for an unknown bot, stale revision, or unsafe alias", async () => {
+    const dispatch = vi.fn();
+    const switchTask = vi.fn();
+    const unavailable = vi.fn();
+    const coordinator = createPoppyNavigationCoordinator({
+      getState: () => ({ bots: [poppy] }),
+      dispatch,
+      switchTask,
+      onUnavailable: unavailable,
+    });
+    coordinator.setReady(true);
+
+    coordinator.enqueue({ ...target("poppy-first"), botId: "unknown-bot" });
+    await vi.waitFor(() => expect(unavailable).toHaveBeenCalledTimes(1));
+    coordinator.enqueue(target("poppy-first", 0));
+    await vi.waitFor(() => expect(unavailable).toHaveBeenCalledTimes(2));
+    coordinator.enqueue({ ...target("poppy-first"), itemAlias: "../poppy-first" });
+    await vi.waitFor(() => expect(unavailable).toHaveBeenCalledTimes(3));
+
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(switchTask).not.toHaveBeenCalled();
+  });
+
+  it("does not select when the authenticated switch fails", async () => {
+    const dispatch = vi.fn();
+    const unavailable = vi.fn();
+    const coordinator = createPoppyNavigationCoordinator({
+      getState: () => ({ bots: [poppy] }),
+      dispatch,
+      switchTask: vi.fn(async () => { throw new Error("no such task"); }),
+      onUnavailable: unavailable,
+    });
+    coordinator.setReady(true);
+    coordinator.enqueue(target("poppy-first"));
+
+    await vi.waitFor(() => expect(unavailable).toHaveBeenCalledOnce());
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("prevents an older switch response from taking over a newer tap", async () => {
+    const dispatch = vi.fn();
+    const unavailable = vi.fn();
+    const completions: Array<(bot: Bot) => void> = [];
+    const switchTask = vi.fn(
+      (_botId: string, _threadId: string, _signal: AbortSignal) =>
+        new Promise<Bot>((resolve) => completions.push(resolve)),
+    );
+    const coordinator = createPoppyNavigationCoordinator({
+      getState: () => ({ bots: [poppy] }),
+      dispatch,
+      switchTask,
+      onUnavailable: unavailable,
+    });
+    coordinator.setReady(true);
+    coordinator.enqueue(target("poppy-first"));
+    await vi.waitFor(() => expect(switchTask).toHaveBeenCalledTimes(1));
+
+    coordinator.enqueue(target("poppy-second"));
+    await Promise.resolve();
+    expect(switchTask).toHaveBeenCalledTimes(1);
+    completions[0]!({ ...poppy, threadId: "poppy-first" });
+    await vi.waitFor(() => expect(switchTask).toHaveBeenCalledTimes(2));
+    completions[1]!({ ...poppy, threadId: "poppy-second" });
+    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledTimes(2));
+
+    expect(dispatch.mock.calls.map(([action]) => [action.type, action.bot?.threadId ?? action.id])).toEqual([
+      ["taskSwitched", "poppy-second"],
+      ["select", poppy.id],
+    ]);
+    expect(unavailable).not.toHaveBeenCalled();
   });
 });
 

@@ -34,6 +34,8 @@ import {
 import { activateExistingWindow } from "./single-instance.mjs";
 import { pollServerIdentity } from "./server-boot-probe.mjs";
 import { packageUrlFromCommandLine, packageUrlFromDeepLink } from "./package-link.mjs";
+import { poppyReferenceFromCommandLine, createPoppyNavigation } from "./poppy-link.mjs";
+import { defaultConfigPath, loadReceiverConfig } from "../desktop-receiver/config.mjs";
 import { windowChromeOptions } from "./window-chrome.mjs";
 import { defaultSaveName, withSavableFile } from "./save-file.mjs";
 import { desktopViewerPermissionAllowed } from "./desktop-viewer-permissions.mjs";
@@ -118,6 +120,16 @@ const browserConnectionStore = createDescriptorStore({
   fileName: "browser-connection.json",
 });
 let pendingPackageInstallUrl = packageUrlFromCommandLine(process.argv);
+const poppyNavigation = createPoppyNavigation({
+  initialReference: poppyReferenceFromCommandLine(process.argv),
+  loadConfig: () => loadReceiverConfig(defaultConfigPath()),
+  onUnavailable: (code) => {
+    void dialog.showMessageBox({ type: "info", message: "Poppy item unavailable",
+      detail: code === "POPPY_SERVER_NOT_SELECTED"
+        ? "Select the paired Poppy server, then open the notification again."
+        : "Reconnect to the paired Poppy server and review its current items." });
+  },
+});
 let mainWindow = null;
 let unreadCount = 0;
 let unreadOverlayIcon = null;
@@ -221,17 +233,31 @@ function queuePackageInstall(rawLink) {
   return true;
 }
 
+function deliverPoppyReference(win) {
+  return poppyNavigation.deliver(win);
+}
+
+function queuePoppyReference(rawLink) {
+  if (!poppyNavigation.queue(rawLink)) return false;
+  activateExistingWindow(BrowserWindow.getAllWindows());
+  void deliverPoppyReference(BrowserWindow.getAllWindows().find(win => !win.isDestroyed()));
+  return true;
+}
+
 app.on("open-url", (event, url) => {
-  if (!queuePackageInstall(url)) return;
+  if (!queuePoppyReference(url) && !queuePackageInstall(url)) return;
   event.preventDefault();
 });
 
 app.on("second-instance", (_event, commandLine) => {
+  const poppy = poppyReferenceFromCommandLine(commandLine);
+  if (poppy) poppyNavigation.queue(`openmausbot://poppy?item=${poppy.itemAlias}&revision=${poppy.revision}`);
   const packageUrl = packageUrlFromCommandLine(commandLine);
   if (packageUrl) pendingPackageInstallUrl = packageUrl;
   activateExistingWindow(BrowserWindow.getAllWindows());
   const target = BrowserWindow.getAllWindows().find((win) => !win.isDestroyed());
   deliverPackageInstall(target);
+  void deliverPoppyReference(target);
 });
 
 // Packaged: the harness server ships in Resources (compiled JS, zero deps)
@@ -1770,6 +1796,7 @@ function createWindow() {
   });
   win.webContents.on("did-finish-load", () => {
     deliverPackageInstall(win);
+    void deliverPoppyReference(win);
     const remote = activeEnvironment(environmentsState);
     if (!remote) return;
     try {

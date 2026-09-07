@@ -1316,6 +1316,30 @@ public struct CompanionClient: Sendable {
         try await send(try makeRequest("POST", "/api/groups/\(roomId)/read"))
     }
 
+    // MARK: - Private push transport
+
+    public func registerPush(_ registration: PushRegistration) async throws {
+        struct Response: Decodable { let registered: Bool; let tokenDigest: String }
+        let response = try await send(
+            try makeRequest("PUT", "/api/companion/v1/push", encodedBody: registration),
+            as: Response.self
+        )
+        guard response.registered, response.tokenDigest == registration.tokenDigest else {
+            throw APIError.transport("Push registration was not accepted.")
+        }
+    }
+
+    public func unregisterPush() async throws {
+        struct Response: Decodable { let registered: Bool }
+        let response = try await send(try makeRequest("DELETE", "/api/companion/v1/push"), as: Response.self)
+        guard !response.registered else { throw APIError.transport("Push registration was not removed.") }
+    }
+
+    public func poppyItem(id: String) async throws -> PoppyItemDestination {
+        guard PoppyNotificationReference.validID(id) else { throw APIError.badURL }
+        return try await send(try makeRequest("GET", "/api/poppy/v1/items/\(id)"), as: PoppyItemDestination.self)
+    }
+
     // MARK: - Events
 
     /// A session for a connection that is meant to stay open for hours.

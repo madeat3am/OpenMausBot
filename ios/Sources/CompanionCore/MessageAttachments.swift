@@ -3,8 +3,8 @@ import Foundation
 /// One attachment waiting in the mobile composer. The bytes are app-owned:
 /// picker URLs are copied before this value is created, so a later send never
 /// depends on a security-scoped URL still being alive.
-public struct PendingMessageAttachment: Identifiable, Hashable, Sendable {
-    public enum Kind: Hashable, Sendable {
+public struct PendingMessageAttachment: Identifiable, Hashable, Codable, Sendable {
+    public enum Kind: String, Hashable, Codable, Sendable {
         case image
         case file
     }

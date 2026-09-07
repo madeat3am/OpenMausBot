@@ -2,15 +2,29 @@ import Foundation
 import UserNotifications
 import CompanionCore
 
-/// The on-device notification surface. Delivery comes from live or replayed
-/// companion frames; a future APNs relay can feed the same categories and
-/// userInfo without changing the rest of the app.
+/// APNs owns Poppy alerts, including foreground presentation. Other legacy
+/// notification kinds continue to arrive through the companion stream.
 final class NotificationCoordinator: NSObject, UNUserNotificationCenterDelegate {
     static let shared = NotificationCoordinator()
     private let center = UNUserNotificationCenter.current()
     /// Set by `Session`; kept as an id-only value so the notification layer
     /// does not know about SwiftUI navigation or mutable fleet state.
     var responseHandler: ((NotificationTarget) -> Void)?
+    var registrationHandler: (() -> Void)?
+    private(set) var deviceToken: Data?
+    private(set) var registrationFailed = false
+
+    func receivedDeviceToken(_ token: Data) {
+        deviceToken = token
+        registrationFailed = false
+        registrationHandler?()
+    }
+
+    func failedDeviceRegistration() {
+        deviceToken = nil
+        registrationFailed = true
+        registrationHandler?()
+    }
 
     private override init() {
         super.init()
@@ -26,6 +40,7 @@ final class NotificationCoordinator: NSObject, UNUserNotificationCenterDelegate 
     }
 
     func deliver(_ notification: NotificationFrame, sequence: Int?) {
+        guard notification.shouldDeliverLocalAlert else { return }
         let content = UNMutableNotificationContent()
         content.title = notification.title
         content.body = notification.body
@@ -62,11 +77,9 @@ final class NotificationCoordinator: NSObject, UNUserNotificationCenterDelegate 
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
-        let strings = response.notification.request.content.userInfo.reduce(into: [String: String]()) { result, pair in
-            guard let key = pair.key as? String, let value = pair.value as? String else { return }
-            result[key] = value
+        if let target = NotificationTarget(notificationPayload: response.notification.request.content.userInfo) {
+            responseHandler?(target)
         }
-        if let target = NotificationTarget(payload: strings) { responseHandler?(target) }
         completionHandler()
     }
 }

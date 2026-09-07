@@ -3,7 +3,14 @@
 // the per-bot toggle); this only decides how to show it here.
 import type { Notification } from "../../server/notify.ts";
 
-export type NotifyFrame = Notification;
+/** New Poppy frames remain additive until every harness has the matching
+ * server contract.  Keeping the extension here lets an older renderer fail
+ * closed instead of displaying a report title or body as an OS alert. */
+export type NotifyFrame = Omit<Notification, "kind"> & {
+  kind: Notification["kind"] | "poppy";
+  poppyInterface?: number;
+  poppy?: { itemId: string; revision: number };
+};
 
 export type NotificationTarget = Pick<NotifyFrame, "botId" | "threadId">;
 
@@ -22,6 +29,26 @@ export interface NotificationBotIdentity {
   avatarUrl?: string | null;
 }
 
+export interface NotificationBotProfile {
+  name: string;
+  chiefOfStaff?: boolean;
+}
+
+/** Poppy has a separate, privacy-preserving native receiver.  The browser
+ * notification path must stay quiet for both versioned frames and legacy
+ * frames from the current canonical Poppy bot. */
+export function isPoppyNotification(
+  frame: NotifyFrame,
+  bot?: NotificationBotProfile | null,
+): boolean {
+  return (
+    frame.kind === "poppy" ||
+    frame.poppyInterface !== undefined ||
+    frame.poppy !== undefined ||
+    (bot?.chiefOfStaff === true && bot.name.trim().toLowerCase() === "poppy")
+  );
+}
+
 /** Presentation options for one bot's notifications: the stable per-bot
  * coalescing key platforms replace on (`tag`) and its avatar, when the
  * profile has one. Pure so the grouping rule stays testable on its own. */
@@ -37,7 +64,11 @@ export function showNotification(
   onOpen: (target: NotificationTarget) => void,
   avatarUrl?: string | null,
   visibleThreadId?: string | null,
+  bot?: NotificationBotProfile | null,
 ) {
+  // A legacy frame has no stable hub marker. Without its profile we cannot
+  // safely decide whether this is Poppy, including during snapshot/live folds.
+  if (!bot || isPoppyNotification(frame, bot)) return;
   if (typeof Notification === "undefined") return;
   if (document.hasFocus() && visibleThreadId === frame.threadId) return;
 

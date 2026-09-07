@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Poppy
+Exec=/usr/bin/python3 /ABSOLUTE/PATH/TO/OpenMausBot/desktop-receiver/linux/helper.py --gapplication-service
+Terminal=false
+NoDisplay=true
+DBusActivatable=true
+X-GNOME-UsesNotifications=true

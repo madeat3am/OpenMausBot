@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, Menu } from "lucide-react";
-import { StoreProvider, useStore } from "@/state/store";
+import {
+  StoreProvider,
+  api,
+  createPoppyNavigationCoordinator,
+  useStore,
+  type Bot,
+  type PoppyNavigationCoordinator,
+} from "@/state/store";
 import { Onboarding } from "@/components/Onboarding";
 import { emailGateDone, initAnalytics } from "@/lib/analytics";
 import { Sidebar } from "@/components/Sidebar";
@@ -26,6 +33,9 @@ import { setLocale } from "@/lib/i18n";
 
 function Shell() {
   const { state, dispatch } = useStore();
+  const stateRef = useRef(state);
+  stateRef.current = state;
+  const poppyNavigationRef = useRef<PoppyNavigationCoordinator | null>(null);
   const unreadCount =
     state.bots.filter((bot) => !bot.hidden && bot.unread).length +
     state.groups.filter((group) => group.unread).length;
@@ -97,6 +107,43 @@ function Shell() {
   useEffect(() => {
     window.ogb?.setUnreadCount?.(unreadCount);
   }, [unreadCount]);
+
+  useEffect(() => {
+    let unavailableTimer: ReturnType<typeof setTimeout> | null = null;
+    const coordinator = createPoppyNavigationCoordinator({
+      getState: () => stateRef.current,
+      dispatch,
+      switchTask: async (botId, threadId, signal) => {
+        const result = await api(
+          `/api/bots/${encodeURIComponent(botId)}/tasks/${encodeURIComponent(threadId)}`,
+          { method: "POST", signal },
+        );
+        if (!result?.bot) throw new Error("Poppy item is unavailable.");
+        return result.bot as Bot;
+      },
+      onUnavailable: () => {
+        dispatch({ type: "error", message: "Poppy item is unavailable." });
+        if (unavailableTimer) clearTimeout(unavailableTimer);
+        unavailableTimer = setTimeout(
+          () => dispatch({ type: "error", message: null }),
+          6_000,
+        );
+      },
+    });
+    poppyNavigationRef.current = coordinator;
+    coordinator.setReady(stateRef.current.hydrated);
+    const unsubscribe = window.ogb?.onPoppyOpen?.((target) => coordinator.enqueue(target));
+    return () => {
+      unsubscribe?.();
+      coordinator.dispose();
+      if (unavailableTimer) clearTimeout(unavailableTimer);
+      if (poppyNavigationRef.current === coordinator) poppyNavigationRef.current = null;
+    };
+  }, [dispatch]);
+
+  useEffect(() => {
+    poppyNavigationRef.current?.setReady(state.hydrated);
+  }, [state.hydrated]);
 
   // Re-assert every authoritative positive hold in the process that owns the
   // native browser. This covers initial hydration, SSE updates from another

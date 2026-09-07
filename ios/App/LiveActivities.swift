@@ -35,6 +35,13 @@ final class LiveActivityCoordinator {
 
         for update in wanted {
             guard case let .bot(bot) = update.chat else { continue }
+            // Match the current server chief-of-staff identity rule. Poppy
+            // uses APNs only; its reports and proposal buttons never appear
+            // on a Live Activity or create a second lock-screen alert.
+            let isPoppy = bot.chiefOfStaff == true && bot.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "poppy"
+            guard !isPoppy,
+                  !state.notifications.contains(where: { $0.botId == bot.id && !$0.shouldDeliverLocalAlert })
+            else { continue }
             wantedIds.insert(bot.id)
             let face = MausState.forBot(bot, last: state.visibleTranscript(forThread: bot.threadId).last)
             let kind = update.kind == .needsYou ? "needsYou" : "working"
