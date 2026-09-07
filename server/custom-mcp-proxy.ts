@@ -17,6 +17,8 @@ const argValue = (flag: string): string | undefined => {
 const SERVER = argValue("--server") ?? process.env.OMB_CUSTOM_MCP_SERVER ?? "";
 const SESSION = argValue("--session") ?? process.env.OMB_CUSTOM_MCP_SESSION ?? randomUUID();
 const MAX_RESPONSE_BYTES = 20 * 1024 * 1024;
+const SHUTDOWN_QUEUE_WAIT_MS = 2_000;
+const SHUTDOWN_DELETE_MS = 2_000;
 
 const send = (message: JsonRpc) => process.stdout.write(`${JSON.stringify(message)}\n`);
 
@@ -63,20 +65,28 @@ async function relay(message: JsonRpc): Promise<void> {
 const input = readline.createInterface({ input: process.stdin, terminal: false });
 let queue = Promise.resolve();
 let closing: Promise<void> | null = null;
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
+}
+
 function closeSidecarSession(): Promise<void> {
   if (closing) return closing;
-  closing = queue.then(async () => {
+  closing = (async () => {
+    await Promise.race([queue, delay(SHUTDOWN_QUEUE_WAIT_MS)]);
     if (!HARNESS_URL || !COMMS_TOKEN || !SERVER) return;
     try {
       await fetch(`${HARNESS_URL}/api/internal/custom-mcp/mcp?server=${encodeURIComponent(SERVER)}`, {
         method: "DELETE",
         headers: { authorization: `Bearer ${COMMS_TOKEN}`, "x-openmaus-mcp-session": SESSION },
-        signal: AbortSignal.timeout(4_000),
+        signal: AbortSignal.timeout(SHUTDOWN_DELETE_MS),
       });
     } catch {
       // The sidecar reaper and cap remain the durable cleanup path.
     }
-  });
+  })();
   return closing;
 }
 input.on("line", (line) => {
@@ -90,9 +100,13 @@ input.on("line", (line) => {
   // though each hop to the OMB-owned child crosses HTTP.
   queue = queue.then(() => relay(message));
 });
-input.on("close", () => {
-  void closeSidecarSession().finally(() => { process.exitCode = 0; });
-});
+let stopping = false;
+function stop(): void {
+  if (stopping) return;
+  stopping = true;
+  void closeSidecarSession().finally(() => process.exit(0));
+}
+input.on("close", stop);
 for (const signal of ["SIGTERM", "SIGINT"] as const) {
-  process.once(signal, () => { void closeSidecarSession().finally(() => process.exit(0)); });
+  process.once(signal, stop);
 }

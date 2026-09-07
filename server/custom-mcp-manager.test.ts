@@ -132,6 +132,61 @@ describe("guarded custom MCP manager", () => {
     await manager.stop();
   });
 
+  it("reopens a just-closed deterministic id while the old child tears down", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "omb-custom-mcp-reopen-"));
+    dirs.push(dir);
+    const fixture = join(dir, "fixture.mjs");
+    const pidLog = join(dir, "pids");
+    writeFileSync(fixture, `
+      import { appendFileSync } from "node:fs";
+      import readline from "node:readline";
+      appendFileSync(process.env.PID_LOG, String(process.pid) + "\\n");
+      process.on("SIGTERM", () => {});
+      const input = readline.createInterface({ input: process.stdin, terminal: false });
+      input.on("line", (line) => {
+        const frame = JSON.parse(line);
+        process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: frame.id, result: { pid: process.pid } }) + "\\n");
+      });
+    `, { mode: 0o600 });
+    const manager = new CustomMcpManager({ sessionIdleMs: 60_000 });
+    const server = { command: process.execPath, args: [fixture], env: { PID_LOG: pidLog } };
+    const first = await manager.relay(
+      "wiki", server, { jsonrpc: "2.0", id: 1, method: "tools/list" }, "stable-id", 2_000,
+    );
+    expect(manager.close("stable-id")).toBe(true);
+
+    const second = await manager.relay(
+      "wiki", server, { jsonrpc: "2.0", id: 2, method: "tools/list" }, "stable-id", 2_000,
+    );
+
+    expect(second.sessionId).toBe(first.sessionId);
+    expect(second.response?.result).not.toEqual(first.response?.result);
+    expect(readFileSync(pidLog, "utf8").trim().split("\n")).toHaveLength(2);
+    await manager.stop();
+    expect(manager.health()).toEqual({ sessions: 0, children: 0 });
+  }, 10_000);
+
+  it("does not reap a request that is still in flight", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "omb-custom-mcp-inflight-"));
+    dirs.push(dir);
+    const fixture = join(dir, "fixture.mjs");
+    writeFileSync(fixture, `
+      import readline from "node:readline";
+      const input = readline.createInterface({ input: process.stdin, terminal: false });
+      input.on("line", (line) => {
+        const frame = JSON.parse(line);
+        setTimeout(() => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: frame.id, result: {} }) + "\\n"), 250);
+      });
+    `, { mode: 0o600 });
+    const manager = new CustomMcpManager({ sessionIdleMs: 40, reaperIntervalMs: 10 });
+    const server = { command: process.execPath, args: [fixture], env: {} };
+
+    await expect(manager.relay(
+      "wiki", server, { jsonrpc: "2.0", id: 1, method: "tools/list" }, "in-flight", 2_000,
+    )).resolves.toMatchObject({ sessionId: "in-flight", response: { id: 1, result: {} } });
+    await manager.stop();
+  });
+
   it("stop waits through the grace window until a SIGTERM-resistant child is gone", async () => {
     const dir = mkdtempSync(join(tmpdir(), "omb-custom-mcp-stop-"));
     dirs.push(dir);

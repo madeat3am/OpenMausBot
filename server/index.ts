@@ -11044,6 +11044,8 @@ const gracefulShutdown = createGracefulShutdown({
     () => registry.disposeAll(),
   ],
   exit: (code) => process.exit(code),
+  // Custom-MCP child teardown escalates at 5 seconds and stops waiting at 5.5.
+  timeoutMs: 6_000,
 });
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {

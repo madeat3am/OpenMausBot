@@ -13,7 +13,8 @@ const DEFAULT_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_SESSION_IDLE_MS = 15 * 60_000;
 const DEFAULT_REAPER_INTERVAL_MS = 60_000;
 const DEFAULT_MAX_SESSIONS_PER_SERVER = 3;
-const STOP_GRACE_MS = 7_000;
+// The server's outer graceful-shutdown deadline is 6 seconds.
+const STOP_GRACE_MS = 5_500;
 
 type Pending = {
   resolve: (frame: JsonRpc) => void;
@@ -114,7 +115,11 @@ export class CustomMcpManager {
   private reapIdle(): void {
     const now = this.now();
     for (const session of this.sessions.values()) {
-      if (!session.closed && now - session.lastUsedAt > this.sessionIdleMs) this.close(session.id);
+      if (
+        !session.closed
+        && session.pending.size === 0
+        && now - session.lastUsedAt > this.sessionIdleMs
+      ) this.close(session.id);
     }
   }
 
@@ -151,8 +156,10 @@ export class CustomMcpManager {
     const existing = this.sessions.get(id);
     if (existing) {
       if (existing.serverName !== serverName) throw publicError("session belongs to another server");
-      if (existing.closed) throw publicError("session is closing");
-      return existing;
+      if (!existing.closed) return existing;
+      // The old child's close handler is identity-guarded, so a replacement can
+      // use this stable id while the old process finishes tearing down.
+      this.sessions.delete(id);
     }
     this.enforceServerCap(serverName);
     const childCommand = customMcpChildCommand(server);
