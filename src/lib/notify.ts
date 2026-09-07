@@ -43,6 +43,7 @@ export function isPoppyNotification(
 ): boolean {
   return (
     frame.kind === "poppy" ||
+    frame.poppyInterface !== undefined ||
     frame.poppy !== undefined ||
     (bot?.chiefOfStaff === true && bot.name.trim().toLowerCase() === "poppy")
   );
@@ -65,7 +66,9 @@ export function showNotification(
   visibleThreadId?: string | null,
   bot?: NotificationBotProfile | null,
 ) {
-  if (isPoppyNotification(frame, bot)) return;
+  // A legacy frame has no stable hub marker. Without its profile we cannot
+  // safely decide whether this is Poppy, including during snapshot/live folds.
+  if (!bot || isPoppyNotification(frame, bot)) return;
   if (typeof Notification === "undefined") return;
   if (document.hasFocus() && visibleThreadId === frame.threadId) return;
 
