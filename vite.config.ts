@@ -14,6 +14,7 @@ export default defineConfig({
       "companion/**/*.test.ts",
       "enterprise/**/*.test.ts",
       "scripts/**/*.test.mjs",
+      "custom-mcps/**/*.test.mjs",
     ],
     setupFiles: ["server/testing/setup.ts"],
     // the suite spawns fake provider CLIs and a real harness server;
