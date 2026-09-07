@@ -132,7 +132,12 @@ describe("query_personal_wiki fan-out", () => {
   });
 });
 
-describe("stdio entry point", () => {
+// Windows CI cannot create file symlinks without Developer Mode or elevation,
+// and this case exists specifically to launch through one. Skipping keeps the
+// other cases collecting and running on all three CI platforms; the guard it
+// protects (realpath before comparing argv[1] with import.meta.url) only ever
+// mattered on POSIX, where /tmp is itself a symlink.
+describe.skipIf(process.platform === "win32")("stdio entry point", () => {
   // Importing the module exercises callTool but never the spawn path. The entry
   // guard compares import.meta.url with process.argv[1], and argv[1] keeps the
   // caller's symlink, so a symlinked launch path can silently start no server at
