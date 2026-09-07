@@ -51,6 +51,23 @@ describe("routine calendar geometry", () => {
     });
   });
 
+  it("preserves active hours while shifting an interval series", () => {
+    const anchor = new Date(2026, 7, 31, 9).getTime();
+    const occurrence = anchor + 30 * 60_000;
+    const moved = new Date(2026, 7, 31, 11).getTime();
+    expect(scheduleAt({
+      type: "interval",
+      everyMinutes: 30,
+      anchorAt: anchor,
+      activeHours: { start: "07:00", end: "22:00" },
+    }, occurrence, moved)).toEqual({
+      type: "interval",
+      everyMinutes: 30,
+      anchorAt: new Date(2026, 7, 31, 10, 30).getTime(),
+      activeHours: { start: "07:00", end: "22:00" },
+    });
+  });
+
   it("packs overlapping events into deterministic side-by-side columns", () => {
     const at = new Date(2026, 7, 31, 9).getTime();
     const layouts = packCalendarCollisions([

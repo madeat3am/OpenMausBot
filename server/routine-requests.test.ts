@@ -360,6 +360,44 @@ describe("RoutineRequestService", () => {
     })).rejects.toThrow(/valid interval start time/);
   });
 
+  it("accepts stored active hours and preserves them when a confirmation card is applied", async () => {
+    const now = Date.parse("2026-08-28T10:00:00Z");
+    const { service, store, routines } = harness(now);
+    const proposal = await service.propose({
+      botId: "bot-a",
+      threadId: "thread-a",
+      proposal: createProposal({
+        schedule: { type: "interval", everyMinutes: 30, anchorAt: "2026-08-28T10:30:00Z" },
+      }),
+    });
+    const operation = store.messagesFor("thread-a")[0]?.card?.routineRequest?.operation;
+    if (operation?.action !== "create" || operation.routine.schedule.type !== "interval") {
+      throw new Error("Expected a stored interval create operation");
+    }
+    Object.assign(operation.routine.schedule, { activeHours: { start: "07:00", end: "22:00" } });
+
+    expect(service.resolve({
+      botId: "bot-a",
+      threadId: "thread-a",
+      requestId: proposal.requestId,
+      behavior: "allow",
+    })).toMatchObject({ claimed: true, state: "applied" });
+    expect(routines.listRoutines()[0]?.schedule).toEqual({
+      type: "interval",
+      everyMinutes: 30,
+      anchorAt: Date.parse("2026-08-28T10:30:00Z"),
+      activeHours: { start: "07:00", end: "22:00" },
+    });
+
+    const existing = routines.listRoutines()[0]!;
+    const shown = await service.propose({
+      botId: "bot-a",
+      threadId: "thread-b",
+      proposal: { action: "pause", routineId: existing.id },
+    });
+    expect(shown.summary).toContain("active 07:00–22:00");
+  });
+
   it("refuses a cloud routine before creating a card when cloud execution is not ready", async () => {
     const { service, store } = harness(undefined, async () => ({
       ready: false,

@@ -13,7 +13,12 @@ export type RoutineRequestRunOn = "maus" | "cloud";
 export type RoutineRequestSchedule =
   | { type: "once"; at: number }
   | { type: "daily"; time: string; weekdays: number[] }
-  | { type: "interval"; everyMinutes: number; anchorAt?: number };
+  | {
+      type: "interval";
+      everyMinutes: number;
+      anchorAt?: number;
+      activeHours?: { start: string; end: string };
+    };
 
 export interface RoutineRequestDefinition {
   name: string;

@@ -36,6 +36,7 @@ const key = requiredText(64).regex(/^[a-z0-9][a-z0-9_-]*$/, {
   message: "may only contain lowercase letters, numbers, - and _",
 });
 const MAX_DATE_MS = 8_640_000_000_000_000;
+const TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 const packageSchema = z.object({
   format: z.literal(BOT_PACKAGE_FORMAT, { error: "This is not an OpenMaus package" }),
@@ -97,13 +98,17 @@ const packageSchema = z.object({
         z.object({ type: z.literal("once"), at: z.number().int() }),
         z.object({
           type: z.literal("daily"),
-          time: requiredText(5).regex(/^([01]\d|2[0-3]):[0-5]\d$/, { message: "must use HH:MM" }),
+          time: requiredText(5).regex(TIME, { message: "must use HH:MM" }),
           weekdays: z.array(z.number().int().min(0).max(6)).min(1).max(7),
         }),
         z.object({
           type: z.literal("interval"),
           everyMinutes: z.number().int().min(5).max(1_440),
           anchorAt: z.number().int().nonnegative().max(MAX_DATE_MS),
+          activeHours: z.object({
+            start: z.string().regex(TIME),
+            end: z.string().regex(TIME),
+          }).strict().optional(),
         }),
       ]),
       durationMinutes: z.number().int().min(5).max(240),
@@ -235,7 +240,11 @@ export function renderBotPackageMarkdown(document: ParsedBotPackage): string {
       routine.schedule.type === "daily"
         ? `${routine.schedule.time} on weekdays ${routine.schedule.weekdays.join(", ")}`
         : routine.schedule.type === "interval"
-          ? `every ${routine.schedule.everyMinutes} minutes from ${new Date(routine.schedule.anchorAt).toISOString()}`
+          ? `every ${routine.schedule.everyMinutes} minutes from ${new Date(routine.schedule.anchorAt).toISOString()}${
+              routine.schedule.activeHours
+                ? `, active ${routine.schedule.activeHours.start}–${routine.schedule.activeHours.end}`
+                : ""
+            }`
           : `once at ${routine.schedule.at}`
     }  `,
     `**Run limit:** ${routine.timeoutMinutes === undefined ? "none" : `${routine.timeoutMinutes} minutes`}  `,

@@ -4332,6 +4332,9 @@ const agentRoutine = (
             type: "interval" as const,
             everyMinutes: routine.schedule.everyMinutes,
             anchorAt: new Date(routine.schedule.anchorAt).toISOString(),
+            ...(routine.schedule.activeHours
+              ? { activeHours: { ...routine.schedule.activeHours } }
+              : {}),
           }
         : {
             type: "weekly" as const,

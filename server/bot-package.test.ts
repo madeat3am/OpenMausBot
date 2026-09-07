@@ -113,7 +113,12 @@ describe("bot packages", () => {
           agent: "lead",
           prompt: "Check the queue.",
           runOn: "maus",
-          schedule: { type: "interval", everyMinutes: 15, anchorAt: 1_788_254_400_000 },
+          schedule: {
+            type: "interval",
+            everyMinutes: 15,
+            anchorAt: 1_788_254_400_000,
+            activeHours: { start: "07:00", end: "22:00" },
+          },
           durationMinutes: 30,
           timeoutMinutes: 20,
           enabledAfterInstall: false,
@@ -126,6 +131,7 @@ describe("bot packages", () => {
       type: "interval",
       everyMinutes: 15,
       anchorAt: 1_788_254_400_000,
+      activeHours: { start: "07:00", end: "22:00" },
     });
     expect(parsed.package.routines?.[0]?.timeoutMinutes).toBe(20);
     expect(renderBotPackageMarkdown(parsed)).toContain("every 15 minutes");
