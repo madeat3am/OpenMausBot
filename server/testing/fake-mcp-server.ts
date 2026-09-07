@@ -1,6 +1,8 @@
+import { appendFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 const mode = process.env.FAKE_MCP_MODE ?? "healthy";
+if (process.env.FAKE_MCP_PID_LOG) appendFileSync(process.env.FAKE_MCP_PID_LOG, `${process.pid}\n`);
 if (mode === "silent") setInterval(() => {}, 60_000);
 else {
   const lines = createInterface({ input: process.stdin });

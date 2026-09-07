@@ -115,7 +115,7 @@ describe("connector sidecar custom MCP lifecycle", () => {
       const response = await fetch(`http://127.0.0.1:${port}/health`);
       return await response.json() as { sessions: number; children: number };
     };
-    for (let id = 0; id < 5; id += 1) {
+    const outcomes = await Promise.all(Array.from({ length: 5 }, async (_, id) => {
       const response = await fetch(`http://127.0.0.1:${port}/v1/custom-mcp`, {
         method: "POST",
         headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
@@ -125,13 +125,18 @@ describe("connector sidecar custom MCP lifecycle", () => {
           payload: { jsonrpc: "2.0", id, method: "tools/list" },
         }),
       });
-      expect(response.status).toBe(200);
-    }
+      return { status: response.status, body: await response.json() as { error?: string } };
+    }));
+    expect(outcomes.filter(({ status }) => status === 200)).toHaveLength(3);
+    expect(outcomes.filter(({ status }) => status === 500)).toHaveLength(2);
+    expect(outcomes.filter(({ status }) => status === 500).every(
+      ({ body }) => body.error?.includes("server session limit reached"),
+    )).toBe(true);
 
     expect(await eventually(health, (value) => value.sessions === 3 && value.children === 3))
       .toMatchObject({ sessions: 3, children: 3 });
     const pids = readFileSync(pidLog, "utf8").trim().split("\n").map(Number);
-    expect(pids).toHaveLength(5);
+    expect(pids).toHaveLength(3);
     expect(await eventually(health, (value) => value.sessions === 0 && value.children === 0))
       .toMatchObject({ sessions: 0, children: 0 });
     expect(pids.every((pid) => !alive(pid))).toBe(true);

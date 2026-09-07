@@ -10424,6 +10424,7 @@ const server = createServer(async (req, res) => {
           if (DESKTOP_MANAGED) await persistDesktopMcpSecrets(name, null);
           else if (connectorSidecarConfigured()) await callCustomMcpSidecar("remove", [name]);
           persistMcpServers(next);
+          if (!connectorSidecarConfigured()) customMcpManager.closeServer(name);
           return json(res, 200, mcpServerResponse());
         }
 
@@ -10439,6 +10440,7 @@ const server = createServer(async (req, res) => {
             ? await callCustomMcpSidecar("setEnabled", [name, body.enabled])
             : { ...existing.server, enabled: body.enabled };
           persistMcpServers({ ...current, [name]: stored });
+          if (!connectorSidecarConfigured()) customMcpManager.closeServer(name);
           return json(res, 200, mcpServerResponse());
         }
 
@@ -10454,6 +10456,7 @@ const server = createServer(async (req, res) => {
           stored = DESKTOP_MANAGED ? withoutInlineMcpSecrets(parsed.server) : parsed.server;
         }
         persistMcpServers({ ...current, [name]: stored });
+        if (!connectorSidecarConfigured()) customMcpManager.closeServer(name);
         return json(res, 200, mcpServerResponse());
       } finally {
         mcpConfigBusy = false;
