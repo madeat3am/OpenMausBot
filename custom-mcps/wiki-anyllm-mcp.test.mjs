@@ -79,6 +79,26 @@ describe("query_personal_wiki fan-out", () => {
     expect(result.answers.map((row) => row.workspace)).toEqual(["trey-learning", "trey-work"]);
   });
 
+  it("chats exactly one workspace when no limit is passed", async () => {
+    // The default is the boundary, not the option: fan out retrieval across all
+    // fourteen, synthesise on the single best. Every other case in this file
+    // passes an explicit limit, so without this assertion the default is unpinned.
+    const calls = stubInstance({
+      hits: {
+        "trey-inbox": [{ score: 0.31 }],
+        "trey-learning": [{ score: 0.63 }],
+        "trey-work": [{ score: 0.47 }],
+      },
+    });
+
+    const result = await callTool("query_personal_wiki", { message: "anything" });
+
+    expect(calls.search).toEqual(PERSONAL_WORKSPACE_AUTHORITY);
+    expect(calls.chat).toEqual(["trey-learning"]);
+    expect(result.answers).toHaveLength(1);
+    expect(result.ranked.map((row) => row.workspace)).toEqual(["trey-learning", "trey-work", "trey-inbox"]);
+  });
+
   it("keeps answering when one workspace fails", async () => {
     stubInstance({
       hits: { "trey-learning": [{ score: 0.63 }] },

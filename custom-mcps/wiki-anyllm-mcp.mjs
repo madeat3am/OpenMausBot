@@ -35,9 +35,12 @@ export const PERSONAL_WORKSPACE_AUTHORITY = [
   "trey-voice-personal-warm",
 ];
 
-// How many workspaces get a synthesis call after ranking. Retrieval fans out
-// across every workspace; only the best-scoring ones are worth an LLM call.
-const PERSONAL_ANSWER_LIMIT = Number(process.env.PERSONAL_ANYLLM_ANSWER_LIMIT || 2);
+// Retrieval fans out across every workspace; synthesis does not. By default
+// exactly ONE workspace -- the best-scoring one -- gets an LLM call, because a
+// second answer costs a second inference slot and adds a competing narrative
+// the caller then has to arbitrate. The override exists for deliberate
+// multi-workspace questions only.
+const PERSONAL_ANSWER_LIMIT = Number(process.env.PERSONAL_ANYLLM_ANSWER_LIMIT || 1);
 
 // Injectable so tests can drive the fan-out without a live AnythingLLM.
 export const transport = { fetch: (...args) => globalThis.fetch(...args) };
