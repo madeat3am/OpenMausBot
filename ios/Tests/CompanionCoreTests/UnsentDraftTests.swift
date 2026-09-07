@@ -3,6 +3,29 @@ import XCTest
 @testable import CompanionCore
 
 final class UnsentDraftTests: XCTestCase {
+    func testActualStoreFailureAndUnavailableDraftRefuseContentDiscardOnTopicChange() throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: file) }
+        XCTAssertTrue(FileManager.default.createFile(atPath: file.path, contents: Data()))
+        let store = UnsentDraftStore(directory: file)
+        let draft = UnsentDraft(text: "Keep this typed reply", attachments: [])
+
+        let outcome: DraftPersistenceOutcome
+        do {
+            try store.save(draft, connectionID: "pair", threadID: "old-topic")
+            outcome = .saved(draft)
+        } catch {
+            outcome = .failed
+        }
+
+        XCTAssertEqual(outcome, .failed)
+        XCTAssertFalse(outcome.permitsTopicChange(hasComposerContent: true))
+        XCTAssertFalse(DraftPersistenceOutcome.unavailable.permitsTopicChange(hasComposerContent: true))
+        XCTAssertTrue(DraftPersistenceOutcome.unavailable.permitsTopicChange(hasComposerContent: false))
+        XCTAssertTrue(DraftPersistenceOutcome.notLoaded.permitsTopicChange(hasComposerContent: true))
+        XCTAssertTrue(DraftPersistenceOutcome.cleared.permitsTopicChange(hasComposerContent: false))
+    }
+
     func testRestartRetainsBytesAndRequestIdentityWithoutCrossingTopicsOrPairings() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

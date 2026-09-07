@@ -639,8 +639,14 @@ final class Session: ObservableObject {
                     state.apply(frame)
                     if case let .notify(notification) = frame.frame {
                         let bot = state.bot(notification.botId)
-                        let isPoppy = bot?.chiefOfStaff == true && bot?.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "poppy"
-                        if !isPoppy { NotificationCoordinator.shared.deliver(notification, sequence: frame.seq) }
+                        // A missing profile is not evidence that this is safe
+                        // legacy content.  Poppy has only the APNs alert path.
+                        let isPoppy = bot.map {
+                            $0.chiefOfStaff == true && $0.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "poppy"
+                        }
+                        if notification.shouldDeliverLegacyLocalAlert(isPoppy: isPoppy) {
+                            NotificationCoordinator.shared.deliver(notification, sequence: frame.seq)
+                        }
                     }
                     NotificationCoordinator.shared.setBadge(state.unreadCount)
                     state.advance(to: frame.seq)

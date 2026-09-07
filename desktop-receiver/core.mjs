@@ -186,11 +186,11 @@ function stateBinding(endpoint, deviceId) {
   return createHash("sha256").update(`${endpoint.origin}\u001f${deviceId}`).digest("hex");
 }
 
-function validateStoredState(value, binding) {
-  if (!isPlainObject(value) || value.version !== 2 || value.binding !== binding || (value.cursor !== null && (typeof value.cursor !== "string" || value.cursor.length > MAX_CURSOR_LENGTH)) || !Array.isArray(value.deliveryKeys) || value.deliveryKeys.some((key) => typeof key !== "string" || !/^[a-f0-9]{64}$/.test(key))) {
+function validateStoredState(value) {
+  if (!isPlainObject(value) || value.version !== 2 || typeof value.binding !== "string" || !/^[a-f0-9]{64}$/.test(value.binding) || (value.cursor !== null && (typeof value.cursor !== "string" || value.cursor.length > MAX_CURSOR_LENGTH)) || !Array.isArray(value.deliveryKeys) || value.deliveryKeys.some((key) => typeof key !== "string" || !/^[a-f0-9]{64}$/.test(key))) {
     throw receiverError("CORRUPT_STATE");
   }
-  return { binding, cursor: value.cursor, deliveryKeys: new Set(value.deliveryKeys) };
+  return { binding: value.binding, cursor: value.cursor, deliveryKeys: new Set(value.deliveryKeys) };
 }
 
 async function loadState(path, binding) {
@@ -201,7 +201,9 @@ async function loadState(path, binding) {
     if (!details.isFile() || details.size > MAX_STATE_BYTES ||
         (typeof process.getuid === "function" && details.uid !== process.getuid())) throw receiverError("CORRUPT_STATE");
     if ((details.mode & 0o777) !== 0o600) throw receiverError("STATE_PERMISSIONS");
-    return validateStoredState(JSON.parse(await handle.readFile({ encoding: "utf8" })), binding);
+    const stored = validateStoredState(JSON.parse(await handle.readFile({ encoding: "utf8" })));
+    if (stored.binding !== binding) return { binding, cursor: null, deliveryKeys: new Set() };
+    return stored;
   } catch (error) {
     if (error?.code === "ENOENT") return { binding, cursor: null, deliveryKeys: new Set() };
     if (error instanceof ReceiverError) throw error;

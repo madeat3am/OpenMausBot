@@ -142,3 +142,19 @@ Until these journeys and the independent exact-source review pass, report
 `Verification blocked:` with the owner and missing proof. No source check in
 this document establishes deployment, USB installation, TestFlight delivery,
 or the completion of the broader cluster plan.
+
+## Review recovery checks (September 7, 2026)
+
+Revision-3 review identified additional source defects. Focused regressions now
+cover receiver re-pair/restart with fresh identity-bound state; APNs expired-JWT
+invalidation without evicting a concurrent replacement; iOS missing-profile and
+unknown-interface notification suppression; and a real local draft-store write
+failure with explicit persistence outcomes. A failed save preserves composer
+content; sending still checks the exact loaded draft location. An unavailable
+draft with newly typed content cannot be replaced by switching topics.
+
+These checks are source evidence only. The native UI journey after a storage
+failure, application destruction, signed installation, and real push delivery
+remain required acceptance work. The project's reusable operational findings
+are recorded in the cluster wiki's `wiki/development/mobile-app-development-and-operations.md`
+under obsidian PR182; that reference is not deployment authority.

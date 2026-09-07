@@ -188,17 +188,49 @@ test("starts every polling cycle from a fresh first page without the stored curs
   }
 });
 
-test("binds persisted delivery state to the paired device and endpoint", async () => {
+test("starts fresh after re-pair and preserves the new binding across restart", async () => {
   const fx = await fixture();
   try {
-    const fetchImpl = async () => response(200, { cursor: "bound", items: [item("bound_alias")], hasMore: false, nextPage: null });
+    const urls = [];
+    const fetchImpl = async (url) => {
+      urls.push(new URL(url));
+      return response(200, { cursor: `bound-${urls.length}`, items: [item("bound_alias")], hasMore: false, nextPage: null });
+    };
     await receiver(fx, fetchImpl).poll();
+    const original = JSON.parse(await readFile(fx.statePath, "utf8"));
+
+    const rePaired = receiver(fx, fetchImpl, { endpoint: "https://other.example.ts.net", pollIntervalMs: 60_000 });
+    rePaired.start();
+    assert.equal((await rePaired.inFlight).notified, 1);
+    rePaired.stop();
+    assert.equal(urls[1].origin, "https://other.example.ts.net");
+    assert.equal(urls[1].searchParams.has("cursor"), false);
+    const rebound = JSON.parse(await readFile(fx.statePath, "utf8"));
+    assert.notEqual(rebound.binding, original.binding);
+    assert.equal(rebound.cursor, "bound-2");
+    assert.equal(rebound.deliveryKeys.length, 1);
+
+    const restarted = receiver(fx, fetchImpl, { endpoint: "https://other.example.ts.net", pollIntervalMs: 60_000 });
+    restarted.start();
+    assert.equal((await restarted.inFlight).notified, 0);
+    restarted.stop();
+    assert.equal(fx.notifications.length, 2);
+
+    const newDevice = receiver(fx, fetchImpl, { endpoint: "https://other.example.ts.net", deviceId: "different-paired-device" });
+    assert.equal((await newDevice.poll()).notified, 1);
+    assert.equal(fx.notifications.length, 3);
+  } finally {
+    await fx.close();
+  }
+});
+
+test("rejects malformed stored bindings instead of treating them as a re-pair", async () => {
+  const fx = await fixture();
+  try {
+    const { writeFile } = await import("node:fs/promises");
+    await writeFile(fx.statePath, JSON.stringify({ version: 2, binding: "not-a-binding", cursor: null, deliveryKeys: [] }), { mode: 0o600 });
     await assert.rejects(
-      receiver(fx, fetchImpl, { deviceId: "different-paired-device" }).poll(),
-      (error) => error instanceof ReceiverError && error.code === "CORRUPT_STATE",
-    );
-    await assert.rejects(
-      receiver(fx, fetchImpl, { endpoint: "https://other.example.ts.net" }).poll(),
+      receiver(fx, async () => response(200, { cursor: "unused", items: [], hasMore: false, nextPage: null })).poll(),
       (error) => error instanceof ReceiverError && error.code === "CORRUPT_STATE",
     );
   } finally {

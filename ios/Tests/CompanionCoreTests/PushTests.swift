@@ -143,4 +143,21 @@ final class PushTests: XCTestCase {
         legacyKind.poppy = nil
         XCTAssertTrue(legacyKind.shouldDeliverLocalAlert)
     }
+
+    func testUnknownPoppyInterfaceMarkerSuppressesLegacyLocalAlert() throws {
+        let json = #"{"kind":"done","botId":"unknown","botName":"Unhydrated","threadId":"task","title":"Private","body":"Private","poppyInterface":99}"#
+        let frame = try JSONDecoder().decode(NotificationFrame.self, from: Data(json.utf8))
+        XCTAssertTrue(frame.hasPoppyInterfaceMarker)
+        XCTAssertFalse(frame.shouldDeliverLocalAlert)
+    }
+
+    func testLegacyLocalAlertRequiresKnownNonPoppyProfile() {
+        let frame = NotificationFrame(
+            kind: "done", botId: "legacy", botName: "Legacy", threadId: "task",
+            title: "Generic", body: "Generic"
+        )
+        XCTAssertFalse(frame.shouldDeliverLegacyLocalAlert(isPoppy: nil))
+        XCTAssertFalse(frame.shouldDeliverLegacyLocalAlert(isPoppy: true))
+        XCTAssertTrue(frame.shouldDeliverLegacyLocalAlert(isPoppy: false))
+    }
 }

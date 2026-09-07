@@ -1,6 +1,29 @@
 import Foundation
 import CryptoKit
 
+/// Distinguishes an intentional empty-draft removal from the failures that
+/// must keep a caller on the current topic so it cannot discard typed bytes.
+public enum DraftPersistenceOutcome: Equatable, Sendable {
+    case notLoaded
+    case unavailable
+    case cleared
+    case saved(UnsentDraft)
+    case failed
+
+    public func permitsTopicChange(hasComposerContent: Bool) -> Bool {
+        switch self {
+        case .failed:
+            return false
+        case .unavailable:
+            // A load failure may leave an editable composer.  Do not replace
+            // newly typed bytes with another topic before they can be saved.
+            return !hasComposerContent
+        case .notLoaded, .cleared, .saved:
+            return true
+        }
+    }
+}
+
 /// Local content, never a send queue. Only an explicit online Send consumes it.
 public struct UnsentDraft: Codable, Equatable, Sendable {
     public let text: String

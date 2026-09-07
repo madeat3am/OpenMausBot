@@ -710,7 +710,11 @@ struct ChatView: View {
 
     private func restoreDraft() {
         guard loadedDraftLocation != draftLocation else { return }
-        _ = persistDraft()
+        // Do not replace the in-memory composer until the previous topic has
+        // durably accepted it.  In particular, ENOSPC must not turn a topic
+        // switch into silent loss of the text the operator just typed.
+        let hasComposerContent = !draft.isEmpty || !attachments.isEmpty
+        guard persistDraft().permitsTopicChange(hasComposerContent: hasComposerContent) else { return }
         loadedDraftLocation = draftLocation
         draft = ""
         attachments = []
@@ -728,13 +732,14 @@ struct ChatView: View {
     }
 
     @discardableResult
-    private func persistDraft() -> UnsentDraft? {
-        guard let location = loadedDraftLocation, !draftLoadFailed else { return nil }
+    private func persistDraft() -> DraftPersistenceOutcome {
+        guard let location = loadedDraftLocation else { return .notLoaded }
+        guard !draftLoadFailed else { return .unavailable }
         do {
             if draft.isEmpty, attachments.isEmpty {
                 try Self.draftStore.remove(connectionID: location.connectionID, threadID: location.threadID)
                 retainedDraft = nil
-                return nil
+                return .cleared
             }
             let saved: UnsentDraft
             if let retainedDraft, retainedDraft.text == draft, retainedDraft.attachments == attachments {
@@ -744,10 +749,10 @@ struct ChatView: View {
             }
             try Self.draftStore.save(saved, connectionID: location.connectionID, threadID: location.threadID)
             retainedDraft = saved
-            return saved
+            return .saved(saved)
         } catch {
             attachmentError = "This draft could not be saved on this device. Keep this topic open and try again."
-            return nil
+            return .failed
         }
     }
 
@@ -773,8 +778,21 @@ struct ChatView: View {
         let destinationAtSend = current
         let locationAtSend = loadedDraftLocation
         // Save before attempting transport. Reconnection never calls submit.
-        let saved = persistDraft()
-        if saved == nil, !draft.isEmpty || !attachments.isEmpty { return }
+        let persistence = persistDraft()
+        let saved: UnsentDraft?
+        switch persistence {
+        case let .saved(draft):
+            saved = draft
+        case .cleared:
+            saved = nil
+        case .failed:
+            return
+        case .notLoaded, .unavailable:
+            // This preserves the existing first-load and empty-composer
+            // behavior while refusing to send typed bytes without a draft.
+            guard draft.isEmpty, attachments.isEmpty else { return }
+            saved = nil
+        }
         guard session.status == .live else {
             attachmentError = "Unsent draft. Reconnect, review it, then tap Send."
             return

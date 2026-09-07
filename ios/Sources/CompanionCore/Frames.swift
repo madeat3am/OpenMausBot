@@ -17,12 +17,72 @@ public struct NotificationFrame: Codable, Hashable, Sendable {
     public var title: String
     public var body: String
     public var poppy: PoppyNotificationReference? = nil
+    /// Presence, rather than a supported version.  A future Poppy envelope
+    /// must never fall back to a legacy local alert just because this client
+    /// does not recognise its interface version.
+    public var hasPoppyInterfaceMarker = false
 
     /// Poppy has one OS alert owner: APNs. Replayed SSE frames only update state.
-    public var shouldDeliverLocalAlert: Bool { kind != "poppy" && poppy == nil }
+    public var shouldDeliverLocalAlert: Bool {
+        kind != "poppy" && poppy == nil && !hasPoppyInterfaceMarker
+    }
+
+    /// A missing bot profile cannot prove this notification is safe legacy
+    /// content.  Only a hydrated, non-Poppy profile may use the local path.
+    public func shouldDeliverLegacyLocalAlert(isPoppy: Bool?) -> Bool {
+        shouldDeliverLocalAlert && isPoppy == false
+    }
 
     /// A bot blocked on you, as opposed to one reporting in.
     public var isBlocking: Bool { kind == "approval" || kind == "question" }
+
+    public init(
+        kind: String,
+        botId: String,
+        botName: String,
+        threadId: String,
+        title: String,
+        body: String,
+        poppy: PoppyNotificationReference? = nil,
+        hasPoppyInterfaceMarker: Bool = false
+    ) {
+        self.kind = kind
+        self.botId = botId
+        self.botName = botName
+        self.threadId = threadId
+        self.title = title
+        self.body = body
+        self.poppy = poppy
+        self.hasPoppyInterfaceMarker = hasPoppyInterfaceMarker
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case kind, botId, botName, threadId, title, body, poppy, poppyInterface
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        kind = try container.decode(String.self, forKey: .kind)
+        botId = try container.decode(String.self, forKey: .botId)
+        botName = try container.decode(String.self, forKey: .botName)
+        threadId = try container.decode(String.self, forKey: .threadId)
+        title = try container.decode(String.self, forKey: .title)
+        body = try container.decode(String.self, forKey: .body)
+        poppy = try container.decodeIfPresent(PoppyNotificationReference.self, forKey: .poppy)
+        hasPoppyInterfaceMarker = container.contains(.poppyInterface)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(botId, forKey: .botId)
+        try container.encode(botName, forKey: .botName)
+        try container.encode(threadId, forKey: .threadId)
+        try container.encode(title, forKey: .title)
+        try container.encode(body, forKey: .body)
+        try container.encodeIfPresent(poppy, forKey: .poppy)
+        if hasPoppyInterfaceMarker { try container.encode(true, forKey: .poppyInterface) }
+    }
 }
 
 /// A canonical runtime event. The server has already folded these into

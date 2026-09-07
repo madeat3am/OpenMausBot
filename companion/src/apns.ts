@@ -435,17 +435,17 @@ export function createApnsProvider(rawConfig: ApnsProviderConfig): ApnsProvider 
   let cachedToken: { value: string; issuedAtMs: number } | undefined;
   let closed = false;
 
-  const tokenAt = (nowMs: number): string => {
+  const tokenAt = (nowMs: number): NonNullable<typeof cachedToken> => {
     if (
       cachedToken
       && nowMs >= cachedToken.issuedAtMs
       && nowMs - cachedToken.issuedAtMs < PROVIDER_TOKEN_REFRESH_MS
     ) {
-      return cachedToken.value;
+      return cachedToken;
     }
     const value = signProviderToken(config, Math.floor(nowMs / 1000));
     cachedToken = { value, issuedAtMs: nowMs };
-    return value;
+    return cachedToken;
   };
 
   return {
@@ -485,7 +485,7 @@ export function createApnsProvider(rawConfig: ApnsProviderConfig): ApnsProvider 
         ":method": "POST",
         ":path": `/3/device/${request.deviceToken}`,
         ":authority": authority,
-        authorization: `bearer ${token}`,
+        authorization: `bearer ${token.value}`,
         "apns-topic": config.bundleId,
         "apns-push-type": "alert",
         "apns-priority": "10",
@@ -499,7 +499,12 @@ export function createApnsProvider(rawConfig: ApnsProviderConfig): ApnsProvider 
           { authority, path: headers[":path"], headers, body: payload },
           config.timeoutMs,
         );
-        return classifyResponse(response, requestId, timestamp, nowMs, registrationVersion);
+        const result = classifyResponse(response, requestId, timestamp, nowMs, registrationVersion);
+        // Apple explicitly permits a fresh JWT after ExpiredProviderToken. Only
+        // clear the exact cached object used by this request: an older response
+        // must not evict a token refreshed by a concurrent request.
+        if (result.status === "retryable" && result.reason === "ExpiredProviderToken" && cachedToken === token) cachedToken = undefined;
+        return result;
       } catch (error) {
         const result = errorResult(error, requestId, timestamp);
         return registrationVersion === undefined ? result : { ...result, registrationVersion };

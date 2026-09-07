@@ -89,6 +89,7 @@ describe("native APNs Poppy provider", () => {
     [{ statusCode: 410, body: JSON.stringify({ reason: "Unregistered", timestamp: 1788793201000 }) }, "invalid-token"],
     [{ statusCode: 429, headers: { "retry-after": "9" } }, "retryable"],
     [{ statusCode: 503, body: JSON.stringify({ reason: "ServiceUnavailable" }) }, "retryable"],
+    [{ statusCode: 403, body: JSON.stringify({ reason: "InvalidProviderToken" }) }, "permanent"],
     [{ statusCode: 400, body: JSON.stringify({ reason: "BadTopic" }) }, "permanent"],
     [{ statusCode: 99 }, "permanent"],
   ];
@@ -167,6 +168,65 @@ describe("native APNs Poppy provider", () => {
       itemAlias: "item",
       revision: 1,
     })).resolves.toMatchObject({ status: "retryable", reason: "APNs transport failed" });
+  });
+
+  it("refreshes the current cached JWT after ExpiredProviderToken for a retry", async () => {
+    let now = NOW;
+    const { calls, transport } = requestCapture({
+      statusCode: 403,
+      body: JSON.stringify({ reason: "ExpiredProviderToken" }),
+    });
+    const apns = createApnsProvider({
+      teamId: "TEAM123456",
+      keyId: "KEY1234567",
+      privateKey: privateKeyPem,
+      bundleId: "com.openmausbot.app",
+      environment: "development",
+      now: () => now,
+      requestId: randomUUID,
+      transport: {
+        ...transport,
+        async request(input) {
+          calls.push(input);
+          return calls.length === 1
+            ? { statusCode: 403, body: JSON.stringify({ reason: "ExpiredProviderToken" }) }
+            : { statusCode: 200 };
+        },
+      },
+    });
+    const push = () => apns.sendPoppyPush({ deviceToken: "aabb", itemAlias: "item", revision: 1 });
+
+    await expect(push()).resolves.toMatchObject({ status: "retryable", reason: "ExpiredProviderToken" });
+    now += 1_000;
+    await expect(push()).resolves.toMatchObject({ status: "accepted" });
+    expect(calls[1]!.headers.authorization).not.toBe(calls[0]!.headers.authorization);
+  });
+
+  it("does not let a stale ExpiredProviderToken response evict a replacement JWT", async () => {
+    let now = NOW;
+    const calls: ApnsTransportRequest[] = [];
+    let resolveOld: ((response: { statusCode: number; body: string }) => void) | undefined;
+    const apns = provider({
+      request(input) {
+        calls.push(input);
+        if (calls.length === 1) {
+          return new Promise((resolve) => { resolveOld = resolve; });
+        }
+        return Promise.resolve({ statusCode: 200 });
+      },
+      async close() {},
+    }, { now: () => now, requestId: randomUUID });
+    const push = () => apns.sendPoppyPush({ deviceToken: "aabb", itemAlias: "item", revision: 1 });
+
+    const oldPush = push();
+    await Promise.resolve();
+    now += 40 * 60 * 1000 + 1_000;
+    await expect(push()).resolves.toMatchObject({ status: "accepted" });
+    expect(resolveOld).toBeTypeOf("function");
+    resolveOld!({ statusCode: 403, body: JSON.stringify({ reason: "ExpiredProviderToken" }) });
+    await expect(oldPush).resolves.toMatchObject({ status: "retryable", reason: "ExpiredProviderToken" });
+    await expect(push()).resolves.toMatchObject({ status: "accepted" });
+    expect(calls[2]!.headers.authorization).toBe(calls[1]!.headers.authorization);
   });
 });
 
