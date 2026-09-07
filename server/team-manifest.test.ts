@@ -103,6 +103,36 @@ describe("team manifests", () => {
     expect(manifest.team).not.toHaveProperty("room");
   });
 
+  it("accepts projected bot descriptions and rejects descriptions above the profile limit", () => {
+    const description = "D".repeat(6_377);
+    const document = {
+      format: "openmaus.team" as const,
+      version: 2 as const,
+      team: {
+        name: "Operations",
+        members: [
+          {
+            key: "operator",
+            name: "Operator",
+            description,
+            appearance: { color: "green" as const },
+          },
+        ],
+      },
+    };
+
+    expect(parseTeamManifest(document).team.members[0]?.description).toBe(description);
+    expect(() =>
+      parseTeamManifest({
+        ...document,
+        team: {
+          ...document.team,
+          members: [{ ...document.team.members[0], description: "D".repeat(16_001) }],
+        },
+      }),
+    ).toThrow("team.members.0.description is too long");
+  });
+
   it("rejects unsupported versions and dangling member references", () => {
     expect(() => parseTeamManifest({ format: "openmaus.team", version: 99 })).toThrow("not supported");
     expect(() =>

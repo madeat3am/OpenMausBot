@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { schemaIssue, type JsonValue } from "./schema.ts";
 import type { MausColor } from "./store.ts";
+import { BOT_PROFILE_LIMITS } from "../shared/bot-profile.ts";
 import { botMascotBody, type MascotBodyId } from "../shared/mascot-bodies.ts";
 
 export const TEAM_MANIFEST_FORMAT = "openmaus.team" as const;
@@ -42,9 +43,9 @@ const memberSchema = z.object({
   key: requiredText(64).regex(/^[a-z0-9][a-z0-9_-]*$/, {
     message: "may only contain lowercase letters, numbers, - and _",
   }),
-  name: requiredText(100),
-  title: optionalText(200),
-  description: optionalText(4_000),
+  name: requiredText(BOT_PROFILE_LIMITS.name),
+  title: optionalText(BOT_PROFILE_LIMITS.title),
+  description: optionalText(BOT_PROFILE_LIMITS.description),
   appearance: z.object({
     color: z.enum(COLORS, { error: "is not supported" }),
     mascotExpression: optionalText(80),

@@ -4,6 +4,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { schemaIssue, type JsonValue } from "./schema.ts";
 import type { MausColor } from "./store.ts";
 import type { TeamManifestMember } from "./team-manifest.ts";
+import { BOT_PROFILE_LIMITS } from "../shared/bot-profile.ts";
 
 export const BOT_PACKAGE_FORMAT = "openmaus.package" as const;
 export const BOT_PACKAGE_VERSION = 1 as const;
@@ -66,9 +67,9 @@ const packageSchema = z.object({
     }),
     agents: z.array(z.object({
       key,
-      name: requiredText(100),
-      title: optionalText(200),
-      description: optionalText(4_000),
+      name: requiredText(BOT_PROFILE_LIMITS.name),
+      title: optionalText(BOT_PROFILE_LIMITS.title),
+      description: optionalText(BOT_PROFILE_LIMITS.description),
       appearance: z.object({
         color: z.enum(COLORS, { error: "is not supported" }),
         mascotExpression: optionalText(80),
