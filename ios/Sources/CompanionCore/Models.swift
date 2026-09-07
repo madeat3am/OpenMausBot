@@ -832,18 +832,47 @@ public extension Routine {
 public struct NotificationTarget: Equatable, Sendable {
     public let botId: String
     public let threadId: String
+    public let poppy: PoppyNotificationReference?
 
-    public init?(botId: String?, threadId: String?) {
+    private init(poppy: PoppyNotificationReference) {
+        botId = ""
+        threadId = ""
+        self.poppy = poppy
+    }
+
+    public init?(botId: String?, threadId: String?, poppy: PoppyNotificationReference? = nil) {
         guard let botId, let threadId,
               !botId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !threadId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else { return nil }
         self.botId = botId
         self.threadId = threadId
+        self.poppy = poppy
     }
 
     public init?(payload: [String: String]) {
+        guard payload["kind"] != "poppy" else { return nil }
         self.init(botId: payload["botId"], threadId: payload["threadId"])
+    }
+
+    public init?(notificationPayload payload: [AnyHashable: Any]) {
+        if payload["poppy"] != nil || payload["kind"] as? String == "poppy" {
+            struct Envelope: Decodable {
+                let poppyInterface: Int
+                let kind: String
+                let poppy: PoppyNotificationReference
+            }
+            guard JSONSerialization.isValidJSONObject(payload),
+                  let data = try? JSONSerialization.data(withJSONObject: payload),
+                  let decoded = try? JSONDecoder().decode(Envelope.self, from: data),
+                  decoded.poppyInterface == 1, decoded.kind == "poppy"
+            else { return nil }
+            // Push contains only the paired-device alias. The authenticated
+            // item endpoint must supply the exact navigation IDs before use.
+            self.init(poppy: decoded.poppy)
+            return
+        }
+        self.init(botId: payload["botId"] as? String, threadId: payload["threadId"] as? String)
     }
 
     public func requiresTaskSwitch(activeThreadId: String) -> Bool {

@@ -26,6 +26,19 @@ struct ChatView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
     @State private var draft = ""
+    private struct DraftLocation: Equatable {
+        let connectionID: String
+        let threadID: String
+    }
+    @State private var loadedDraftLocation: DraftLocation?
+    @State private var retainedDraft: UnsentDraft?
+    @State private var draftLoadFailed = false
+    private static let draftStore = UnsentDraftStore(
+        directory: URL.applicationSupportDirectory.appendingPathComponent("UnsentDrafts", isDirectory: true)
+    )
+    private var draftLocation: DraftLocation? {
+        session.connection.map { DraftLocation(connectionID: $0.id, threadID: threadId) }
+    }
     @State private var showingTasks = false
     @State private var showingComputer = false
     @State private var showingPlus = false
@@ -303,7 +316,8 @@ struct ChatView: View {
         .navigationDestination(isPresented: $showingComputer) {
             if case let .bot(bot) = current { ComputerView(bot: bot) }
         }
-        .task(id: threadId) {
+        .task(id: draftLocation) {
+            restoreDraft()
             // opening a chat is what marks it read, exactly as on the desktop
             if current.unread { await session.markRead(current) }
 #if DEBUG
@@ -321,11 +335,15 @@ struct ChatView: View {
             if unread { Task { await session.markRead(current) } }
         }
         .onDisappear {
+            _ = persistDraft()
             dictation.stop()
             fileDownloadTask?.cancel()
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase != .active { dictation.stop() }
+            if phase != .active {
+                dictation.stop()
+                _ = persistDraft()
+            }
         }
         .onChange(of: showingComputer) { _, shown in
             if shown { dictation.stop() }
@@ -690,6 +708,49 @@ struct ChatView: View {
         messages.contains { $0.card?.isPending == true }
     }
 
+    private func restoreDraft() {
+        guard loadedDraftLocation != draftLocation else { return }
+        _ = persistDraft()
+        loadedDraftLocation = draftLocation
+        draft = ""
+        attachments = []
+        retainedDraft = nil
+        draftLoadFailed = false
+        guard let location = loadedDraftLocation else { return }
+        do {
+            retainedDraft = try Self.draftStore.load(connectionID: location.connectionID, threadID: location.threadID)
+            draft = retainedDraft?.text ?? ""
+            attachments = retainedDraft?.attachments ?? []
+        } catch {
+            draftLoadFailed = true
+            attachmentError = "The saved draft is unavailable. Unlock this device and reopen this topic."
+        }
+    }
+
+    @discardableResult
+    private func persistDraft() -> UnsentDraft? {
+        guard let location = loadedDraftLocation, !draftLoadFailed else { return nil }
+        do {
+            if draft.isEmpty, attachments.isEmpty {
+                try Self.draftStore.remove(connectionID: location.connectionID, threadID: location.threadID)
+                retainedDraft = nil
+                return nil
+            }
+            let saved: UnsentDraft
+            if let retainedDraft, retainedDraft.text == draft, retainedDraft.attachments == attachments {
+                saved = retainedDraft
+            } else {
+                saved = UnsentDraft(text: draft, attachments: attachments)
+            }
+            try Self.draftStore.save(saved, connectionID: location.connectionID, threadID: location.threadID)
+            retainedDraft = saved
+            return saved
+        } catch {
+            attachmentError = "This draft could not be saved on this device. Keep this topic open and try again."
+            return nil
+        }
+    }
+
     private func submit(_ explicitText: String? = nil) {
         // This also cancels an in-flight permission prompt before it can
         // open the microphone after the message has already been sent.
@@ -701,6 +762,23 @@ struct ChatView: View {
               !preparingAttachments,
               !sendingMessage
         else { return }
+        guard loadedDraftLocation == draftLocation else {
+            attachmentError = "The topic changed. Review its draft before sending."
+            return
+        }
+        guard !draftLoadFailed else {
+            attachmentError = "Reopen this topic after unlocking the device to recover its saved draft."
+            return
+        }
+        let destinationAtSend = current
+        let locationAtSend = loadedDraftLocation
+        // Save before attempting transport. Reconnection never calls submit.
+        let saved = persistDraft()
+        if saved == nil, !draft.isEmpty || !attachments.isEmpty { return }
+        guard session.status == .live else {
+            attachmentError = "Unsent draft. Reconnect, review it, then tap Send."
+            return
+        }
         sendingMessage = true
         attachmentError = nil
         showCommandHUD = false
@@ -709,12 +787,27 @@ struct ChatView: View {
             let sent = await session.send(
                 text: text,
                 attachments: outgoingAttachments,
-                to: current
+                to: destinationAtSend,
+                requestID: explicitText == nil ? saved?.requestID : nil
             )
             sendingMessage = false
             guard sent else {
                 attachmentError = session.actionError ?? "Couldn't send this message. Try again."
                 session.actionError = nil
+                return
+            }
+            guard loadedDraftLocation == locationAtSend else {
+                // A completion for the previous topic cannot clear the new
+                // topic's composer or a newer edit saved in the old one.
+                if let locationAtSend, let saved {
+                    do {
+                        if try Self.draftStore.load(connectionID: locationAtSend.connectionID, threadID: locationAtSend.threadID) == saved {
+                            try Self.draftStore.remove(connectionID: locationAtSend.connectionID, threadID: locationAtSend.threadID)
+                        }
+                    } catch {
+                        attachmentError = "The reply was sent, but its saved draft could not be cleared."
+                    }
+                }
                 return
             }
             // HUD commands expand `/diff` into a longer prompt. Compare with
@@ -726,6 +819,7 @@ struct ChatView: View {
             if attachments.map(\.id) == outgoingAttachments.map(\.id) {
                 attachments = []
             }
+            _ = persistDraft()
             SoundEffects.playSent()
             Haptics.impact(.medium)
         }

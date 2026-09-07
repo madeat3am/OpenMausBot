@@ -23,6 +23,29 @@ Gio requires the matching desktop entry and D-Bus activation service, which
 must be verified on Framework before rollout. No new pairing, outcome,
 approval, or action authority is introduced.
 
+The capability search also covered Electron's notification API source,
+including its current `getHistory()` lifecycle, and the retained-notification
+failure discussed in [electron/electron#6475](https://github.com/electron/electron/issues/6475).
+The [API source](https://github.com/electron/electron/blob/main/docs/api/notification.md)
+supports restoring delivered alerts after restart; it does not fetch future
+Poppy outcomes while the desktop process is absent. The separate receiver is
+an explicit requirement of the approved plan. Its snapshot transport is the
+owner-reviewed Poppy interface v1; the optional durable events endpoint is
+not a deployed prerequisite. Existing `/api/events` and `ios/README.md`
+describe a live stream, which cannot replace fresh current-item reconciliation
+after a replay gap. This is a bounded client of the owning snapshot API.
+
+Web searches on 2026-09-07 covered the official Electron repository's quit and
+notification issues, GLib notification flushing, and OpenMausBot background
+delivery. [Gio's flush contract](https://docs.gtk.org/gio/method.DBusConnection.flush_sync.html)
+requires flushing before immediate process exit; the helper follows it.
+Context7 resolution was attempted and returned HTTP 400 `invalid session ID
+header`; the direct official pages and source supplied the fallback evidence.
+The local cluster-scripts/manifests Poppy search found autonomy and connector
+owners, but no existing independent desktop receiver to extend. This records
+the specific capability search, not an assertion that every vendor page or
+issue was exhaustively reviewed.
+
 ## Source checks
 
 ```sh

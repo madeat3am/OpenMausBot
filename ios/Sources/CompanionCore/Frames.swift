@@ -16,6 +16,10 @@ public struct NotificationFrame: Codable, Hashable, Sendable {
     public var threadId: String
     public var title: String
     public var body: String
+    public var poppy: PoppyNotificationReference? = nil
+
+    /// Poppy has one OS alert owner: APNs. Replayed SSE frames only update state.
+    public var shouldDeliverLocalAlert: Bool { kind != "poppy" && poppy == nil }
 
     /// A bot blocked on you, as opposed to one reporting in.
     public var isBlocking: Bool { kind == "approval" || kind == "question" }

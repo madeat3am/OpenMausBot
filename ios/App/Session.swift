@@ -42,6 +42,10 @@ final class Session: ObservableObject {
     /// Distinguishes a real `.notDetermined` result from the in-memory value
     /// used while notification settings are still loading at launch.
     @Published private(set) var notificationAuthorizationResolved = false
+    @Published private(set) var pushRegistrationError: String?
+    @Published private(set) var pushRegistered = false
+    private var pushSyncTask: Task<Void, Never>?
+    private var pushSyncRequested = false
     /// A short-lived desktop handoff waiting for PairingView to present it.
     @Published private(set) var pairingInvite: PairingInvite?
     /// Pairing can be opened while another computer remains connected. The
@@ -51,6 +55,8 @@ final class Session: ObservableObject {
     /// A notification response that should be pushed by the roster's
     /// NavigationStack after the exact detached task has been activated.
     @Published private(set) var notificationChat: Chat?
+    private var notificationNavigationGeneration = 0
+    private var notificationNavigationTask: Task<Void, Never>?
 
     private var client: CompanionClient?
     /// The device token, kept in memory so the client can be rebuilt when the
@@ -118,6 +124,9 @@ final class Session: ObservableObject {
         _ = NotificationCoordinator.shared
         NotificationCoordinator.shared.responseHandler = { [weak self] target in
             Task { @MainActor in await self?.openNotification(target) }
+        }
+        NotificationCoordinator.shared.registrationHandler = { [weak self] in
+            Task { @MainActor in self?.schedulePushSync() }
         }
 #if DEBUG
         let arguments = ProcessInfo.processInfo.arguments
@@ -400,6 +409,10 @@ final class Session: ObservableObject {
     }
 
     private func clearActiveConnection() {
+        notificationNavigationGeneration &+= 1
+        notificationChat = nil
+        pushRegistered = false
+        pushRegistrationError = nil
         streamTask?.cancel()
         streamTask = nil
         endpointRefreshTask?.cancel()
@@ -424,6 +437,8 @@ final class Session: ObservableObject {
     }
 
     private func configureActiveConnection(_ saved: Connection, token stored: String) {
+        pushRegistered = false
+        pushRegistrationError = nil
         connection = saved
         token = stored
         // New connections honor the desktop's transport policy. Automatic
@@ -618,11 +633,14 @@ final class Session: ObservableObject {
                         // their explicit security priority next launch.
                         rememberWorkingRoute()
                         refreshConnectionMetadata(using: client)
+                        Task { [weak self] in await self?.refreshNotificationAuthorization() }
                         continue
                     }
                     state.apply(frame)
                     if case let .notify(notification) = frame.frame {
-                        NotificationCoordinator.shared.deliver(notification, sequence: frame.seq)
+                        let bot = state.bot(notification.botId)
+                        let isPoppy = bot?.chiefOfStaff == true && bot?.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "poppy"
+                        if !isPoppy { NotificationCoordinator.shared.deliver(notification, sequence: frame.seq) }
                     }
                     NotificationCoordinator.shared.setBadge(state.unreadCount)
                     state.advance(to: frame.seq)
@@ -777,6 +795,10 @@ final class Session: ObservableObject {
     // is a phone that disagrees with the laptop.
 
     func send(_ text: String, to chat: Chat) async {
+        guard status == .live else {
+            actionError = "Reconnect and tap Send to send this reply."
+            return
+        }
         await perform {
             switch chat {
             case let .bot(bot): try await $0.send(text: text, toBot: bot.id)
@@ -792,10 +814,11 @@ final class Session: ObservableObject {
     func send(
         text: String,
         attachments: [PendingMessageAttachment],
-        to chat: Chat
+        to chat: Chat,
+        requestID: String? = nil
     ) async -> Bool {
-        guard let client else {
-            actionError = "This computer is offline."
+        guard let client, status == .live else {
+            actionError = "Unsent draft. Reconnect, review it, then tap Send."
             return false
         }
         actionError = nil
@@ -836,7 +859,7 @@ final class Session: ObservableObject {
             if attachmentSendIDs.count >= 20, attachmentSendIDs[draftKey] == nil {
                 attachmentSendIDs.removeAll(keepingCapacity: true)
             }
-            let sendID = attachmentSendIDs[draftKey] ?? UUID().uuidString
+            let sendID = requestID ?? attachmentSendIDs[draftKey] ?? UUID().uuidString
             attachmentSendIDs[draftKey] = sendID
 
             var uploaded: [SharedAttachmentReference] = []
@@ -978,6 +1001,10 @@ final class Session: ObservableObject {
     }
 
     func answer(chat: Chat, card: OptionCard, choice: String, rememberingPermission: Bool = true) async {
+        guard status == .live else {
+            actionError = "Reconnect to review and answer this request."
+            return
+        }
         guard let requestId = card.requestId else { return }
         if rememberingPermission, card.shouldRememberPermission(for: choice), case let .bot(bot) = chat {
             await alwaysAllow(bot: bot, card: card)
@@ -1000,6 +1027,10 @@ final class Session: ObservableObject {
         isPermission: Bool,
         reviewedSha256: String? = nil
     ) async {
+        guard status == .live else {
+            actionError = "Reconnect to review and answer this request."
+            return
+        }
         await perform {
             // Permission cards answer allow/deny; a question answers with
             // the chosen text. The harness tells them apart by `behavior`.
@@ -1380,6 +1411,22 @@ final class Session: ObservableObject {
     // MARK: - Notification navigation
 
     func openNotification(_ target: NotificationTarget) async {
+        notificationNavigationGeneration &+= 1
+        let generation = notificationNavigationGeneration
+        let previous = notificationNavigationTask
+        // Serialize task switches: an older in-flight server mutation must
+        // finish before the latest tap applies its destination.
+        let task = Task { [weak self] in
+            await previous?.value
+            guard let self, self.notificationNavigationGeneration == generation else { return }
+            await self.performNotificationNavigation(target, generation: generation)
+        }
+        notificationNavigationTask = task
+        await task.value
+        if notificationNavigationGeneration == generation { notificationNavigationTask = nil }
+    }
+
+    private func performNotificationNavigation(_ target: NotificationTarget, generation: Int) async {
         guard let client else {
             // Do not carry a stale destination into a future, unrelated
             // pairing. Only a saved connection waiting for Keychain access is
@@ -1393,10 +1440,23 @@ final class Session: ObservableObject {
             return
         }
         pendingNotification = nil
+        notificationChat = nil
+        let connectionID = connection?.id
         do {
+            var target = target
+            if let reference = target.poppy {
+                let item = try await client.poppyItem(id: reference.itemId)
+                guard notificationNavigationGeneration == generation else { return }
+                guard connection?.id == connectionID,
+                      let current = item.target(for: reference) else {
+                    throw APIError.transport("That Poppy item is unavailable. Refresh Poppy to review current items.")
+                }
+                target = current
+            }
             var bot = state.bot(target.botId)
             if bot == nil {
                 let fleet = try await client.fleet(messages: 50)
+                guard connection?.id == connectionID, notificationNavigationGeneration == generation else { return }
                 state.hydrate(fleet)
                 bot = state.bot(target.botId)
             }
@@ -1409,11 +1469,16 @@ final class Session: ObservableObject {
                 if room.threadId != target.threadId {
                     do {
                         room = try await client.switchTask(groupId: room.id, threadId: target.threadId)
+                        guard connection?.id == connectionID, notificationNavigationGeneration == generation else { return }
                         state.apply(.room(room))
                     } catch {
+                        if target.poppy != nil { throw error }
                         // A stale notification should still open the channel's
                         // current task instead of leaving the person nowhere.
                     }
+                }
+                if target.poppy != nil, room.threadId != target.threadId {
+                    throw APIError.transport("That Poppy topic is unavailable.")
                 }
                 notificationChat = .room(room)
                 return
@@ -1422,15 +1487,28 @@ final class Session: ObservableObject {
             if target.requiresTaskSwitch(activeThreadId: selected.threadId) {
                 do {
                     selected = try await client.switchTask(botId: selected.id, threadId: target.threadId)
+                    guard connection?.id == connectionID, notificationNavigationGeneration == generation else { return }
                     state.apply(.bot(selected))
                 } catch {
+                    if target.poppy != nil { throw error }
                     // The thread may be gone (task deleted, stale payload).
                     // Landing in the bot's current chat still beats an error
                     // banner and no navigation at all.
                 }
             }
+            if target.poppy != nil, selected.threadId != target.threadId || selected.id != target.botId {
+                throw APIError.transport("That Poppy topic is unavailable.")
+            }
             notificationChat = .bot(selected)
-        } catch { actionError = error.localizedDescription }
+        } catch {
+            guard connection?.id == connectionID, notificationNavigationGeneration == generation else { return }
+            if target.poppy != nil {
+                if case APIError.status(code: 410, message: _) = error { return }
+                actionError = "That Poppy item is unavailable. Refresh Poppy to review current items."
+            } else {
+                actionError = error.localizedDescription
+            }
+        }
     }
 
     func consumeNotificationChat() { notificationChat = nil }
@@ -1492,6 +1570,65 @@ final class Session: ObservableObject {
     func refreshNotificationAuthorization() async {
         notificationAuthorization = await NotificationCoordinator.shared.authorizationStatus()
         notificationAuthorizationResolved = true
+        switch notificationAuthorization {
+        case .authorized, .provisional, .ephemeral:
+            UIApplication.shared.registerForRemoteNotifications()
+        case .denied:
+            UIApplication.shared.unregisterForRemoteNotifications()
+        default: break
+        }
+        schedulePushSync()
+    }
+
+    /// Serialize replacement and denial so a slow PUT cannot overtake DELETE
+    /// or a newer token. Only a foreground/reconnect/native callback retries.
+    private func schedulePushSync() {
+        pushSyncRequested = true
+        guard pushSyncTask == nil else { return }
+        pushSyncTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.pushSyncTask = nil }
+            while self.pushSyncRequested {
+                self.pushSyncRequested = false
+                guard let client = self.client, let connectionID = self.connection?.id else { continue }
+                do {
+                    if self.notificationAuthorization == .denied {
+                        try await client.unregisterPush()
+                        if self.connection?.id == connectionID {
+                            self.pushRegistered = false
+                            self.pushRegistrationError = nil
+                        }
+                        continue
+                    }
+                    guard [.authorized, .provisional, .ephemeral].contains(self.notificationAuthorization) else { continue }
+                    let coordinator = NotificationCoordinator.shared
+                    guard let bytes = coordinator.deviceToken else {
+                        if coordinator.registrationFailed {
+                            self.pushRegistered = false
+                            self.pushRegistrationError = "Push registration is unavailable. Try again when online."
+                        }
+                        continue
+                    }
+                    guard let bundleID = Bundle.main.bundleIdentifier,
+                          let rawEnvironment = Bundle.main.object(forInfoDictionaryKey: "OpenMausPushEnvironment") as? String,
+                          let environment = PushEnvironment(rawValue: rawEnvironment),
+                          let registration = PushRegistration(deviceToken: bytes, bundleId: bundleID, environment: environment)
+                    else { throw APIError.transport("This build is not configured for push notifications.") }
+                    try await client.registerPush(registration)
+                    if self.connection?.id == connectionID,
+                       coordinator.deviceToken == bytes,
+                       [.authorized, .provisional, .ephemeral].contains(self.notificationAuthorization) {
+                        self.pushRegistered = true
+                        self.pushRegistrationError = nil
+                    }
+                } catch {
+                    if self.connection?.id == connectionID {
+                        self.pushRegistered = false
+                        self.pushRegistrationError = "Push delivery is unavailable. It will retry when you reconnect."
+                    }
+                }
+            }
+        }
     }
 
     func enableNotifications() async {
@@ -1508,7 +1645,7 @@ final class Session: ObservableObject {
 
     var notificationStatusText: String {
         switch notificationAuthorization {
-        case .authorized: return "On"
+        case .authorized: return pushRegistered ? "On" : (pushRegistrationError == nil ? "Connecting delivery" : "Delivery unavailable")
         case .provisional: return "Quietly on"
         case .ephemeral: return "Temporarily on"
         case .denied: return "Off in Settings"

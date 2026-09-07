@@ -11,6 +11,7 @@ import UserNotifications
 
 @main
 struct CompanionApp: App {
+    @UIApplicationDelegateAdaptor(PushRegistrationDelegate.self) private var pushDelegate
     @StateObject private var session = Session()
     @Environment(\.scenePhase) private var scenePhase
     @State private var liveActivities = LiveActivityCoordinator()
