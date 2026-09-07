@@ -20,6 +20,7 @@ import {
 } from "./PhoneSetupFlow";
 import { companionPairingMode } from "../lib/phone-setup";
 import { ConnectionDetail } from "./ConnectionDetail";
+import { useDesktopCapabilities } from "./DesktopCapabilities";
 import { Card, Switch } from "./SettingsPrimitives";
 import { brand } from "../lib/brand";
 
@@ -101,6 +102,25 @@ export function pairingSurfaceCopy(
   };
 }
 
+/** The card shown when this page has no Companion bridge. Pairing always runs
+ * on the computer hosting the server, so a remote server's page has to send the
+ * user to that computer rather than to the app they are already looking at. */
+export function missingBridgeCopy(
+  capabilities: Pick<DesktopCapabilities, "remote">,
+): { title: string; subtitle: string } {
+  const title = `Use ${brand().name} from your phone`;
+  if (capabilities.remote) {
+    return {
+      title,
+      subtitle: `Phone pairing runs on the computer that hosts this server. Open ${brand().name} on that computer to set up a phone.`,
+    };
+  }
+  return {
+    title,
+    subtitle: `Open Settings in the ${brand().name} desktop app to set up a phone.`,
+  };
+}
+
 export function deriveCompanionPanelStatus(
   state: Pick<CompanionState, "enabled" | "devices" | "error">,
 ): CompanionPanelStatus | null {
@@ -134,16 +154,13 @@ const endpointHost = (url: string): string => {
 
 export function CompanionSection({ profileEmail = "" }: { profileEmail?: string }) {
   const c = usePhoneSetupController(profileEmail);
+  const { capabilities } = useDesktopCapabilities();
   const state = c.state;
   const pairingFlow = useRef<HTMLDivElement>(null);
 
   if (!companionBridge()) {
-    return (
-      <Card
-        title={`Use ${brand().name} from your phone`}
-        subtitle={`Open Settings in the ${brand().name} desktop app to set up a phone.`}
-      />
-    );
+    const bridgeCopy = missingBridgeCopy(capabilities);
+    return <Card title={bridgeCopy.title} subtitle={bridgeCopy.subtitle} />;
   }
 
   if (!state) {

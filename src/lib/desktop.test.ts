@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 function capabilities(status: "checking" | "ready"): DesktopCapabilities {
   return {
+    remote: false,
     host: {
       platform: "linux",
       label: "Ubuntu",

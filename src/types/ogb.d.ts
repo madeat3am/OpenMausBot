@@ -59,6 +59,10 @@ type SkillRecordingPayload = {
 };
 
   type DesktopCapabilities = {
+    /** True when this page belongs to a remote server (Server menu) rather than
+     * the local one, so this computer's screen, voice and local control are not
+     * what the page is talking about. */
+    remote: boolean;
     host: {
       platform: "darwin" | "linux" | "win32" | "other";
       /** The user's home folder, for showing paths as ~/… */
