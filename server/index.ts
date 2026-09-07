@@ -34,6 +34,7 @@ import {
   type WakeKind,
 } from "./autonomy-policy.ts";
 import { CustomMcpManager } from "./custom-mcp-manager.ts";
+import { customMcpSessionId } from "./custom-mcp-session.ts";
 import {
   closeCustomMcpSidecar,
   callComposioSidecar,
@@ -836,7 +837,7 @@ function turnAutonomyCapability(
   });
 }
 
-async function guardedCustomMcpIntegrations(autonomyCapability: string | null) {
+async function guardedCustomMcpIntegrations(botId: string, threadId: string, autonomyCapability: string | null) {
   const custom = customMcpServers(cfg);
   if (process.env.OMB_CUSTOM_MCP_DIRECT_COMPAT === "1") return custom;
   const localNames = Object.keys(custom);
@@ -851,7 +852,7 @@ async function guardedCustomMcpIntegrations(autonomyCapability: string | null) {
   }
   const allNames = [...new Set([...localNames, ...sidecarNames])];
   return Object.fromEntries(allNames.map((name) => {
-    const session = randomUUID();
+    const session = customMcpSessionId(botId, threadId, name);
     return [name, {
       command: process.execPath,
       // Server identity rides in argv, which every driver keeps per server.
@@ -3580,7 +3581,7 @@ async function startTurn(
       // User-configured MCP servers are credential-free guarded proxies. The
       // same turn capability authorizes both Composio and custom-MCP calls.
       if (instance.adapter.capabilities.customMcp === true) {
-        const custom = await guardedCustomMcpIntegrations(autonomyCapability);
+        const custom = await guardedCustomMcpIntegrations(bot.id, threadId, autonomyCapability);
         if (Object.keys(custom).length) integrations.custom = custom;
       }
       // CLI engines work inside the bot's own workspace directory rather
@@ -4622,7 +4623,7 @@ async function runGroupMemberTurn(
   }
   // user-configured MCP servers: same guarded capability as the 1:1 site.
   if (instance.adapter.capabilities.customMcp === true) {
-    const custom = await guardedCustomMcpIntegrations(autonomyCapability);
+    const custom = await guardedCustomMcpIntegrations(bot.id, threadId, autonomyCapability);
     if (Object.keys(custom).length) integrations.custom = custom;
   }
   // Connected-app discovery is intentionally awaited before a provider owns
@@ -11036,13 +11037,15 @@ const gracefulShutdown = createGracefulShutdown({
       routines?.stop();
       calendarCalls?.stop();
       webhookIngress?.server.close();
-      customMcpManager.dispose();
       autonomyDb.close();
+      return customMcpManager.stop();
     },
     () => releaseAllBrowserCapabilities(),
     () => registry.disposeAll(),
   ],
   exit: (code) => process.exit(code),
+  // Custom-MCP child teardown escalates at 5 seconds and stops waiting at 5.5.
+  timeoutMs: 6_000,
 });
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
