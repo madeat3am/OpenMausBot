@@ -56,6 +56,40 @@ describe("desktop notifications", () => {
     expect(notices[0]).toMatchObject({ title: frame.title, options: { body: frame.body, tag: `openmausbot:${frame.botId}` } });
   });
 
+  it("never emits an OS alert for a versioned Poppy frame", () => {
+    const { notices } = installNotification("granted");
+
+    showNotification({
+      ...frame,
+      kind: "poppy",
+      poppyInterface: 1,
+      poppy: { itemId: "opaque-item", revision: 2 },
+      title: "sensitive report title",
+      body: "sensitive report body",
+    }, vi.fn());
+
+    expect(notices).toHaveLength(0);
+  });
+
+  it("suppresses legacy frames only for the canonical Poppy profile", () => {
+    const { notices } = installNotification("granted");
+
+    showNotification(frame, vi.fn(), undefined, undefined, {
+      name: "Poppy",
+      chiefOfStaff: true,
+    });
+    showNotification(frame, vi.fn(), undefined, undefined, {
+      name: "Poppy",
+      chiefOfStaff: false,
+    });
+    showNotification(frame, vi.fn(), undefined, undefined, {
+      name: "Moxie",
+      chiefOfStaff: true,
+    });
+
+    expect(notices).toHaveLength(2);
+  });
+
   it("stays quiet only when the exact target thread is already visible", () => {
     const { notices } = installNotification("granted", true);
 

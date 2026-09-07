@@ -1,0 +1,3 @@
+[D-BUS Service]
+Name=com.openmausbot.PoppyReceiver
+Exec=/usr/bin/python3 /ABSOLUTE/PATH/TO/OpenMausBot/desktop-receiver/linux/helper.py --gapplication-service

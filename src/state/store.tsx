@@ -479,6 +479,9 @@ export interface AppState {
    * same message be focused twice in a row */
   focusMessage: { threadId: string; messageId: string; nonce: number; consumed: boolean } | null;
   connected: boolean;
+  /** True after the first authoritative chat snapshot has landed. Native
+   * open events wait for this boundary so they never route against defaults. */
+  hydrated: boolean;
   error: string | null;
   mascotMotion: {
     botId: string;
@@ -716,6 +719,121 @@ export function openNotificationTarget(
   if (known) dispatch({ type: "switchTask", botId: target.botId, threadId: target.threadId });
 }
 
+export interface PoppyOpenTarget {
+  botId: string;
+  threadId: string;
+  itemAlias: string;
+  revision: number;
+}
+
+export interface PoppyNavigationCoordinator {
+  enqueue(target: PoppyOpenTarget): void;
+  setReady(ready: boolean): void;
+  dispose(): void;
+}
+
+interface PoppyNavigationDependencies {
+  getState(): Pick<AppState, "bots">;
+  dispatch(action: Action): void;
+  switchTask(botId: string, threadId: string, signal: AbortSignal): Promise<Bot>;
+  onUnavailable(): void;
+}
+
+function validPoppyIdentifier(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{1,256}$/.test(value);
+}
+
+function validPoppyTarget(target: PoppyOpenTarget): boolean {
+  return (
+    typeof target === "object" &&
+    target !== null &&
+    validPoppyIdentifier(target.botId) &&
+    validPoppyIdentifier(target.threadId) &&
+    validPoppyIdentifier(target.itemAlias) &&
+    Number.isSafeInteger(target.revision) &&
+    target.revision > 0
+  );
+}
+
+/** Serializes native Poppy opens. A newer tap cancels ownership of an older
+ * switch response, so a slow response can never move the UI away from the
+ * most recent item. The main process already resolved the opaque alias; this
+ * second boundary requires that canonical bot to exist in the hydrated UI,
+ * then asks the server to resolve the exact task. Display names, coordinator
+ * roles, and the local task cache are not authorization inputs. */
+export function createPoppyNavigationCoordinator(
+  dependencies: PoppyNavigationDependencies,
+): PoppyNavigationCoordinator {
+  let ready = false;
+  let disposed = false;
+  let generation = 0;
+  let pending: { generation: number; target: PoppyOpenTarget } | null = null;
+  let active: AbortController | null = null;
+  let draining = false;
+
+  const drain = async (): Promise<void> => {
+    if (!ready || disposed || draining || !pending) return;
+    const work = pending;
+    pending = null;
+    draining = true;
+
+    try {
+      if (!validPoppyTarget(work.target)) {
+        if (work.generation === generation) dependencies.onUnavailable();
+        return;
+      }
+      const { bots } = dependencies.getState();
+      const bot = bots.find((candidate) => candidate.id === work.target.botId);
+      if (!bot) {
+        if (work.generation === generation) dependencies.onUnavailable();
+        return;
+      }
+
+      const controller = new AbortController();
+      active = controller;
+      const switched = await dependencies.switchTask(bot.id, work.target.threadId, controller.signal);
+      if (disposed || work.generation !== generation) return;
+      if (switched.id !== bot.id || switched.threadId !== work.target.threadId) {
+        dependencies.onUnavailable();
+        return;
+      }
+      dependencies.dispatch({ type: "taskSwitched", bot: switched });
+      dependencies.dispatch({ type: "select", id: switched.id });
+    } catch (error) {
+      if (
+        !disposed &&
+        work.generation === generation &&
+        !(error instanceof DOMException && error.name === "AbortError")
+      ) {
+        dependencies.onUnavailable();
+      }
+    } finally {
+      active = null;
+      draining = false;
+      if (ready && pending && !disposed) void drain();
+    }
+  };
+
+  return {
+    enqueue(target) {
+      if (disposed) return;
+      generation += 1;
+      pending = { generation, target };
+      void drain();
+    },
+    setReady(value) {
+      if (disposed) return;
+      ready = value;
+      if (value) void drain();
+    },
+    dispose() {
+      disposed = true;
+      pending = null;
+      active?.abort();
+    },
+  };
+}
+
 function updateBot(state: AppState, botId: string, fn: (b: Bot) => Bot): AppState {
   return { ...state, bots: state.bots.map((b) => (b.id === botId ? fn(b) : b)) };
 }
@@ -770,6 +888,7 @@ export function reducer(state: AppState, action: Action): AppState {
           groups: action.groups,
           computerControl: action.computerControl,
           selectedId,
+          hydrated: true,
         },
         [...action.bots, ...action.groups],
       );
@@ -1329,6 +1448,7 @@ export const initialState: AppState = {
   computerControl: {},
   focusMessage: null,
   connected: false,
+  hydrated: false,
   error: null,
   mascotMotion: null,
   pendingQueued: {},
@@ -2082,19 +2202,24 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         }
         // the harness decided this was worth interrupting for; the toggle
         // in each bot's settings is what gates it, server-side
-        case "notify":
+        case "notify": {
           // the wrapped dispatch, not rawDispatch: `select` clears the badge
           // in local state either way, but only the wrapper PATCHes
           // unread:false back. Opening a bot from its own notification and
           // watching the badge return on the next hydration is exactly the
           // bug that makes notifications feel broken.
+          const notificationBot = stateRef.current.bots.find(
+            (bot) => bot.id === frame.notification.botId,
+          );
           showNotification(
             frame.notification,
             (target) => openNotificationTarget(dispatch, target, stateRef.current),
-            stateRef.current.bots.find((bot) => bot.id === frame.notification.botId)?.avatarUrl,
+            notificationBot?.avatarUrl,
             visibleNotificationThread(stateRef.current),
+            notificationBot,
           );
           break;
+        }
         case "group.deleted":
           rawDispatch({ type: "groupDeleted", groupId: frame.groupId });
           break;

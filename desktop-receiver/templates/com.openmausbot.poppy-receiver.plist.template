@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Source template only; installation and activation use the deployment owner. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.openmausbot.poppy-receiver</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/ABSOLUTE/OWNER-RESOLVED/PATH/TO/node</string>
+    <string>/ABSOLUTE/PATH/TO/OpenMausBot/desktop-receiver/run.mjs</string>
+    <string>--config</string>
+    <string>/Users/USERNAME/Library/Application Support/OpenMausBot/poppy-receiver.json</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+</dict>
+</plist>
