@@ -328,7 +328,7 @@ struct AgentProfileView: View {
     private func profilePatch() -> BotProfilePatch {
         let savedSpeakReplies = config.map { $0.canSpeak(agentVoice: voice) && speakReplies } ?? speakReplies
         return BotProfilePatch(
-            // The shared server contract owns the 100/200/4000 limits. Do not
+            // The shared server contract owns the 100/200/16000 limits. Do not
             // silently apply narrower iOS-only limits to a user's profile.
             name: name == baseline.name ? nil : name.trimmingCharacters(in: .whitespacesAndNewlines),
             title: title == baseline.title ? nil : title.trimmingCharacters(in: .whitespacesAndNewlines),

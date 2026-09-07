@@ -1373,7 +1373,12 @@ describe("harness HTTP API", () => {
     expect((await api("PATCH", `/api/bots/${bot.id}`, { name: "N".repeat(101) })).status).toBe(400);
     expect((await api("PATCH", `/api/bots/${bot.id}`, { name: "   " })).status).toBe(400);
     expect((await api("PATCH", `/api/bots/${bot.id}`, { title: "T".repeat(201) })).status).toBe(400);
-    expect((await api("PATCH", `/api/bots/${bot.id}`, { description: "D".repeat(4001) })).status).toBe(400);
+    expect((await api("PATCH", `/api/bots/${bot.id}`, { description: "D".repeat(4_001) })).status).toBe(200);
+    const oversizedDescription = await api("PATCH", `/api/bots/${bot.id}`, {
+      description: "D".repeat(16_001),
+    });
+    expect(oversizedDescription.status).toBe(400);
+    expect(oversizedDescription.body.error).toContain("description must be at most 16000 characters");
     expect((await api("PATCH", `/api/bots/${bot.id}`, { description: 7 })).status).toBe(400);
 
     // the per-bot composio gate is a boolean, and it round-trips

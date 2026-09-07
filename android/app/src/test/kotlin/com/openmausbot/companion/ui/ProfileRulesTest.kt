@@ -68,7 +68,7 @@ class ProfileRulesTest {
         val long = "n".repeat(500)
         val patch = ProfileRules.patch(baseline.copy(name = long), baseline, speaking())
 
-        assertEquals(long, patch.name, "100/200/4000 belong to the shared contract")
+        assertEquals(long, patch.name, "100/200/16000 belong to the shared contract")
     }
 
     @Test

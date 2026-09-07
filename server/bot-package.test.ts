@@ -76,6 +76,28 @@ describe("bot packages", () => {
     });
   });
 
+  it("accepts projected bot descriptions and rejects descriptions above the profile limit", () => {
+    const description = "D".repeat(6_377);
+    const document = {
+      ...validPackage,
+      package: {
+        ...validPackage.package,
+        agents: [{ ...validPackage.package.agents[0], description }],
+      },
+    };
+
+    expect(parseBotPackage(document).package.agents[0]?.description).toBe(description);
+    expect(() =>
+      parseBotPackage({
+        ...document,
+        package: {
+          ...document.package,
+          agents: [{ ...document.package.agents[0], description: "D".repeat(16_001) }],
+        },
+      }),
+    ).toThrow("package.agents.0.description is too long");
+  });
+
   it("accepts five-minute routine windows and rejects shorter ones", () => {
     const routine = {
       key: "morning-brief",

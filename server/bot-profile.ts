@@ -30,7 +30,9 @@ const profilePatchSchema = z.object({
     .optional(),
   description: z
     .string({ error: "description must be a string" })
-    .max(BOT_PROFILE_LIMITS.description, { error: "description must be at most 4000 characters" })
+    .max(BOT_PROFILE_LIMITS.description, {
+      error: `description must be at most ${BOT_PROFILE_LIMITS.description} characters`,
+    })
     .optional(),
   notifications: z.boolean({ error: "notifications must be true or false" }).optional(),
   avatarUrl: z
