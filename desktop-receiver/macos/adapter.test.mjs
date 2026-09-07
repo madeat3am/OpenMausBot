@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { EventEmitter } from 'node:events';
+import { EventEmitter, once } from 'node:events';
+import { spawn } from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import { setImmediate } from 'node:timers/promises';
 import { createMacAdapter } from './adapter.mjs';
@@ -98,3 +99,63 @@ test('synchronous activation failures become generic unavailable results', async
     assert.equal(unavailable, 1);
   } finally { f.adapter.close(); }
 });
+
+for (const mode of ['timeout', 'close']) {
+  test(`a SIGSTOPped owned helper permits actual parent exit after ${mode}`, {
+    skip: process.platform === 'win32', timeout: 10_000,
+  }, async () => {
+    // Real parent and helper processes expose handles that fake kill() hides.
+    // Only these fixture processes receive signals; no native app is launched.
+    const source = `
+      import { spawn } from 'node:child_process';
+      import { once } from 'node:events';
+      import { startReceiver } from ${JSON.stringify(new URL('../run.mjs', import.meta.url).href)};
+      import { createMacAdapter } from ${JSON.stringify(new URL('./adapter.mjs', import.meta.url).href)};
+      const helper = spawn(process.execPath, ['-e', 'process.stdout.write("ready"); setInterval(() => {}, 1000)'], { stdio: ['pipe', 'pipe', 'ignore'] });
+      process.send({ helperPid: helper.pid });
+      await once(helper.stdout, 'data');
+      helper.kill('SIGSTOP');
+      let adapter, poller;
+      const receiver = await startReceiver({
+        platform: 'darwin', argv: [],
+        loadConfig: async () => ({ helperPath: '/fixture/helper' }),
+        topicOpenerFactory: () => () => {},
+        macAdapterFactory: options => (adapter = createMacAdapter({ ...options, notificationTimeoutMs: 30, spawnImpl: () => helper })),
+        receiverFactory: () => ({ start() { poller = setInterval(() => {}, 1000); }, stop() { clearInterval(poller); poller = null; } }),
+      });
+      let error;
+      if (${JSON.stringify(mode)} === 'close') receiver.close();
+      else try { await adapter.notify(${JSON.stringify(notice)}); } catch (failure) { error = failure.message; }
+      process.send({ error, pollerStopped: poller === null });
+      process.disconnect();
+    `;
+    const parent = spawn(process.execPath, ['--input-type=module', '-e', source], {
+      stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+    });
+    let helperPid, result, stderr = '', deadline;
+    parent.on('message', message => {
+      if (message.helperPid) helperPid = message.helperPid;
+      else result = message;
+    });
+    parent.stderr.on('data', bytes => { stderr += bytes; });
+    const exited = once(parent, 'exit');
+    try {
+      const [code, signal] = await Promise.race([
+        exited,
+        new Promise((_, reject) => { deadline = setTimeout(() => reject(new Error('Fixture parent did not exit')), 5_000); }),
+      ]);
+      assert.equal(signal, null);
+      assert.equal(code, mode === 'timeout' ? 1 : 0, stderr);
+      assert.deepEqual(result, mode === 'timeout'
+        ? { error: 'NATIVE_NOTIFICATION_TIMEOUT', pollerStopped: true }
+        : { pollerStopped: true });
+      assert.ok(helperPid);
+      assert.throws(() => process.kill(helperPid, 0), { code: 'ESRCH' });
+    } finally {
+      clearTimeout(deadline);
+      if (helperPid) try { process.kill(helperPid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+      if (parent.exitCode === null && parent.signalCode === null) parent.kill('SIGKILL');
+      await exited;
+    }
+  });
+}

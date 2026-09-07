@@ -20,7 +20,9 @@ export function createMacAdapter({ helperPath, onActivate, openTopic, showUnavai
     closed = true;
     rejectPending();
     lines?.close();
-    try { child.kill(); } catch { /* The helper may already have exited. */ }
+    // A stopped helper cannot handle SIGTERM. Release this owned process even
+    // then, so launchd can observe the receiver exit and recover delivery.
+    try { child.kill("SIGKILL"); } catch { /* The helper may already have exited. */ }
     try { onFatal?.(); } catch { /* The supervisor must not revive a dead helper. */ }
   };
   child.on("error", failAll);
@@ -75,7 +77,7 @@ export function createMacAdapter({ helperPath, onActivate, openTopic, showUnavai
       closed = true;
       lines.close();
       rejectPending();
-      try { child.kill(); } catch { /* The helper is already gone. */ }
+      try { child.kill("SIGKILL"); } catch { /* The helper is already gone. */ }
     },
   };
 }
