@@ -1,5 +1,8 @@
-#!/usr/bin/env node
 // Citadel wiki-query stdio MCP for OpenMausBot bots.
+// No shebang: OMB registers this server with runtime `node`, so the file is
+// always launched as `node wiki-anyllm-mcp.mjs`, and a leading `#!` is one of
+// the few things that can make a module fail to load under a bundler's
+// transform on one platform only.
 // Read-only RAG access to BOTH wikis via AnythingLLM REST:
 //   cluster wiki  -> CLUSTER_ANYLLM_URL  (AnythingLLM on g428:3100)
 //   personal wiki -> PERSONAL_ANYLLM_URL (fwpc-personal-anythingllm:3101)
