@@ -2,6 +2,6 @@
 export const BOT_PROFILE_LIMITS = {
   name: 100,
   title: 200,
-  description: 4000,
+  description: 16_000,
   voice: 200,
 } as const;

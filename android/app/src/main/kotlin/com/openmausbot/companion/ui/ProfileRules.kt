@@ -137,7 +137,7 @@ object ProfileRules {
      * how the Swift reads, and it means a trailing space submits a field whose
      * trimmed value is unchanged — mirrored rather than tidied.
      *
-     * The 100/200/4000 server limits are deliberately not re-applied here: the
+     * The 100/200/16000 server limits are deliberately not re-applied here: the
      * shared contract owns them, and a narrower client limit would silently
      * truncate a profile written on the desktop.
      */

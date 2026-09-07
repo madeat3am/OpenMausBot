@@ -43,6 +43,23 @@ describe("parseBotProfilePatch (both modes)", () => {
     expect(parseBotProfilePatch({ name: "x".repeat(101) }, true).ok).toBe(false);
   });
 
+  it("accepts 4,001 description units and rejects 16,001 UTF-16 units", () => {
+    const legacyOverflow = "d".repeat(4_001);
+    expect(parseBotProfilePatch({ description: legacyOverflow }, true)).toEqual({
+      ok: true,
+      patch: { description: legacyOverflow },
+    });
+
+    const atLimitWithAstral = `${"d".repeat(15_998)}😀`;
+    expect(parseBotProfilePatch({ description: atLimitWithAstral }, true).ok).toBe(true);
+
+    const overLimitWithAstral = `${"d".repeat(15_999)}😀`;
+    expect(parseBotProfilePatch({ description: overLimitWithAstral }, true)).toEqual({
+      ok: false,
+      error: "description must be at most 16000 characters",
+    });
+  });
+
   it("only stored-attachment avatar URLs pass; clears normalize to undefined", () => {
     for (const bad of ["https://example.com/a.png", "data:image/png;base64,AAAA", "/api/attachments/../config.json", "/api/attachments/a.svg"]) {
       expect(parseBotProfilePatch({ avatarUrl: bad } as never, true).ok, bad).toBe(false);
