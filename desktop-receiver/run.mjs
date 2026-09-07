@@ -29,9 +29,27 @@ export async function startReceiver({
   const openTopic = topicOpenerFactory({ platform });
   const showUnavailable = async () => { stderr.write("POPPY_ITEM_UNAVAILABLE\n"); };
   let receiver;
-  const onActivate = async (itemAlias, revision) => receiver.activate(itemAlias, revision);
-
   let adapter;
+  let closed = false;
+  const onActivate = async (itemAlias, revision) => receiver.activate(itemAlias, revision);
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    receiver?.stop();
+    adapter?.close?.();
+    processTarget.removeListener?.("SIGINT", close);
+    processTarget.removeListener?.("SIGTERM", close);
+  };
+  // launchd keeps this receiver alive. A dead native adapter must therefore
+  // stop the referenced poller and leave a generic nonzero process result for
+  // its existing KeepAlive policy; it never retries with stale callbacks.
+  const helperFailed = () => {
+    if (closed) return;
+    stderr.write("POPPY_RECEIVER_HELPER_FAILED\n");
+    processTarget.exitCode = 1;
+    close();
+  };
+
   if (platform === "linux") {
     adapter = linuxAdapterFactory({
       openTopic,
@@ -40,7 +58,7 @@ export async function startReceiver({
     });
   } else if (platform === "darwin") {
     if (config.helperPath === undefined) throw new Error("NATIVE_HELPER_REQUIRED");
-    adapter = macAdapterFactory({ helperPath: config.helperPath, onActivate, openTopic, showUnavailable });
+    adapter = macAdapterFactory({ helperPath: config.helperPath, onActivate, openTopic, showUnavailable, onFatal: helperFailed });
   } else {
     throw new Error("UNSUPPORTED_DESKTOP_PLATFORM");
   }
@@ -54,17 +72,7 @@ export async function startReceiver({
     ...(config.pollIntervalMs === undefined ? {} : { pollIntervalMs: config.pollIntervalMs }),
     ...(config.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: config.requestTimeoutMs }),
   });
-  receiver.start();
-
-  let closed = false;
-  const close = () => {
-    if (closed) return;
-    closed = true;
-    receiver.stop();
-    adapter.close?.();
-    processTarget.removeListener?.("SIGINT", close);
-    processTarget.removeListener?.("SIGTERM", close);
-  };
+  if (!closed) receiver.start();
   processTarget.once?.("SIGINT", close);
   processTarget.once?.("SIGTERM", close);
   return { close, receiver };

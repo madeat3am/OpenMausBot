@@ -36,7 +36,8 @@ test('native adapter sends only opaque identity and awaits OS acceptance', async
 });
 
 test('permission denial leaves delivery retryable and helper exit rejects pending work', async () => {
-  const f = fixture();
+  let failures = 0;
+  const f = fixture({ onFatal() { failures++; } });
   const denied = f.adapter.notify(notice);
   f.emit({ kind: 'failed', identifier: notice.identifier, code: 'NOTIFICATION_PERMISSION_DENIED' });
   await assert.rejects(denied, /NATIVE_NOTIFICATION_UNAVAILABLE/);
@@ -44,7 +45,36 @@ test('permission denial leaves delivery retryable and helper exit rejects pendin
   f.child.emit('exit', 1);
   await assert.rejects(pending, /NATIVE_ADAPTER_UNAVAILABLE/);
   await assert.rejects(f.adapter.notify(notice), /NATIVE_ADAPTER_UNAVAILABLE/);
+  f.child.emit('error', new Error('late private failure'));
+  assert.equal(failures, 1);
   f.adapter.close();
+});
+
+test('a hung native acknowledgement rejects in-flight work and escalates the existing supervisor once', async () => {
+  let failures = 0;
+  const f = fixture({ notificationTimeoutMs: 5, onFatal() { failures++; } });
+  const first = f.adapter.notify(notice);
+  const second = f.adapter.notify({ ...notice, identifier: 'poppy-' + 'b'.repeat(32) });
+  await assert.rejects(first, /NATIVE_NOTIFICATION_TIMEOUT/);
+  await assert.rejects(second, /NATIVE_ADAPTER_UNAVAILABLE/);
+  assert.equal(failures, 1);
+  await assert.rejects(f.adapter.notify(notice), /NATIVE_ADAPTER_UNAVAILABLE/);
+});
+
+test('intentional close and late helper callbacks do not fail or activate a replacement receiver', async () => {
+  let failures = 0;
+  const activations = [];
+  const f = fixture({
+    onFatal() { failures++; },
+    onActivate: (...args) => activations.push(args),
+  });
+  f.emit({ kind: 'activate', itemAlias: 'queued_before_close', revision: 2 });
+  f.adapter.close();
+  f.emit({ kind: 'activate', itemAlias: 'opaque_1', revision: 2 });
+  f.child.emit('error', new Error('late private failure'));
+  await setImmediate();
+  assert.equal(failures, 0);
+  assert.deepEqual(activations, []);
 });
 
 test('retained taps resolve opaque identity again and malformed taps stay inert', async () => {

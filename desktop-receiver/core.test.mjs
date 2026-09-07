@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +8,7 @@ import test from "node:test";
 
 import { createPoppyDesktopReceiver, ReceiverError } from "./core.mjs";
 import { defaultConfigPath, loadReceiverConfig, ReceiverConfigError } from "./config.mjs";
+import { createMacAdapter } from "./macos/adapter.mjs";
 import { startReceiver } from "./run.mjs";
 
 const NOW = Date.parse("2026-09-07T15:00:00.000Z");
@@ -437,4 +439,111 @@ test("runner wires the Linux adapter and opener without exposing its token", asy
   running.close();
   assert.equal(stops, 1);
   assert.equal(closes, 1);
+});
+
+test("a Mac helper crash stops the poller and leaves a generic nonzero supervisor result", async () => {
+  const fx = await fixture();
+  try {
+    const processTarget = new EventEmitter();
+    const stderr = [];
+    const child = new EventEmitter();
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.kill = () => child.emit("exit", 0);
+    let submissions = 0;
+    let revision = 1;
+    child.stdin.on("data", (bytes) => {
+      submissions += 1;
+      const notice = JSON.parse(bytes.toString());
+      child.stdout.write(JSON.stringify({ kind: "submitted", identifier: notice.identifier }) + "\n");
+    });
+    const running = await startReceiver({
+      argv: [],
+      platform: "darwin",
+      processTarget,
+      stderr: { write(value) { stderr.push(value); } },
+      async loadConfig() {
+        return {
+          deviceId: "fixture-device",
+          endpoint: "http://127.0.0.1:12345",
+          token: "fixture-only",
+          statePath: fx.statePath,
+          helperPath: "/fixture/PoppyReceiver",
+        };
+      },
+      topicOpenerFactory: () => async () => undefined,
+      macAdapterFactory(options) {
+        return createMacAdapter({ ...options, spawnImpl: () => child });
+      },
+      receiverFactory(config) {
+        return createPoppyDesktopReceiver({
+          ...config,
+          fetchImpl: async () => response(200, {
+            cursor: "fixture-snapshot",
+            hasMore: false,
+            nextPage: null,
+            items: [item("opaque", { revision, updatedAt: "2026-09-07T16:00:00.000Z" })],
+          }),
+        });
+      },
+    });
+
+    await running.receiver.poll();
+    assert.equal(submissions, 1);
+    child.emit("exit", 1);
+    assert.equal(processTarget.exitCode, 1);
+    assert.deepEqual(stderr, ["POPPY_RECEIVER_HELPER_FAILED\n"]);
+    assert.equal(running.receiver.timer, null);
+
+    revision = 2;
+    await assert.rejects(running.receiver.poll(), /NATIVE_ADAPTER_UNAVAILABLE/);
+    assert.equal(submissions, 1);
+    running.close();
+
+    const recoveredChild = new EventEmitter();
+    recoveredChild.stdin = new PassThrough();
+    recoveredChild.stdout = new PassThrough();
+    recoveredChild.kill = () => recoveredChild.emit("exit", 0);
+    let recoveredSubmissions = 0;
+    recoveredChild.stdin.on("data", (bytes) => {
+      recoveredSubmissions += 1;
+      const notice = JSON.parse(bytes.toString());
+      recoveredChild.stdout.write(JSON.stringify({ kind: "submitted", identifier: notice.identifier }) + "\n");
+    });
+    const restarted = await startReceiver({
+      argv: [],
+      platform: "darwin",
+      processTarget: new EventEmitter(),
+      stderr: { write() {} },
+      async loadConfig() {
+        return {
+          deviceId: "fixture-device",
+          endpoint: "http://127.0.0.1:12345",
+          token: "fixture-only",
+          statePath: fx.statePath,
+          helperPath: "/fixture/PoppyReceiver",
+        };
+      },
+      topicOpenerFactory: () => async () => undefined,
+      macAdapterFactory(options) {
+        return createMacAdapter({ ...options, spawnImpl: () => recoveredChild });
+      },
+      receiverFactory(config) {
+        return createPoppyDesktopReceiver({
+          ...config,
+          fetchImpl: async () => response(200, {
+            cursor: "fixture-snapshot",
+            hasMore: false,
+            nextPage: null,
+            items: [item("opaque", { revision, updatedAt: "2026-09-07T17:00:00.000Z" })],
+          }),
+        });
+      },
+    });
+    await restarted.receiver.poll();
+    assert.equal(recoveredSubmissions, 1);
+    restarted.close();
+  } finally {
+    await fx.close();
+  }
 });
