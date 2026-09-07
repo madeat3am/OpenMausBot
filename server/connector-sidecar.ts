@@ -146,7 +146,12 @@ function saveMcpServers(next: Record<string, unknown>): void {
 const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
-    if (url.pathname === "/health" && req.method === "GET") return json(res, 200, { schema: "openmausbot.connector-sidecar-health.v1", status: "ok", policy: authority.state.status });
+    if (url.pathname === "/health" && req.method === "GET") return json(res, 200, {
+      schema: "openmausbot.connector-sidecar-health.v1",
+      status: "ok",
+      policy: authority.state.status,
+      ...customMcpManager.health(),
+    });
     if (!authorized(req)) return json(res, 401, { error: "unauthorized" });
     if (url.pathname === "/v1/composio" && req.method === "POST") {
       const input = await body(req);
@@ -322,5 +327,11 @@ const server = createServer(async (req, res) => {
 server.listen(PORT, HOST, () => {
   console.error(`OpenMausBot connector sidecar listening on ${HOST}:${PORT}`);
 });
-process.once("SIGTERM", () => { customMcpManager.dispose(); server.close(() => process.exit(0)); });
-process.once("SIGINT", () => { customMcpManager.dispose(); server.close(() => process.exit(0)); });
+let stopping = false;
+function stop(): void {
+  if (stopping) return;
+  stopping = true;
+  void customMcpManager.stop().finally(() => server.close(() => process.exit(0)));
+}
+process.once("SIGTERM", stop);
+process.once("SIGINT", stop);

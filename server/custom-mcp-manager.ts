@@ -10,6 +10,10 @@ type JsonRpc = Record<string, unknown>;
 
 const MAX_STDOUT_BYTES = 20 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 10 * 60_000;
+const DEFAULT_SESSION_IDLE_MS = 15 * 60_000;
+const DEFAULT_REAPER_INTERVAL_MS = 60_000;
+const DEFAULT_MAX_SESSIONS_PER_SERVER = 3;
+const STOP_GRACE_MS = 7_000;
 
 type Pending = {
   resolve: (frame: JsonRpc) => void;
@@ -24,6 +28,14 @@ type Session = {
   pending: Map<string, Pending>;
   stdoutBytes: number;
   closed: boolean;
+  lastUsedAt: number;
+};
+
+export type CustomMcpManagerOptions = {
+  sessionIdleMs?: number;
+  reaperIntervalMs?: number;
+  maxSessionsPerServer?: number;
+  now?: () => number;
 };
 
 function publicError(message: string): Error {
@@ -66,24 +78,94 @@ function requestKey(id: unknown): string | null {
   return typeof id === "string" || typeof id === "number" ? `${typeof id}:${String(id)}` : null;
 }
 
+function positiveInteger(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 export class CustomMcpManager {
   private readonly sessions = new Map<string, Session>();
+  private readonly childPids = new Set<number>();
+  private readonly drainWaiters = new Set<() => void>();
+  private readonly sessionIdleMs: number;
+  private readonly maxSessionsPerServer: number;
+  private readonly now: () => number;
+  private readonly reaper: ReturnType<typeof setInterval>;
+
+  constructor(options: CustomMcpManagerOptions = {}) {
+    this.sessionIdleMs = options.sessionIdleMs
+      ?? positiveInteger(process.env.OMB_CUSTOM_MCP_SESSION_IDLE_MS, DEFAULT_SESSION_IDLE_MS);
+    this.maxSessionsPerServer = options.maxSessionsPerServer
+      ?? positiveInteger(process.env.OMB_CUSTOM_MCP_MAX_SESSIONS_PER_SERVER, DEFAULT_MAX_SESSIONS_PER_SERVER);
+    this.now = options.now ?? Date.now;
+    const reaperIntervalMs = options.reaperIntervalMs
+      ?? positiveInteger(process.env.OMB_CUSTOM_MCP_REAPER_INTERVAL_MS, DEFAULT_REAPER_INTERVAL_MS);
+    this.reaper = setInterval(() => this.reapIdle(), reaperIntervalMs);
+    this.reaper.unref?.();
+  }
+
+  health(): { sessions: number; children: number } {
+    return {
+      sessions: [...this.sessions.values()].filter((session) => !session.closed).length,
+      children: this.childPids.size,
+    };
+  }
+
+  private reapIdle(): void {
+    const now = this.now();
+    for (const session of this.sessions.values()) {
+      if (!session.closed && now - session.lastUsedAt > this.sessionIdleMs) this.close(session.id);
+    }
+  }
+
+  private enforceServerCap(serverName: string): void {
+    const active = [...this.sessions.values()]
+      .filter((session) => !session.closed && session.serverName === serverName)
+      .sort((left, right) => left.lastUsedAt - right.lastUsedAt);
+    while (active.length >= this.maxSessionsPerServer) {
+      const idleIndex = active.findIndex((session) => session.pending.size === 0);
+      if (idleIndex < 0) throw publicError("server session limit reached");
+      this.close(active.splice(idleIndex, 1)[0]!.id);
+    }
+  }
+
+  private finish(session: Session, error: Error): void {
+    if (!session.closed) {
+      session.closed = true;
+      for (const pending of session.pending.values()) {
+        clearTimeout(pending.timer);
+        pending.reject(error);
+      }
+      session.pending.clear();
+    }
+    if (this.sessions.get(session.id) === session) this.sessions.delete(session.id);
+    if (session.child.pid) this.childPids.delete(session.child.pid);
+    if (this.childPids.size === 0) {
+      for (const resolve of this.drainWaiters) resolve();
+      this.drainWaiters.clear();
+    }
+  }
 
   private open(serverName: string, server: CustomMcpServer, requestedId?: string): Session {
     const id = requestedId?.trim() || randomUUID();
     const existing = this.sessions.get(id);
     if (existing) {
       if (existing.serverName !== serverName) throw publicError("session belongs to another server");
+      if (existing.closed) throw publicError("session is closing");
       return existing;
     }
+    this.enforceServerCap(serverName);
     const childCommand = customMcpChildCommand(server);
     const child = spawnCli(childCommand.command, childCommand.args, {
       cwd: process.cwd(),
       env: customMcpChildEnvironment(server.env),
       stdio: ["pipe", "pipe", "pipe"],
     });
-    const session: Session = { id, serverName, child, pending: new Map(), stdoutBytes: 0, closed: false };
+    const session: Session = {
+      id, serverName, child, pending: new Map(), stdoutBytes: 0, closed: false, lastUsedAt: this.now(),
+    };
     this.sessions.set(id, session);
+    if (child.pid) this.childPids.add(child.pid);
     const fail = (reason: string) => this.close(id, publicError(reason));
     const splitter = createLineSplitter((line) => {
       session.stdoutBytes += Buffer.byteLength(line);
@@ -109,7 +191,7 @@ export class CustomMcpManager {
     child.stdout.on("data", (chunk: Buffer) => splitter.push(chunk));
     child.stderr.resume();
     child.once("error", () => fail("could not start configured command"));
-    child.once("close", () => fail("configured command stopped"));
+    child.once("close", () => this.finish(session, publicError("configured command stopped")));
     return session;
   }
 
@@ -122,6 +204,7 @@ export class CustomMcpManager {
   ): Promise<{ sessionId: string; response: JsonRpc | null }> {
     const session = this.open(serverName, server, requestedId);
     if (session.closed) throw publicError("session is closed");
+    session.lastUsedAt = this.now();
     const key = requestKey(message.id);
     if (!key) {
       session.child.stdin.write(`${JSON.stringify(message)}\n`);
@@ -148,7 +231,6 @@ export class CustomMcpManager {
     const session = this.sessions.get(id);
     if (!session || session.closed) return false;
     session.closed = true;
-    this.sessions.delete(id);
     for (const pending of session.pending.values()) {
       clearTimeout(pending.timer);
       pending.reject(error);
@@ -165,6 +247,18 @@ export class CustomMcpManager {
   }
 
   dispose(): void {
-    for (const id of this.sessions.keys()) this.close(id);
+    clearInterval(this.reaper);
+    for (const session of this.sessions.values()) {
+      if (!session.closed) this.close(session.id);
+    }
+  }
+
+  async stop(): Promise<void> {
+    this.dispose();
+    if (this.childPids.size === 0) return;
+    await Promise.race([
+      new Promise<void>((resolve) => this.drainWaiters.add(resolve)),
+      new Promise<void>((resolve) => setTimeout(resolve, STOP_GRACE_MS)),
+    ]);
   }
 }

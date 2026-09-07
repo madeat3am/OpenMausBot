@@ -149,6 +149,20 @@ export function killCliTree(child: ChildProcess): void {
       /* already gone */
     }
   }
+  const force = setTimeout(() => {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
+    }
+  }, 5_000);
+  force.unref?.();
+  child.once("close", () => clearTimeout(force));
 }
 
 /** Per-turn broker channel: unix socket on POSIX, named pipe on Windows

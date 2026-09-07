@@ -62,6 +62,23 @@ async function relay(message: JsonRpc): Promise<void> {
 
 const input = readline.createInterface({ input: process.stdin, terminal: false });
 let queue = Promise.resolve();
+let closing: Promise<void> | null = null;
+function closeSidecarSession(): Promise<void> {
+  if (closing) return closing;
+  closing = queue.then(async () => {
+    if (!HARNESS_URL || !COMMS_TOKEN || !SERVER) return;
+    try {
+      await fetch(`${HARNESS_URL}/api/internal/custom-mcp/mcp?server=${encodeURIComponent(SERVER)}`, {
+        method: "DELETE",
+        headers: { authorization: `Bearer ${COMMS_TOKEN}`, "x-openmaus-mcp-session": SESSION },
+        signal: AbortSignal.timeout(4_000),
+      });
+    } catch {
+      // The sidecar reaper and cap remain the durable cleanup path.
+    }
+  });
+  return closing;
+}
 input.on("line", (line) => {
   let message: JsonRpc;
   try {
@@ -74,10 +91,8 @@ input.on("line", (line) => {
   queue = queue.then(() => relay(message));
 });
 input.on("close", () => {
-  if (HARNESS_URL && COMMS_TOKEN && SERVER) {
-    void queue.then(() => fetch(`${HARNESS_URL}/api/internal/custom-mcp/mcp?server=${encodeURIComponent(SERVER)}`, {
-      method: "DELETE",
-      headers: { authorization: `Bearer ${COMMS_TOKEN}`, "x-openmaus-mcp-session": SESSION },
-    })).finally(() => { process.exitCode = 0; });
-  }
+  void closeSidecarSession().finally(() => { process.exitCode = 0; });
 });
+for (const signal of ["SIGTERM", "SIGINT"] as const) {
+  process.once(signal, () => { void closeSidecarSession().finally(() => process.exit(0)); });
+}

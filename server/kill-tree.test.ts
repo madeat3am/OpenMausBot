@@ -78,4 +78,22 @@ describe("killCliTree", () => {
       }
     }
   }, 20_000);
+
+  it("escalates to SIGKILL when the process group ignores SIGTERM", async () => {
+    if (process.platform === "win32") return;
+    const child = spawn(
+      process.execPath,
+      ["-e", `process.on("SIGTERM", () => {}); console.log("ready"); ${IDLE}`],
+      { stdio: ["ignore", "pipe", "ignore"], detached: true },
+    );
+    try {
+      await new Promise<void>((resolve) => child.stdout!.once("data", () => resolve()));
+      killCliTree(child);
+      const deadline = Date.now() + 7_000;
+      while (alive(child.pid!) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(alive(child.pid!)).toBe(false);
+    } finally {
+      if (alive(child.pid!)) process.kill(-child.pid!, "SIGKILL");
+    }
+  }, 10_000);
 });
