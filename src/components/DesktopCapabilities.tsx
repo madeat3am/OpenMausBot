@@ -6,10 +6,14 @@ type DesktopState = {
   ready: boolean;
 };
 
-const DesktopContext = createContext<DesktopState>({
-  capabilities: initialDesktopCapabilities(),
-  ready: !window.ogb,
-});
+// Computed on first use, not at import: the module is pulled in by components
+// whose pure helpers are unit-tested in the node environment, where touching
+// window at module scope throws before a single test runs.
+let outsideProvider: DesktopState | null = null;
+const outsideProviderState = (): DesktopState =>
+  (outsideProvider ??= { capabilities: initialDesktopCapabilities(), ready: !window.ogb });
+
+const DesktopContext = createContext<DesktopState | null>(null);
 
 export function DesktopCapabilitiesProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<DesktopState>(() => ({
@@ -40,5 +44,5 @@ export function DesktopCapabilitiesProvider({ children }: { children: ReactNode 
 }
 
 export function useDesktopCapabilities(): DesktopState {
-  return useContext(DesktopContext);
+  return useContext(DesktopContext) ?? outsideProviderState();
 }

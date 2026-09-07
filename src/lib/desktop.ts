@@ -1,4 +1,5 @@
 const browserCapabilities: DesktopCapabilities = {
+  remote: false,
   host: {
     platform: "other",
     label: "Browser",
