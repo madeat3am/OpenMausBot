@@ -41,6 +41,66 @@ ensureDirs();
 const cfg = loadConfig();
 const authority = new AutonomyAuthority();
 const customMcpManager = new CustomMcpManager();
+type SessionHealth = { serverName: string; startedAt: number; lastUsedAt: number };
+const sessionHealth = new Map<string, SessionHealth>();
+
+function staleSessionResponse(response: unknown): boolean {
+  if (!response || typeof response !== "object" || Array.isArray(response)) return false;
+  const error = (response as { error?: unknown }).error;
+  if (!error || typeof error !== "object" || Array.isArray(error)) return false;
+  const code = (error as { code?: unknown }).code;
+  const message = (error as { message?: unknown }).message;
+  return code === -32001
+    && typeof message === "string"
+    && /no session|send initialize first|session not found/i.test(message);
+}
+
+function rememberSession(sessionId: string, serverName: string): void {
+  const now = Date.now();
+  const current = sessionHealth.get(sessionId);
+  sessionHealth.set(sessionId, current
+    ? { ...current, lastUsedAt: now }
+    : { serverName, startedAt: now, lastUsedAt: now });
+}
+
+function forgetSession(sessionId: string): void {
+  sessionHealth.delete(sessionId);
+}
+
+function health(): { sessions: number; children: number; sessionDetails: Array<{ serverName: string; ageMs: number }> } {
+  const counts = customMcpManager.health();
+  if (sessionHealth.size > counts.sessions) {
+    const stale = [...sessionHealth.entries()]
+      .sort((left, right) => left[1].lastUsedAt - right[1].lastUsedAt)
+      .slice(0, sessionHealth.size - counts.sessions);
+    for (const [sessionId] of stale) forgetSession(sessionId);
+  }
+  const now = Date.now();
+  return {
+    ...counts,
+    sessionDetails: [...sessionHealth.values()].map(({ serverName, startedAt }) => ({
+      serverName,
+      ageMs: Math.max(0, now - startedAt),
+    })),
+  };
+}
+
+async function relayCustomMcp(
+  serverName: string,
+  target: Parameters<CustomMcpManager["relay"]>[1],
+  payload: Record<string, unknown>,
+  sessionId?: string,
+): Promise<Awaited<ReturnType<CustomMcpManager["relay"]>>> {
+  const first = await customMcpManager.relay(serverName, target, payload, sessionId);
+  rememberSession(first.sessionId, serverName);
+  if (!staleSessionResponse(first.response)) return first;
+
+  customMcpManager.close(first.sessionId);
+  forgetSession(first.sessionId);
+  const retry = await customMcpManager.relay(serverName, target, payload, first.sessionId);
+  rememberSession(retry.sessionId, serverName);
+  return retry;
+}
 
 function bearer(): Buffer {
   const path = process.env.OMB_CONNECTOR_SIDECAR_TOKEN_FILE?.trim();
@@ -150,7 +210,7 @@ const server = createServer(async (req, res) => {
       schema: "openmausbot.connector-sidecar-health.v1",
       status: "ok",
       policy: authority.state.status,
-      ...customMcpManager.health(),
+      ...health(),
     });
     if (!authorized(req)) return json(res, 401, { error: "unauthorized" });
     if (url.pathname === "/v1/composio" && req.method === "POST") {
@@ -295,7 +355,10 @@ const server = createServer(async (req, res) => {
     }
     if (url.pathname === "/v1/custom-mcp" && req.method === "DELETE") {
       const sessionId = url.searchParams.get("sessionId");
-      if (sessionId) customMcpManager.close(sessionId);
+      if (sessionId) {
+        customMcpManager.close(sessionId);
+        forgetSession(sessionId);
+      }
       return json(res, 200, { status: 204, bodyBase64: "", contentType: "application/json" });
     }
     if (url.pathname === "/v1/custom-mcp" && req.method === "POST") {
@@ -315,7 +378,7 @@ const server = createServer(async (req, res) => {
       }
       const target = customMcpServers(currentMcpConfig())[serverName];
       if (!target) return json(res, 404, { error: "custom MCP server is unavailable" });
-      const result = await customMcpManager.relay(serverName, target, payload as Record<string, unknown>, typeof input.sessionId === "string" ? input.sessionId : undefined);
+      const result = await relayCustomMcp(serverName, target, payload as Record<string, unknown>, typeof input.sessionId === "string" ? input.sessionId : undefined);
       return json(res, 200, { status: result.response ? 200 : 204, bodyBase64: "", contentType: "application/json", sessionId: result.sessionId, response: result.response });
     }
     return json(res, 404, { error: "not found" });
