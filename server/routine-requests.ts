@@ -112,6 +112,10 @@ const storedScheduleSchema = z.discriminatedUnion("type", [
     type: z.literal("interval"),
     everyMinutes: z.number().int().min(5).max(1_440),
     anchorAt: z.number().int().nonnegative().max(MAX_DATE_MS).optional(),
+    activeHours: z.object({
+      start: z.string().regex(TIME),
+      end: z.string().regex(TIME),
+    }).strict().optional(),
   }).strict(),
 ]);
 const storedDefinitionSchema = z.object({
@@ -439,7 +443,12 @@ function normalizedOperation(
 function asSchedule(schedule: RoutineRequestSchedule, now: number): RoutineSchedule {
   if (schedule.type === "once") return { type: "once", at: schedule.at };
   if (schedule.type === "interval") {
-    return { type: "interval", everyMinutes: schedule.everyMinutes, anchorAt: schedule.anchorAt ?? now };
+    return {
+      type: "interval",
+      everyMinutes: schedule.everyMinutes,
+      anchorAt: schedule.anchorAt ?? now,
+      ...(schedule.activeHours ? { activeHours: { ...schedule.activeHours } } : {}),
+    };
   }
   return { type: "daily", time: schedule.time, weekdays: [...schedule.weekdays] };
 }
@@ -476,9 +485,10 @@ function formatInstant(at: number, timeZone: string): string {
 function scheduleText(schedule: RoutineRequestSchedule, timeZone: string): string {
   if (schedule.type === "once") return `${formatInstant(schedule.at, timeZone)} (${timeZone})`;
   if (schedule.type === "interval") {
-    return schedule.anchorAt === undefined
+    const cadence = schedule.anchorAt === undefined
       ? `Every ${schedule.everyMinutes} minutes, starting one interval after confirmation`
       : `Every ${schedule.everyMinutes} minutes, anchored at ${formatInstant(schedule.anchorAt, timeZone)} (${timeZone})`;
+    return `${cadence}${schedule.activeHours ? `, active ${schedule.activeHours.start}–${schedule.activeHours.end}` : ""}`;
   }
   const days = schedule.weekdays.map((day) => WEEKDAY_LABEL[day]).join(", ");
   return `${days} at ${schedule.time} (${timeZone})`;

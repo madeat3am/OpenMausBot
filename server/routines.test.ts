@@ -153,6 +153,90 @@ describe("nextOccurrence", () => {
     }, 8_640_000_000_000_000)).toBeNull();
   });
 
+  it("runs interval ticks only inside a half-open active-hours window", () => {
+    const previous = process.env.TZ;
+    process.env.TZ = "America/Chicago";
+    try {
+      const anchorAt = new Date(2026, 7, 17, 7, 0).getTime();
+      const schedule: RoutineSchedule = {
+        type: "interval",
+        everyMinutes: 30,
+        anchorAt,
+        activeHours: { start: "07:00", end: "22:00" },
+      };
+
+      expect(nextOccurrence(schedule, new Date(2026, 7, 17, 6, 59).getTime())).toBe(anchorAt);
+      expect(nextOccurrence(schedule, new Date(2026, 7, 17, 21, 29).getTime()))
+        .toBe(new Date(2026, 7, 17, 21, 30).getTime());
+      expect(nextOccurrence(schedule, new Date(2026, 7, 17, 21, 45).getTime()))
+        .toBe(new Date(2026, 7, 18, 7, 0).getTime());
+    } finally {
+      if (previous === undefined) delete process.env.TZ;
+      else process.env.TZ = previous;
+    }
+  });
+
+  it("supports active-hours windows that wrap midnight and excludes the end", () => {
+    const previous = process.env.TZ;
+    process.env.TZ = "America/Chicago";
+    try {
+      const schedule: RoutineSchedule = {
+        type: "interval",
+        everyMinutes: 60,
+        anchorAt: new Date(2026, 7, 17, 21, 0).getTime(),
+        activeHours: { start: "22:00", end: "05:00" },
+      };
+
+      expect(nextOccurrence(schedule, new Date(2026, 7, 17, 21, 30).getTime()))
+        .toBe(new Date(2026, 7, 17, 22, 0).getTime());
+      expect(nextOccurrence(schedule, new Date(2026, 7, 18, 3, 30).getTime()))
+        .toBe(new Date(2026, 7, 18, 4, 0).getTime());
+      expect(nextOccurrence(schedule, new Date(2026, 7, 18, 4, 0).getTime()))
+        .toBe(new Date(2026, 7, 18, 22, 0).getTime());
+      expect(nextOccurrence(schedule, new Date(2026, 7, 18, 6, 0).getTime()))
+        .toBe(new Date(2026, 7, 18, 22, 0).getTime());
+
+      const daySchedule: RoutineSchedule = {
+        type: "interval",
+        everyMinutes: 30,
+        anchorAt: new Date(2026, 7, 17, 7, 0).getTime(),
+        activeHours: { start: "07:00", end: "22:00" },
+      };
+      const nightSchedule: RoutineSchedule = {
+        type: "interval",
+        everyMinutes: 120,
+        anchorAt: new Date(2026, 7, 17, 22, 0).getTime(),
+        activeHours: { start: "22:00", end: "07:00" },
+      };
+      expect(nextOccurrence(daySchedule, new Date(2026, 7, 17, 21, 30).getTime()))
+        .toBe(new Date(2026, 7, 18, 7, 0).getTime());
+      expect(nextOccurrence(nightSchedule, new Date(2026, 7, 17, 21, 30).getTime()))
+        .toBe(new Date(2026, 7, 17, 22, 0).getTime());
+    } finally {
+      if (previous === undefined) delete process.env.TZ;
+      else process.env.TZ = previous;
+    }
+  });
+
+  it("walks across a spring-forward gap to the next real active interval tick", () => {
+    const previous = process.env.TZ;
+    process.env.TZ = "America/Chicago";
+    try {
+      const schedule: RoutineSchedule = {
+        type: "interval",
+        everyMinutes: 60,
+        anchorAt: new Date(2026, 2, 7, 2, 0).getTime(),
+        activeHours: { start: "02:00", end: "03:00" },
+      };
+
+      expect(nextOccurrence(schedule, new Date(2026, 2, 7, 2, 0).getTime()))
+        .toBe(new Date(2026, 2, 9, 2, 0).getTime());
+    } finally {
+      if (previous === undefined) delete process.env.TZ;
+      else process.env.TZ = previous;
+    }
+  });
+
   it("preserves America/Chicago wall time across spring-forward", () => {
     const previous = process.env.TZ;
     process.env.TZ = "America/Chicago";
@@ -243,6 +327,79 @@ describe("RoutineManager", () => {
         schedule: { type: "interval", everyMinutes: 5, anchorAt: invalidAnchor },
       })).toThrow(/valid interval start time/);
     }
+  });
+
+  it("validates and preserves interval active hours across clones, updates, and reloads", () => {
+    const h = harness();
+    const anchorAt = new Date(2026, 7, 17, 7, 0).getTime();
+    const routine = h.manager.create({
+      name: "Business-hours check",
+      prompt: "Check the queue",
+      botId: "maus-1",
+      schedule: {
+        type: "interval",
+        everyMinutes: 30,
+        anchorAt,
+        activeHours: { start: "07:00", end: "22:00" },
+      },
+    });
+
+    expect(routine.schedule).toEqual({
+      type: "interval",
+      everyMinutes: 30,
+      anchorAt,
+      activeHours: { start: "07:00", end: "22:00" },
+    });
+    if (routine.schedule.type !== "interval" || !routine.schedule.activeHours) {
+      throw new Error("expected interval active hours");
+    }
+    routine.schedule.activeHours.start = "00:00";
+    expect(h.manager.listRoutines()[0]?.schedule).toMatchObject({
+      activeHours: { start: "07:00", end: "22:00" },
+    });
+    const patchSchedule: RoutineSchedule = {
+      type: "interval",
+      everyMinutes: 30,
+      anchorAt,
+      activeHours: { start: "07:00", end: "22:00" },
+    };
+    const updated = h.manager.update(routine.id, {
+      name: "Updated business-hours check",
+      schedule: patchSchedule,
+    });
+    if (!updated) throw new Error("expected routine update");
+    expect(updated.schedule).toEqual(patchSchedule);
+    expect(new RoutineManager(h.options).listRoutines()[0]?.schedule).toEqual({
+      type: "interval",
+      everyMinutes: 30,
+      anchorAt,
+      activeHours: { start: "07:00", end: "22:00" },
+    });
+
+    const base = {
+      name: "Invalid active hours",
+      prompt: "Check the queue",
+      botId: "maus-1",
+      schedule: { type: "interval" as const, everyMinutes: 30, anchorAt },
+    };
+    expect(() => h.manager.create({
+      ...base,
+      schedule: { ...base.schedule, activeHours: { start: "7:00", end: "22:00" } },
+    })).toThrow("Active hours must use HH:MM");
+    expect(() => h.manager.create({
+      ...base,
+      schedule: { ...base.schedule, activeHours: { start: "07:00", end: "07:00" } },
+    })).toThrow("Active hours must span at least one interval");
+    expect(() => h.manager.create({
+      ...base,
+      schedule: { ...base.schedule, activeHours: { start: "07:00", end: "07:15" } },
+    })).toThrow("Active hours must span at least one interval");
+
+    const noWindow = h.manager.create({
+      ...base,
+      name: "All-day interval",
+    });
+    expect(noWindow.schedule).not.toHaveProperty("activeHours");
   });
 
   it("stores routine data with owner-only permissions", () => {
@@ -723,6 +880,40 @@ describe("RoutineManager", () => {
       scheduledFor: anchorAt + 10 * 60_000,
     }]);
     expect(h.manager.listRoutines()[0]?.nextRunAt).toBe(anchorAt + 15 * 60_000);
+  });
+
+  it("catches up to the latest in-window interval and skips the exclusive end", async () => {
+    const previous = process.env.TZ;
+    process.env.TZ = "America/Chicago";
+    try {
+      const start = new Date(2026, 7, 17, 21, 20).getTime();
+      const h = harness(start);
+      const anchorAt = new Date(2026, 7, 17, 21, 30).getTime();
+      h.manager.create({
+        name: "Evening check",
+        prompt: "Check the queue",
+        botId: "maus-interval",
+        schedule: {
+          type: "interval",
+          everyMinutes: 30,
+          anchorAt,
+          activeHours: { start: "07:00", end: "22:00" },
+        },
+      });
+
+      h.setNow(new Date(2026, 7, 17, 22, 5).getTime());
+      await h.manager.tick();
+
+      expect(h.manager.listRuns()).toMatchObject([{
+        status: "running",
+        scheduledFor: new Date(2026, 7, 17, 21, 30).getTime(),
+      }]);
+      expect(h.manager.listRoutines()[0]?.nextRunAt)
+        .toBe(new Date(2026, 7, 18, 7, 0).getTime());
+    } finally {
+      if (previous === undefined) delete process.env.TZ;
+      else process.env.TZ = previous;
+    }
   });
 
   it("rebases a scheduled interval queued behind a busy bot before dispatch", async () => {

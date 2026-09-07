@@ -109,7 +109,9 @@ function routineScheduleLabel(routine: Routine) {
     });
   }
   if (routine.schedule.type === "interval") {
-    return `Every ${routine.schedule.everyMinutes} min`;
+    return `Every ${routine.schedule.everyMinutes} min${routine.schedule.activeHours
+      ? ` · active ${routine.schedule.activeHours.start}–${routine.schedule.activeHours.end}`
+      : ""}`;
   }
   const days = routine.schedule.weekdays;
   const cadence =

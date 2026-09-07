@@ -1,7 +1,12 @@
 export type RoutineSchedule =
   | { type: "once"; at: number }
   | { type: "daily"; time: string; weekdays: number[] }
-  | { type: "interval"; everyMinutes: number; anchorAt: number };
+  | {
+      type: "interval";
+      everyMinutes: number;
+      anchorAt: number;
+      activeHours?: { start: string; end: string };
+    };
 
 export type RoutineRunOn = "maus" | "cloud";
 

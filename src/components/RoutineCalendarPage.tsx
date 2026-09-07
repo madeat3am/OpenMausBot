@@ -173,7 +173,10 @@ function intervalLabel(minutes: number): string {
 function scheduleLabel(schedule: RoutineSchedule | CalendarCall["schedule"]): string {
   if (schedule.type === "once") return `${niceDate(schedule.at)}, ${niceTime(schedule.at)}`;
   if (schedule.type === "interval") {
-    return `${intervalLabel(schedule.everyMinutes)} · starting ${niceDate(schedule.anchorAt)}, ${niceTime(schedule.anchorAt)}`;
+    const active = schedule.activeHours
+      ? ` · active ${schedule.activeHours.start}–${schedule.activeHours.end}`
+      : "";
+    return `${intervalLabel(schedule.everyMinutes)} · starting ${niceDate(schedule.anchorAt)}, ${niceTime(schedule.anchorAt)}${active}`;
   }
   const days = schedule.weekdays;
   const label = days.length === 7
@@ -207,8 +210,21 @@ function makeCalendarSchedule(choice: CalendarRecurrenceChoice, at: number, week
   return { type: "daily", time: toLocalTimeInput(at), weekdays: [...selected].sort() };
 }
 
-function makeRoutineSchedule(choice: RecurrenceChoice, at: number, weekdays: number[], everyMinutes: number): RoutineSchedule {
-  if (choice === "interval") return { type: "interval", everyMinutes, anchorAt: at };
+function makeRoutineSchedule(
+  choice: RecurrenceChoice,
+  at: number,
+  weekdays: number[],
+  everyMinutes: number,
+  activeHours?: Extract<RoutineSchedule, { type: "interval" }>["activeHours"],
+): RoutineSchedule {
+  if (choice === "interval") {
+    return {
+      type: "interval",
+      everyMinutes,
+      anchorAt: at,
+      ...(activeHours ? { activeHours: { ...activeHours } } : {}),
+    };
+  }
   return makeCalendarSchedule(choice, at, weekdays);
 }
 
@@ -447,7 +463,13 @@ function EventEditor({
     setError("");
     try {
       if (kind === "routine") {
-        const nextSchedule = makeRoutineSchedule(recurrence, at, weekdays, intervalMinutes);
+        const nextSchedule = makeRoutineSchedule(
+          recurrence,
+          at,
+          weekdays,
+          intervalMinutes,
+          existingRoutine?.schedule.type === "interval" ? existingRoutine.schedule.activeHours : undefined,
+        );
         const input: RoutineInput = {
           name,
           prompt: description,

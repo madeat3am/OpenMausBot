@@ -108,6 +108,9 @@ export function createBotPackageExport(input: {
               type: "interval",
               everyMinutes: routine.schedule.everyMinutes,
               anchorAt: routine.schedule.anchorAt,
+              ...(routine.schedule.activeHours
+                ? { activeHours: { ...routine.schedule.activeHours } }
+                : {}),
             }
           : { type: "daily", time: routine.schedule.time, weekdays: [...routine.schedule.weekdays] },
       durationMinutes: routine.durationMinutes,

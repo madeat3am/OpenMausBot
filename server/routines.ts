@@ -13,7 +13,12 @@ import type { RoutineRequestOperation } from "../shared/routine-request.ts";
 export type RoutineSchedule =
   | { type: "once"; at: number }
   | { type: "daily"; time: string; weekdays: number[] }
-  | { type: "interval"; everyMinutes: number; anchorAt: number };
+  | {
+      type: "interval";
+      everyMinutes: number;
+      anchorAt: number;
+      activeHours?: { start: string; end: string };
+    };
 
 /** `cloud` runs the agent itself inside the bot's Box VM. `maus` keeps
  * using the provider selected on the MAUS and only borrows its configured
@@ -221,6 +226,7 @@ export interface RoutineManagerOptions {
 const ALL_DAYS = [0, 1, 2, 3, 4, 5, 6];
 const CATCH_UP_MS = 12 * 60 * 60_000;
 const MAX_DATE_MS = 8_640_000_000_000_000;
+const TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
 const MAX_RUNS = 2_000;
 const MAX_ATTACHMENTS = 50;
 const MAX_CHECKPOINT_SOURCE_KEYS = 5_000;
@@ -297,7 +303,14 @@ function loadAttachments(value: unknown): RoutineContextAttachment[] {
 function cloneSchedule(schedule: RoutineSchedule): RoutineSchedule {
   if (schedule.type === "once") return { type: "once", at: schedule.at };
   if (schedule.type === "interval") {
-    return { type: "interval", everyMinutes: schedule.everyMinutes, anchorAt: schedule.anchorAt };
+    return {
+      type: "interval",
+      everyMinutes: schedule.everyMinutes,
+      anchorAt: schedule.anchorAt,
+      ...(schedule.activeHours
+        ? { activeHours: { ...schedule.activeHours } }
+        : {}),
+    };
   }
   return { type: "daily", time: schedule.time, weekdays: [...schedule.weekdays] };
 }
@@ -372,6 +385,54 @@ function composeExecutionPrompt(prompt: string, attachments: readonly RoutineCon
   return parts.filter(Boolean).join("\n\n");
 }
 
+function minutesOfDay(time: string): number {
+  const [hour, minute] = time.split(":").map(Number);
+  return hour * 60 + minute;
+}
+
+function withinActiveHours(
+  activeHours: NonNullable<Extract<RoutineSchedule, { type: "interval" }>["activeHours"]>,
+  at: number,
+): boolean {
+  const date = new Date(at);
+  const minute = date.getHours() * 60 + date.getMinutes();
+  const start = minutesOfDay(activeHours.start);
+  const end = minutesOfDay(activeHours.end);
+  return start < end
+    ? minute >= start && minute < end
+    : minute >= start || minute < end;
+}
+
+function intervalTickBound(everyMinutes: number): number {
+  return Math.ceil((2 * 1_440) / everyMinutes) + 2;
+}
+
+function cleanActiveHours(
+  activeHours: unknown,
+  everyMinutes: number,
+): Extract<RoutineSchedule, { type: "interval" }>["activeHours"] {
+  if (activeHours === undefined) return undefined;
+  if (
+    !activeHours ||
+    typeof activeHours !== "object" ||
+    !("start" in activeHours) ||
+    !("end" in activeHours) ||
+    typeof activeHours.start !== "string" ||
+    typeof activeHours.end !== "string" ||
+    !TIME.test(activeHours.start) ||
+    !TIME.test(activeHours.end)
+  ) {
+    throw new Error("Active hours must use HH:MM");
+  }
+  const start = minutesOfDay(activeHours.start);
+  const end = minutesOfDay(activeHours.end);
+  const span = (end - start + 1_440) % 1_440;
+  if (activeHours.start === activeHours.end || span < everyMinutes) {
+    throw new Error("Active hours must span at least one interval");
+  }
+  return { start: activeHours.start, end: activeHours.end };
+}
+
 function cleanSchedule(schedule: RoutineSchedule): RoutineSchedule {
   if (schedule?.type === "once") {
     const at = Number(schedule.at);
@@ -380,7 +441,7 @@ function cleanSchedule(schedule: RoutineSchedule): RoutineSchedule {
   }
   if (schedule?.type === "daily") {
     const time = String(schedule.time ?? "");
-    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) throw new Error("Time must use HH:MM");
+    if (!TIME.test(time)) throw new Error("Time must use HH:MM");
     return { type: "daily", time, weekdays: cleanDays(schedule.weekdays) };
   }
   if (schedule?.type === "interval") {
@@ -396,7 +457,13 @@ function cleanSchedule(schedule: RoutineSchedule): RoutineSchedule {
     ) {
       throw new Error("Choose a valid interval start time");
     }
-    return { type: "interval", everyMinutes, anchorAt };
+    const activeHours = cleanActiveHours(schedule.activeHours, everyMinutes);
+    return {
+      type: "interval",
+      everyMinutes,
+      anchorAt,
+      ...(activeHours ? { activeHours } : {}),
+    };
   }
   throw new Error("Choose a supported schedule");
 }
@@ -413,11 +480,18 @@ function loadSchedule(value: unknown): RoutineSchedule | null {
 export function nextOccurrence(schedule: RoutineSchedule, after: number): number | null {
   if (schedule.type === "once") return schedule.at > after ? schedule.at : null;
   if (schedule.type === "interval") {
-    if (schedule.anchorAt > after) return schedule.anchorAt;
     const intervalMs = schedule.everyMinutes * 60_000;
-    const intervalsElapsed = Math.floor((after - schedule.anchorAt) / intervalMs);
-    const candidate = schedule.anchorAt + (intervalsElapsed + 1) * intervalMs;
-    return Number.isSafeInteger(candidate) && candidate <= MAX_DATE_MS ? candidate : null;
+    let candidate = schedule.anchorAt > after
+      ? schedule.anchorAt
+      : schedule.anchorAt + (Math.floor((after - schedule.anchorAt) / intervalMs) + 1) * intervalMs;
+    if (!Number.isSafeInteger(candidate) || candidate > MAX_DATE_MS) return null;
+    if (!schedule.activeHours) return candidate;
+    for (let step = 0; step < intervalTickBound(schedule.everyMinutes); step++) {
+      if (withinActiveHours(schedule.activeHours, candidate)) return candidate;
+      candidate += intervalMs;
+      if (!Number.isSafeInteger(candidate) || candidate > MAX_DATE_MS) return null;
+    }
+    return null;
   }
   const [hour, minute] = schedule.time.split(":").map(Number);
   const weekdays = new Set(cleanDays(schedule.weekdays));
@@ -436,7 +510,13 @@ function latestIntervalOccurrence(
 ): number | null {
   if (schedule.anchorAt > at) return null;
   const intervalMs = schedule.everyMinutes * 60_000;
-  return schedule.anchorAt + Math.floor((at - schedule.anchorAt) / intervalMs) * intervalMs;
+  let candidate = schedule.anchorAt + Math.floor((at - schedule.anchorAt) / intervalMs) * intervalMs;
+  if (!schedule.activeHours) return candidate;
+  for (let step = 0; step < intervalTickBound(schedule.everyMinutes) && candidate >= schedule.anchorAt; step++) {
+    if (withinActiveHours(schedule.activeHours, candidate)) return candidate;
+    candidate -= intervalMs;
+  }
+  return null;
 }
 
 function sanitizeInput(input: RoutineInput): Omit<Routine, "id" | "createdAt" | "updatedAt" | "nextRunAt"> {

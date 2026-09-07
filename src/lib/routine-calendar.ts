@@ -136,6 +136,7 @@ export function scheduleAt(schedule: RoutineSchedule, occurrenceAt: number, next
       type: "interval",
       everyMinutes: schedule.everyMinutes,
       anchorAt: schedule.anchorAt + (nextAt - occurrenceAt),
+      ...(schedule.activeHours ? { activeHours: { ...schedule.activeHours } } : {}),
     };
   }
   const dayDelta = Math.round((startOfDay(nextAt) - startOfDay(occurrenceAt)) / 86_400_000);
