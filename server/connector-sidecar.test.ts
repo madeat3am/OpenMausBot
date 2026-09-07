@@ -43,6 +43,103 @@ afterEach(async () => {
   temporary.splice(0).forEach((path) => rmSync(path, { recursive: true, force: true }));
 });
 
+type SidecarFixture = {
+  port: number;
+  token: string;
+  requestLog: string;
+  pidLog: string;
+  post: (sessionId: string, payload: Record<string, unknown>) => Promise<{
+    response: Response;
+    body: { response?: Record<string, unknown>; sessionId?: string };
+  }>;
+  health: () => Promise<Record<string, unknown>>;
+};
+
+async function startCustomMcpSidecar(mode: "recover" | "generic" | "always-stale" | "ok"): Promise<SidecarFixture> {
+  const dir = mkdtempSync(join(tmpdir(), "omb-sidecar-recovery-"));
+  temporary.push(dir);
+  const port = await freePort();
+  const token = "t".repeat(48);
+  const tokenPath = join(dir, "token");
+  const keyPath = join(dir, "key");
+  const policyPath = join(dir, "policy.json");
+  const connectorConfigPath = join(dir, "connector-config.json");
+  const requestLog = join(dir, "requests");
+  const pidLog = join(dir, "pids");
+  const fixture = join(dir, "mcp.mjs");
+  writeFileSync(tokenPath, token, { mode: 0o600 });
+  writeFileSync(keyPath, Buffer.alloc(32, 13).toString("hex"), { mode: 0o600 });
+  writeFileSync(policyPath, JSON.stringify({ schema: "openmausbot.autonomy-policy.v1", revision: "sidecar-recovery-test", rules: [] }), { mode: 0o600 });
+  writeFileSync(fixture, `
+    import { appendFileSync, existsSync, writeFileSync } from "node:fs";
+    import readline from "node:readline";
+    const [requestLog, pidLog, mode] = process.argv.slice(2);
+    const marker = requestLog + ".marker";
+    const stale = mode === "always-stale" || (mode === "recover" && !existsSync(marker));
+    if (mode === "recover" && stale) writeFileSync(marker, "first", { flag: "wx" });
+    appendFileSync(pidLog, String(process.pid) + "\\n");
+    const input = readline.createInterface({ input: process.stdin, terminal: false });
+    input.on("line", (line) => {
+      appendFileSync(requestLog, line + "\\n");
+      const frame = JSON.parse(line);
+      const error = mode === "generic"
+        ? { code: -32001, message: "provider rejected this request" }
+        : { code: -32001, message: "no session; send initialize first" };
+      const response = stale || mode === "generic"
+        ? { jsonrpc: "2.0", id: frame.id, error }
+        : { jsonrpc: "2.0", id: frame.id, result: { ok: true } };
+      process.stdout.write(JSON.stringify(response) + "\\n");
+    });
+  `, { mode: 0o600 });
+  writeFileSync(connectorConfigPath, JSON.stringify({
+    mcpServers: { notes: { command: process.execPath, args: [fixture, requestLog, pidLog, mode], env: {}, enabled: true } },
+  }), { mode: 0o600 });
+
+  child = spawn(process.execPath, ["--experimental-strip-types", ENTRY], {
+    env: {
+      ...process.env,
+      OMB_DATA_DIR: join(dir, "data"),
+      OMB_CONNECTOR_SIDECAR_HOST: "127.0.0.1",
+      OMB_CONNECTOR_SIDECAR_PORT: String(port),
+      OMB_CONNECTOR_SIDECAR_TOKEN_FILE: tokenPath,
+      OMB_AUTONOMY_POLICY_PATH: policyPath,
+      OMB_AUTONOMY_SIGNING_KEY_FILE: keyPath,
+      OMB_CONNECTOR_CONFIG_FILE: connectorConfigPath,
+      OMB_MCP_INLINE_SECRETS: "reject",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("sidecar did not start")), 5_000);
+    child!.stderr!.on("data", (chunk) => {
+      if (!String(chunk).includes("connector sidecar listening")) return;
+      clearTimeout(timer);
+      resolve();
+    });
+    child!.once("exit", (code) => reject(new Error(`sidecar exited ${code}`)));
+  });
+
+  return {
+    port,
+    token,
+    requestLog,
+    pidLog,
+    post: async (sessionId, payload) => {
+      const response = await fetch(`http://127.0.0.1:${port}/v1/custom-mcp`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ server: "notes", sessionId, payload }),
+      });
+      return { response, body: await response.json() as { response?: Record<string, unknown>; sessionId?: string } };
+    },
+    health: async () => await (await fetch(`http://127.0.0.1:${port}/health`)).json() as Record<string, unknown>,
+  };
+}
+
+function readJsonLines(path: string): unknown[] {
+  return readFileSync(path, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+}
+
 describe("connector execution sidecar", () => {
   it("enforces policy atomically and consumes exact exceptions once", async () => {
     let providerCalls = 0;
@@ -190,5 +287,59 @@ describe("connector execution sidecar", () => {
     expect((await control("setEnabled", ["notes", true])).response.status).toBe(200);
     expect((await control("remove", ["notes"])).response.status).toBe(200);
     expect(JSON.parse(readFileSync(mcpSecretsPath, "utf8")).servers.notes).toBeUndefined();
+  });
+
+  it("respawns once and replays the same request for a stale session response", async () => {
+    const fixture = await startCustomMcpSidecar("recover");
+    const payload = { jsonrpc: "2.0", id: "recover-1", method: "tools/list", params: { unchanged: true } };
+    const result = await fixture.post("bot-thread-notes", payload);
+
+    expect(result.response.status).toBe(200);
+    expect(result.body.response).toEqual({ jsonrpc: "2.0", id: "recover-1", result: { ok: true } });
+    expect(readJsonLines(fixture.requestLog)).toEqual([payload, payload]);
+    expect(readFileSync(fixture.pidLog, "utf8").trim().split("\n")).toHaveLength(2);
+  });
+
+  it("does not retry a generic -32001 response", async () => {
+    const fixture = await startCustomMcpSidecar("generic");
+    const payload = { jsonrpc: "2.0", id: "generic-1", method: "tools/list" };
+    const result = await fixture.post("bot-thread-notes", payload);
+
+    expect(result.response.status).toBe(200);
+    expect(result.body.response).toEqual({
+      jsonrpc: "2.0",
+      id: "generic-1",
+      error: { code: -32001, message: "provider rejected this request" },
+    });
+    expect(readJsonLines(fixture.requestLog)).toEqual([payload]);
+    expect(readFileSync(fixture.pidLog, "utf8").trim().split("\n")).toHaveLength(1);
+  });
+
+  it("propagates a second stale-session failure after one respawn", async () => {
+    const fixture = await startCustomMcpSidecar("always-stale");
+    const payload = { jsonrpc: "2.0", id: "stale-1", method: "initialize" };
+    const result = await fixture.post("bot-thread-notes", payload);
+
+    expect(result.response.status).toBe(200);
+    expect(result.body.response).toEqual({
+      jsonrpc: "2.0",
+      id: "stale-1",
+      error: { code: -32001, message: "no session; send initialize first" },
+    });
+    expect(readJsonLines(fixture.requestLog)).toEqual([payload, payload]);
+    expect(readFileSync(fixture.pidLog, "utf8").trim().split("\n")).toHaveLength(2);
+  });
+
+  it("reports server name and age for active sessions in health", async () => {
+    const fixture = await startCustomMcpSidecar("ok");
+    const result = await fixture.post("bot-thread-notes", { jsonrpc: "2.0", id: "health-1", method: "tools/list" });
+    expect(result.response.status).toBe(200);
+
+    const health = await fixture.health();
+    expect(health).toMatchObject({ sessions: 1, children: 1 });
+    expect(health.sessionDetails).toEqual([
+      { serverName: "notes", ageMs: expect.any(Number) },
+    ]);
+    expect((health.sessionDetails as Array<{ ageMs: number }>)[0]!.ageMs).toBeGreaterThanOrEqual(0);
   });
 });
