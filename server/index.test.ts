@@ -3184,6 +3184,80 @@ describe("harness HTTP API", () => {
     expect(after).toEqual({ status: 200, body: { servers: [] } });
   });
 
+  it("restarts non-sidecar custom MCP sessions after config mutations", async () => {
+    const serverName = "stale-fixture";
+    const sessionId = "stable-session";
+    const pidLog = join(home, "stale-fixture-pids");
+    const latestPid = () => Number(readFileSync(pidLog, "utf8").trim().split("\n").at(-1));
+    const bot = (await api("POST", "/api/bots")).body.bot;
+    expect((await api("PATCH", `/api/bots/${bot.id}`, {
+      modelSelection: { instanceId: "claude", model: "claude-sonnet-5" },
+    })).status).toBe(200);
+    rmSync(fakeClaudeDump, { force: true });
+    expect((await api("POST", `/api/bots/${bot.id}/messages`, { text: "capture internal token" })).status).toBe(202);
+    const dump = await readJsonFileWhenReady<{
+      mcpConfig: { mcpServers: { agents: { env: { OMB_COMMS_TOKEN: string } } } };
+    }>(fakeClaudeDump);
+    const authorization = `Bearer ${dump.mcpConfig.mcpServers.agents.env.OMB_COMMS_TOKEN}`;
+    expect((await api("POST", `/api/bots/${bot.id}/interrupt`)).status).toBe(200);
+    const relay = async (id: number) => {
+      const response = await fetch(`${BASE}/api/internal/custom-mcp/mcp?server=${serverName}`, {
+        method: "POST",
+        headers: {
+          authorization,
+          "content-type": "application/json",
+          "x-openmaus-mcp-session": sessionId,
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/list" }),
+      });
+      return {
+        status: response.status,
+        body: await response.json() as {
+          result?: { tools?: Array<{ description?: string }> };
+        },
+      };
+    };
+    const definition = (description: string) => ({
+      command: process.execPath,
+      args: ["--experimental-strip-types", FAKE_MCP_SERVER],
+      env: { FAKE_MCP_DESCRIPTION: description, FAKE_MCP_PID_LOG: pidLog },
+      enabled: true,
+    });
+
+    try {
+      expect((await api("POST", "/api/mcp/servers", { name: serverName, ...definition("before") })).status).toBe(201);
+      expect((await api("PATCH", `/api/mcp/servers/${serverName}`, { enabled: true })).status).toBe(200);
+      const before = await relay(1);
+      expect(before.status).toBe(200);
+      expect(before.body.result?.tools?.[0]?.description).toBe("before");
+      const beforePid = latestPid();
+      expect(beforePid).toBeGreaterThan(0);
+
+      expect((await api("PUT", `/api/mcp/servers/${serverName}`, definition("after-put"))).status).toBe(200);
+      const afterPut = await relay(2);
+      expect(afterPut.body.result?.tools?.[0]?.description).toBe("after-put");
+      const afterPutPid = latestPid();
+      expect(afterPutPid).not.toBe(beforePid);
+
+      expect((await api("PATCH", `/api/mcp/servers/${serverName}`, { enabled: false })).status).toBe(200);
+      expect((await api("PATCH", `/api/mcp/servers/${serverName}`, { enabled: true })).status).toBe(200);
+      const afterToggle = await relay(3);
+      expect(afterToggle.status).toBe(200);
+      const afterTogglePid = latestPid();
+      expect(afterTogglePid).not.toBe(afterPutPid);
+
+      expect((await api("DELETE", `/api/mcp/servers/${serverName}`)).status).toBe(200);
+      expect((await api("POST", "/api/mcp/servers", { name: serverName, ...definition("after-delete") })).status).toBe(201);
+      expect((await api("PATCH", `/api/mcp/servers/${serverName}`, { enabled: true })).status).toBe(200);
+      const afterDelete = await relay(4);
+      expect(afterDelete.body.result?.tools?.[0]?.description).toBe("after-delete");
+      expect(latestPid()).not.toBe(afterTogglePid);
+    } finally {
+      await api("DELETE", `/api/mcp/servers/${serverName}`);
+      await api("DELETE", `/api/bots/${bot.id}`);
+    }
+  });
+
   it("round-trips the UI language and clears it back to system", async () => {
     const set = await api("PUT", "/api/config", { language: "de" });
     expect(set.status).toBe(200);

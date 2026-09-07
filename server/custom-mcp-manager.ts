@@ -197,7 +197,10 @@ export class CustomMcpManager {
     });
     child.stdout.on("data", (chunk: Buffer) => splitter.push(chunk));
     child.stderr.resume();
-    child.once("error", () => fail("could not start configured command"));
+    child.once("error", () => {
+      fail("could not start configured command");
+      if (this.sessions.get(id) === session) this.sessions.delete(id);
+    });
     child.once("close", () => this.finish(session, publicError("configured command stopped")));
     return session;
   }
