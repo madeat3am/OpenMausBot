@@ -19,8 +19,9 @@ cd android
 ./gradlew :core:test :app:testDebugUnitTest :app:assembleDebug
 ```
 
-That is the same command CI runs (`.github/workflows/ci.yml`). Gradle caches
-aggressively — a suspiciously fast `BUILD SUCCESSFUL` usually means nothing ran.
+Run that command locally when changing the Android companion. GitHub Actions is
+disabled for this fork. Gradle caches aggressively — a suspiciously fast
+`BUILD SUCCESSFUL` usually means nothing ran.
 Prefix `cleanTest` when a test count matters:
 
 ```sh
