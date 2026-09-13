@@ -47,23 +47,13 @@ launching Electron, run `node scripts/prepare-cloudflared.mjs --current`.
 
 For Ubuntu installation and real desktop checks, see [`docs/linux-desktop.md`](docs/linux-desktop.md).
 
-## Ubuntu release checklist
+## Release status
 
-Ubuntu release packages must come from the manual **Package Ubuntu** workflow on an exact release commit or tag,
-not from a developer workstation. The Ubuntu 24.04 runner builds and verifies both formats, launches the unpacked
-app and AppImage, routes `click` and `type_text` through the overlay-free bundled Cua runtime on Xorg, runs the
-fail-closed Wayland CUA smoke,
-and produces one release artifact containing:
-
-- the versioned `.deb` and AppImage;
-- stable `OpenMausBot-amd64.deb` and `OpenMausBot.AppImage` copies used by the latest-download links;
-- `SHA256SUMS-ubuntu-x64.txt` covering both versioned and stable names.
-
-Before publishing, confirm that `package.json` has the release version and dispatch the workflow against the same
-commit used for the other platforms. Attach all five Ubuntu files to the matching release in the separate
-[OpenMausBot releases](https://github.com/milind-soni/OpenMausBot/releases). Then verify the checksum
-file and install the `.deb` plus launch the AppImage in a clean Ubuntu 24.04 x86_64 GNOME environment. Never combine
-packages built from different commits under one version.
+The `madeat3am/OpenMausBot` fork no longer publishes Ubuntu, Windows, macOS, or
+mobile releases. Its GitHub release, package, and legacy mirror workflows are
+retired, and GitHub Actions is disabled. The commands above remain useful for
+local development checks; they do not qualify or publish a release. See
+[`.github/README.md`](.github/README.md) for the execution boundary.
 
 ## Repo map
 
